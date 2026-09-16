@@ -4,6 +4,7 @@
 //! meets.
 
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use iced::widget::container;
 use iced::{
@@ -14,21 +15,25 @@ use iced_layershell::reexport::{
     Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
 };
 use iced_layershell::settings::{LayerShellSettings, Settings};
+use librift::battery::Battery;
 use librift::os::{self, Action};
-use librift::quasar;
+use librift::{bluetooth, network, quasar, session};
 
 use crate::answer;
 use crate::bar;
 use crate::clock;
 use crate::control::{self, Command};
+use crate::dialog::{self, Ask, Dialog};
 use crate::dock::{self, Dock};
 use crate::horizon::{self, Open};
 use crate::launcher::{self, App};
 use crate::menu::{self, Menu, Results};
 use crate::nu;
 use crate::route::{self, Interpretation};
-use crate::status::{Battery, Status, Volume};
+use crate::status::{self, Status, Volume};
+use crate::system;
 use crate::theme::Palette;
+use crate::watch::{self, Latest};
 
 /// The interface font.
 pub const FONT: Font = Font {
@@ -54,15 +59,37 @@ fn kept() -> &'static Mutex<String> {
     KEPT.get_or_init(|| Mutex::new(String::new()))
 }
 
-/// The shell's state. The bar and the dock are always there; a menu comes and goes with its
-/// surface.
+/// How long after the compositor closed a menu a press of that menu's own button is the click that
+/// closed it, and not a click to open it again.
+const REOPEN: Duration = Duration::from_millis(400);
+
+/// How long a network may take to come up after it was picked.
+const JOIN_WAIT: Duration = Duration::from_secs(45);
+
+/// The shell's state. The bar and the dock are always there; a menu or a dialog comes and goes with
+/// its surface.
 struct Lens {
     look: Palette,
     apps: Vec<App>,
     clock: String,
     status: Status,
     menu: Option<Menu>,
+    system: Option<system::Menu>,
+    dialog: Option<Dialog>,
     dock: Dock,
+    /// The menu the compositor closed by taking the keyboard away, and when.
+    dismissed: Option<(Closed, Instant)>,
+    /// Sets the volume the slider asks for, on a thread of its own.
+    volume: Latest<u8>,
+    /// Sets the brightness the slider asks for.
+    brightness: Latest<u8>,
+}
+
+/// Which of the bar's menus closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closed {
+    Applications,
+    System,
 }
 
 /// What happens to the shell.
@@ -70,10 +97,30 @@ struct Lens {
 pub enum Message {
     /// The minute turned, and this is the clock's line now.
     Tick(String),
-    /// What the status sources say now.
-    Status(Status),
+    /// What `NetworkManager` says now, or why it did not answer.
+    Network(Result<network::Picture, String>),
+    /// What `UPower` says about the battery now.
+    Battery(Option<Battery>),
+    /// What `BlueZ` says now.
+    Bluetooth(Option<bluetooth::Picture>),
+    /// The default sink's volume now.
+    Sound(Option<Volume>),
+    /// The backlight now.
+    Brightness(Option<u8>),
     /// The Applications button, or Mod+Space.
     ToggleMenu,
+    /// The status icons in the bar.
+    ToggleSystem,
+    /// A row, a switch or a slider of the system menu.
+    System(system::Event),
+    /// Something the system menu asked for finished, or what went wrong.
+    Acted(Result<(), String>),
+    /// A dialog's field or buttons.
+    Dialog(dialog::Event),
+    /// What a dialog asked for finished, or what went wrong. The id is the dialog's.
+    DialogDone(window::Id, Result<(), String>),
+    /// Enter, which a dialog with no field takes as its default button.
+    Enter,
     /// New words in the field.
     Input(String),
     /// Enter in the field.
@@ -110,18 +157,22 @@ pub enum Message {
     OpenItemMenu(window::Id, u32, i32),
     /// Open the menu's surface, this tall.
     Open(window::Id, u32),
-    /// The menu's surface has to grow or shrink.
-    Resize(window::Id, u32),
+    /// Open the system menu's surface, this tall.
+    OpenSystem(window::Id, u32),
+    /// Open a dialog's surface, this tall.
+    OpenDialog(window::Id, u32),
+    /// A menu's surface has to grow or shrink to this width and height.
+    Resize(window::Id, u32, u32),
     /// Close a surface.
     Close(window::Id),
     /// A surface took or lost the keyboard.
     Focus(window::Id, bool),
 }
 
-// the layer-shell runtime asks every message whether it is one of its own actions. the three that
-// are carry a surface: opening the menu, resizing it as the list grows, and closing it. an action
-// that makes a new surface must not name it as the target, or the runtime waits for a surface
-// that does not exist yet
+// the layer-shell runtime asks every message whether it is one of its own actions. the ones that
+// are carry a surface: opening a menu, a dialog or the dock, resizing a menu as it grows, and
+// closing one. an action that makes a new surface must not name it as the target, or the runtime
+// waits for a surface that does not exist yet
 impl TryFrom<Message> for LayerShellCustomActionWithId {
     type Error = Message;
 
@@ -148,9 +199,23 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
                     id,
                 },
             )),
-            Message::Resize(id, height) => Ok(Self::new(
+            Message::OpenSystem(id, height) => Ok(Self::new(
+                None,
+                LayerShellCustomAction::NewLayerShell {
+                    settings: system_surface(height),
+                    id,
+                },
+            )),
+            Message::OpenDialog(id, height) => Ok(Self::new(
+                None,
+                LayerShellCustomAction::NewLayerShell {
+                    settings: dialog_surface(height),
+                    id,
+                },
+            )),
+            Message::Resize(id, width, height) => Ok(Self::new(
                 Some(id),
-                LayerShellCustomAction::SizeChange((menu::WIDTH, height)),
+                LayerShellCustomAction::SizeChange((width, height)),
             )),
             Message::Close(id) => Ok(Self::new(Some(id), LayerShellCustomAction::RemoveWindow)),
             other => Err(other),
@@ -206,6 +271,40 @@ fn item_menu_surface(height: u32, left: i32) -> NewLayerShellSettings {
         output_option: OutputOption::Active,
         events_transparent: false,
         namespace: Some("lens-menu".to_string()),
+    }
+}
+
+/// The system menu's surface: on the overlay layer, hanging under the bar inside the working area,
+/// its right edge under the status icons. It takes the keyboard the way the Applications menu
+/// does, so a click anywhere else closes it.
+fn system_surface(height: u32) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((system::WIDTH, height)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top | Anchor::Right,
+        exclusive_zone: Some(0),
+        margin: Some((0, i32::try_from(system::PAD).unwrap_or(0), 0, 0)),
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::Active,
+        events_transparent: false,
+        namespace: Some("lens-menu".to_string()),
+    }
+}
+
+/// A dialog's surface: on the overlay layer in the middle of the screen, anchored to no edge. It
+/// holds the keyboard until it is answered, so a click on a window does not throw away what was
+/// typed into it.
+fn dialog_surface(height: u32) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((dialog::WIDTH, height)),
+        layer: Layer::Overlay,
+        anchor: Anchor::empty(),
+        exclusive_zone: Some(0),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::Exclusive,
+        output_option: OutputOption::Active,
+        events_transparent: false,
+        namespace: Some("lens-dialog".to_string()),
     }
 }
 
@@ -265,14 +364,29 @@ fn boot(look: Palette, apps: Vec<App>) -> (Lens, Task<Message>) {
         clock: clock::now(),
         status: Status::default(),
         menu: None,
+        system: None,
+        dialog: None,
         dock,
+        dismissed: None,
+        volume: Latest::new(|level| report(status::set_volume(level))),
+        brightness: Latest::new(|level| report(status::set_brightness(level))),
     };
     remember(&state);
     (state, opening)
 }
 
 fn subscription(_: &Lens) -> Subscription<Message> {
-    Subscription::batch([keys(), focus(), terminal(), ticker(), windows()])
+    Subscription::batch([
+        keys(),
+        focus(),
+        terminal(),
+        ticker(),
+        windows(),
+        watch::network(),
+        watch::battery(),
+        watch::bluetooth(),
+        watch::sound(),
+    ])
 }
 
 // the field takes the printable keys for itself, so these come from every event, not only the
@@ -283,6 +397,7 @@ fn keys() -> Subscription<Message> {
             keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::Move(1)),
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::Move(-1)),
+            keyboard::Key::Named(keyboard::key::Named::Enter) => Some(Message::Enter),
             _ => None,
         },
         _ => None,
@@ -327,9 +442,9 @@ fn terminal() -> Subscription<Message> {
     })
 }
 
-// the clock and the status, once a minute on the minute, read on a thread of its own because it
-// runs child processes. the clock goes first: asking the status sources takes a moment, and the
-// time on the bar should turn with the minute
+// the clock, once a minute on the minute, read on a thread of its own because it runs a child
+// process. the volume is read in the same tick: pw-mon does not say when the default sink becomes
+// another one, and a minute is soon enough for that
 fn ticker() -> Subscription<Message> {
     Subscription::run(|| {
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
@@ -339,7 +454,7 @@ fn ticker() -> Subscription<Message> {
                     return;
                 }
                 if sender
-                    .unbounded_send(Message::Status(Status::read()))
+                    .unbounded_send(Message::Sound(status::volume()))
                     .is_err()
                 {
                     return;
@@ -373,11 +488,48 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             state.clock = now;
             Task::none()
         }
-        Message::Status(status) => {
-            state.status = status;
+        Message::Network(picture) => {
+            if let Err(why) = &picture {
+                eprintln!("lens: {why}");
+            }
+            state.status.network = picture.ok();
+            Task::none()
+        }
+        Message::Battery(battery) => {
+            state.status.battery = battery;
+            Task::none()
+        }
+        Message::Bluetooth(bluetooth) => {
+            state.status.bluetooth = bluetooth;
+            Task::none()
+        }
+        Message::Sound(volume) => {
+            state.status.volume = volume;
+            Task::none()
+        }
+        Message::Brightness(brightness) => {
+            state.status.brightness = brightness;
             Task::none()
         }
         Message::ToggleMenu => toggle(state),
+        Message::ToggleSystem => toggle_system(state),
+        Message::System(event) => system_event(state, event),
+        Message::Acted(result) => {
+            match state.system.as_mut() {
+                Some(menu) => {
+                    menu.notice = None;
+                    menu.error = result.err();
+                }
+                None => report(result),
+            }
+            Task::none()
+        }
+        Message::Dialog(event) => dialog_event(state, event),
+        Message::DialogDone(id, result) => dialog_done(state, id, result),
+        Message::Enter => match state.dialog.as_ref().map(|dialog| &dialog.ask) {
+            Some(Ask::Command(_)) => dialog_event(state, dialog::Event::Confirm),
+            _ => Task::none(),
+        },
         Message::Input(value) => write(state, value),
         Message::Submit => submit(state),
         Message::Move(step) => state.menu.as_mut().map_or_else(Task::none, |menu| {
@@ -423,6 +575,8 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
         Message::Open(..)
         | Message::OpenDock(_)
         | Message::OpenItemMenu(..)
+        | Message::OpenSystem(..)
+        | Message::OpenDialog(..)
         | Message::Resize(..)
         | Message::Close(..) => Task::none(),
     };
@@ -435,9 +589,294 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
 fn toggle(state: &mut Lens) -> Task<Message> {
     if state.menu.is_some() {
         Task::done(Message::Dismiss)
+    } else if state.dialog.is_some() || recently(state, Closed::Applications) {
+        Task::none()
     } else {
         open(state)
     }
+}
+
+/// Whether the compositor closed this menu a moment ago. The press that took the keyboard away
+/// from it may be on its own button, whose click then arrives after it closed.
+fn recently(state: &Lens, which: Closed) -> bool {
+    state
+        .dismissed
+        .is_some_and(|(closed, when)| closed == which && when.elapsed() < REOPEN)
+}
+
+/// Open the system menu when it is closed, close it when it is open. A dialog holds the keyboard,
+/// so nothing opens over it.
+fn toggle_system(state: &mut Lens) -> Task<Message> {
+    if state.system.is_some() {
+        return close_system(state);
+    }
+    if state.dialog.is_some() || recently(state, Closed::System) {
+        return Task::none();
+    }
+    let id = window::Id::unique();
+    let height = system::height(&system::parts(&state.status, None));
+    state.system = Some(system::Menu::new(id, height));
+    // the backlight is read as the menu opens, and the card is asked to look for networks, so the
+    // list is fresh by the time the owner reads it
+    let reading = Task::perform(async { status::brightness() }, Message::Brightness);
+    let device = state
+        .status
+        .network
+        .as_ref()
+        .and_then(|picture| picture.wireless.as_ref())
+        .map(|wireless| wireless.path.clone());
+    if let Some(device) = device {
+        // what the scan finds comes back through NetworkManager's signals
+        std::thread::spawn(move || network::scan(&device));
+    }
+    Task::batch([Task::done(Message::OpenSystem(id, height)), reading])
+}
+
+fn close_system(state: &mut Lens) -> Task<Message> {
+    state
+        .system
+        .take()
+        .map_or_else(Task::none, |menu| Task::done(Message::Close(menu.id)))
+}
+
+/// A row, a switch or a slider of the system menu.
+fn system_event(state: &mut Lens, event: system::Event) -> Task<Message> {
+    use system::Event;
+    match event {
+        Event::Volume(level) => {
+            if let Some(menu) = state.system.as_mut() {
+                menu.volume = Some(level);
+            }
+            state.status.volume = Some(Volume {
+                level: u16::from(level),
+                muted: false,
+            });
+            state.volume.send(level);
+            Task::none()
+        }
+        Event::VolumeSet => {
+            if let Some(menu) = state.system.as_mut() {
+                menu.volume = None;
+            }
+            Task::none()
+        }
+        Event::Mute => off_thread(status::toggle_mute, Message::Acted),
+        Event::Brightness(level) => {
+            if let Some(menu) = state.system.as_mut() {
+                menu.brightness = Some(level);
+            }
+            state.status.brightness = Some(level);
+            state.brightness.send(level);
+            Task::none()
+        }
+        Event::BrightnessSet => {
+            if let Some(menu) = state.system.as_mut() {
+                menu.brightness = None;
+            }
+            Task::none()
+        }
+        Event::Wifi(on) => off_thread(move || network::set_wifi(on), Message::Acted),
+        Event::Join(at) => join(state, at),
+        Event::Bluetooth(on) => {
+            let Some(adapter) = state
+                .status
+                .bluetooth
+                .as_ref()
+                .map(|bluetooth| bluetooth.adapter.clone())
+            else {
+                return Task::none();
+            };
+            off_thread(move || bluetooth::set_powered(&adapter, on), Message::Acted)
+        }
+        Event::Device(at) => {
+            let Some(device) = state
+                .status
+                .bluetooth
+                .as_ref()
+                .and_then(|bluetooth| bluetooth.devices.get(at))
+                .cloned()
+            else {
+                return Task::none();
+            };
+            if let Some(menu) = state.system.as_mut() {
+                let doing = if device.connected {
+                    "Disconnecting"
+                } else {
+                    "Connecting to"
+                };
+                menu.error = None;
+                menu.notice = Some(format!("{doing} {}", device.name));
+            }
+            off_thread(
+                move || bluetooth::connect(&device.path, !device.connected),
+                Message::Acted,
+            )
+        }
+        Event::Lock => {
+            // the lock screen covers everything, the menu included, and comes back to a desktop
+            // with the menu closed
+            let closing = close_system(state);
+            Task::batch([closing, off_thread(session::lock, Message::Acted)])
+        }
+        Event::LogOut => ask_first(state, &["power", "logout"]),
+        Event::Restart => ask_first(state, &["power", "reboot"]),
+        Event::ShutDown => ask_first(state, &["power", "off"]),
+    }
+}
+
+/// A network in the system menu was picked. One that needs a password nobody saved asks for it in
+/// a dialog; any other is joined at once.
+fn join(state: &mut Lens, at: usize) -> Task<Message> {
+    let picked = state
+        .status
+        .network
+        .as_ref()
+        .and_then(|picture| picture.wireless.as_ref())
+        .and_then(|wireless| {
+            wireless
+                .networks
+                .get(at)
+                .map(|network| (wireless.path.clone(), network.clone()))
+        });
+    let Some((device, network)) = picked else {
+        return Task::none();
+    };
+    if network.active {
+        return Task::none();
+    }
+    if network.security.joinable() && network.security.secured() && network.saved.is_none() {
+        return open_dialog(state, Ask::Password { network, device });
+    }
+    let Some(menu) = state.system.as_mut() else {
+        return Task::none();
+    };
+    if !network.security.joinable() {
+        menu.notice = None;
+        menu.error = Some(format!(
+            "{} asks for a user name, which the menu cannot do yet.",
+            network.name
+        ));
+        return Task::none();
+    }
+    menu.error = None;
+    menu.notice = Some(format!("Connecting to {}", network.name));
+    off_thread(
+        move || {
+            let joining = network::join(&device, &network, None)?;
+            network::wait(&joining, JOIN_WAIT)
+                .map_err(|_| format!("Could not connect to {}.", network.name))
+        },
+        Message::Acted,
+    )
+}
+
+/// Ask before a command that ends the session or the machine's run.
+fn ask_first(state: &mut Lens, words: &[&str]) -> Task<Message> {
+    match os::parse(words) {
+        Some(Ok(action)) => open_dialog(state, Ask::Command(action)),
+        _ => Task::none(),
+    }
+}
+
+/// Open a dialog in the middle of the screen. The system menu closes: the dialog takes the
+/// keyboard, and the question is the owner's whole attention.
+fn open_dialog(state: &mut Lens, ask: Ask) -> Task<Message> {
+    let closing = close_system(state);
+    if state.dialog.is_some() {
+        return closing;
+    }
+    let found = Dialog::new(window::Id::unique(), ask);
+    let opening = Task::done(Message::OpenDialog(found.id, found.height()));
+    state.dialog = Some(found);
+    Task::batch([closing, opening])
+}
+
+fn close_dialog(state: &mut Lens) -> Task<Message> {
+    state
+        .dialog
+        .take()
+        .map_or_else(Task::none, |found| Task::done(Message::Close(found.id)))
+}
+
+/// A dialog's field or buttons.
+fn dialog_event(state: &mut Lens, event: dialog::Event) -> Task<Message> {
+    let Some(found) = state.dialog.as_mut() else {
+        return Task::none();
+    };
+    match event {
+        dialog::Event::Input(value) => {
+            found.input = value;
+            found.error = None;
+            Task::none()
+        }
+        dialog::Event::Cancel => close_dialog(state),
+        dialog::Event::Confirm => {
+            if !found.ready() {
+                return Task::none();
+            }
+            found.busy = true;
+            found.error = None;
+            let id = found.id;
+            match found.ask.clone() {
+                Ask::Command(action) => off_thread(
+                    move || os::run(&action).map(|_| ()),
+                    move |result| Message::DialogDone(id, result),
+                ),
+                Ask::Password { network, device } => {
+                    let password = found.input.clone();
+                    off_thread(
+                        move || {
+                            let joining = network::join(&device, &network, Some(&password))?;
+                            network::wait(&joining, JOIN_WAIT).map_err(|_| {
+                                format!(
+                                    "Could not connect to {}. Check the password and try again.",
+                                    network.name
+                                )
+                            })
+                        },
+                        move |result| Message::DialogDone(id, result),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// What a dialog asked for finished. It closes when it worked, and says what went wrong when it
+/// did not, with the cursor back in its field.
+fn dialog_done(state: &mut Lens, id: window::Id, result: Result<(), String>) -> Task<Message> {
+    let Some(found) = state.dialog.as_mut().filter(|found| found.id == id) else {
+        return Task::none();
+    };
+    match result {
+        Ok(()) => close_dialog(state),
+        Err(why) => {
+            found.busy = false;
+            found.error = Some(why);
+            dialog::focus_field()
+        }
+    }
+}
+
+/// Run something that asks a service or a program on a thread of its own, so the shell keeps
+/// drawing while it waits, and hand back how it went.
+fn off_thread<W, D>(work: W, done: D) -> Task<Message>
+where
+    W: FnOnce() -> Result<(), String> + Send + 'static,
+    D: Fn(Result<(), String>) -> Message + Send + 'static,
+{
+    Task::perform(
+        async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(work());
+            });
+            receiver
+                .await
+                .unwrap_or_else(|_| Err("It stopped before it finished.".to_string()))
+        },
+        done,
+    )
 }
 
 fn open(state: &mut Lens) -> Task<Message> {
@@ -461,9 +900,15 @@ fn close(state: &mut Lens) -> Task<Message> {
         .map_or_else(Task::none, |menu| Task::done(Message::Close(menu.id)))
 }
 
-/// Escape clears the field first, the way a search entry does, and closes the menu when there is
-/// nothing left to clear.
+/// Escape cancels a dialog and closes the system menu. In the Applications menu it clears the field
+/// first, the way a search entry does, and closes the menu when there is nothing left to clear.
 fn escape(state: &mut Lens) -> Task<Message> {
+    if state.dialog.is_some() {
+        return close_dialog(state);
+    }
+    if state.system.is_some() {
+        return close_system(state);
+    }
     let Lens { apps, menu, .. } = state;
     match menu.as_mut() {
         None => Task::none(),
@@ -568,9 +1013,23 @@ fn report(done: Result<(), String>) {
 }
 
 /// A surface took or lost the keyboard. A menu closes when it loses it, which is what happens
-/// when anything outside it is clicked; when the Applications menu takes it, the cursor goes in
-/// the field.
+/// when anything outside it is clicked; when the Applications menu or a password dialog takes it,
+/// the cursor goes in the field.
 fn focused(state: &mut Lens, id: window::Id, has: bool) -> Task<Message> {
+    if let Some(found) = state.dialog.as_ref().filter(|found| found.id == id) {
+        return if has && matches!(found.ask, Ask::Password { .. }) {
+            dialog::focus_field()
+        } else {
+            Task::none()
+        };
+    }
+    if state.system.as_ref().is_some_and(|menu| menu.id == id) {
+        if has {
+            return Task::none();
+        }
+        state.dismissed = Some((Closed::System, Instant::now()));
+        return close_system(state);
+    }
     if state.dock.menu.as_ref().is_some_and(|menu| menu.id == id) {
         return if has {
             Task::none()
@@ -584,6 +1043,7 @@ fn focused(state: &mut Lens, id: window::Id, has: bool) -> Task<Message> {
     if has {
         menu::focus_field()
     } else {
+        state.dismissed = Some((Closed::Applications, Instant::now()));
         Task::done(Message::Dismiss)
     }
 }
@@ -622,17 +1082,25 @@ fn write(state: &mut Lens, words: String) -> Task<Message> {
     })
 }
 
-/// Ask the compositor for a taller or shorter menu when it changed shape.
+/// Ask the compositor for a taller or shorter menu when one changed shape: the Applications menu as
+/// its list grows, the system menu as networks and devices come and go.
 fn resize(state: &mut Lens) -> Task<Message> {
-    let Some(menu) = state.menu.as_mut() else {
-        return Task::none();
-    };
-    let wanted = menu.wanted_height();
-    if wanted == menu.height {
-        return Task::none();
+    let mut tasks = Vec::new();
+    if let Some(menu) = state.menu.as_mut() {
+        let wanted = menu.wanted_height();
+        if wanted != menu.height {
+            menu.height = wanted;
+            tasks.push(Task::done(Message::Resize(menu.id, menu::WIDTH, wanted)));
+        }
     }
-    menu.height = wanted;
-    Task::done(Message::Resize(menu.id, wanted))
+    if let Some(menu) = state.system.as_mut() {
+        let wanted = system::height(&system::parts(&state.status, Some(&*menu)));
+        if wanted != menu.height {
+            menu.height = wanted;
+            tasks.push(Task::done(Message::Resize(menu.id, system::WIDTH, wanted)));
+        }
+    }
+    Task::batch(tasks)
 }
 
 /// What `lens --state` prints: one line per thing the bar shows.
@@ -644,23 +1112,42 @@ fn remember(state: &Lens) {
         lines.push_str(value);
         lines.push('\n');
     };
+    let status = &state.status;
     line("clock", &state.clock);
     line("apps", &state.apps.len().to_string());
-    line("network", &state.status.network.word());
+    line("network", &status::network_word(status.network.as_ref()));
     line(
         "volume",
-        &state
-            .status
+        &status
             .volume
             .map_or_else(|| "none".to_string(), Volume::word),
     );
     line(
         "battery",
-        &state
-            .status
+        &status
             .battery
-            .map_or_else(|| "none".to_string(), Battery::word),
+            .map_or_else(|| "none".to_string(), status::battery_word),
     );
+    line(
+        "brightness",
+        &status
+            .brightness
+            .map_or_else(|| "none".to_string(), |level| level.to_string()),
+    );
+    line("wired", &status::wired_word(status.network.as_ref()));
+    line("wifi", &status::wifi_word(status.network.as_ref()));
+    line(
+        "bluetooth",
+        &status::bluetooth_word(status.bluetooth.as_ref()),
+    );
+    match &state.system {
+        None => line("system", "closed"),
+        Some(menu) => line("system", &format!("open {}x{}", system::WIDTH, menu.height)),
+    }
+    match &state.dialog {
+        None => line("dialog", "closed"),
+        Some(found) => line("dialog", &found.title()),
+    }
     match &state.menu {
         None => line("menu", "closed"),
         Some(menu) => {
@@ -826,6 +1313,12 @@ fn finish(menu: &mut Menu, result: Result<String, String>) {
 }
 
 fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
+    if let Some(found) = state.dialog.as_ref().filter(|found| found.id == id) {
+        return dialog::view(state.look, found);
+    }
+    if let Some(menu) = state.system.as_ref().filter(|menu| menu.id == id) {
+        return system::view(state.look, &state.status, menu);
+    }
     if let Some(menu) = state.menu.as_ref().filter(|menu| menu.id == id) {
         return menu::view(state.look, menu);
     }
@@ -840,6 +1333,7 @@ fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
         &state.clock,
         &state.status,
         state.menu.is_some(),
+        state.system.is_some(),
     ))
     .width(Length::Fill)
     .height(Length::Fill)

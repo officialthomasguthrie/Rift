@@ -1,8 +1,8 @@
 //! The top bar, laid out like Tails: the Applications button at the left, the clock in the middle
-//! of the screen and the status icons at the right. The sizes and the colours below are the ones
-//! the boot test counts.
+//! of the screen and the status icons at the right, which are one button that opens the system
+//! menu. The sizes and the colours below are the ones the boot test counts.
 
-use iced::widget::{button, column, container, row, space, stack, svg, text};
+use iced::widget::{button, column, container, row, space, stack, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
 
 use crate::icons;
@@ -31,17 +31,19 @@ const ICON_GAP: f32 = 8.0;
 /// The button at the left, and the menu it opens.
 pub const APPLICATIONS: &str = "Applications";
 
-/// The bar. `open` is whether the Applications menu is showing, which marks its button.
+/// The bar. `open` is whether the Applications menu is showing and `system` whether the system
+/// menu is, which marks their buttons.
 pub fn view<'a>(
     look: Palette,
     clock: &'a str,
     status: &Status,
     open: bool,
+    system: bool,
 ) -> Element<'a, Message> {
     let items = row![
         applications(look, open),
         space().width(Length::Fill),
-        status_icons(look, status),
+        status_button(look, status, system),
     ]
     .align_y(iced::Center)
     .height(Length::Fill);
@@ -73,56 +75,52 @@ fn applications(look: Palette, open: bool) -> Element<'static, Message> {
         .height(ITEM)
         .padding([0, PAD])
         .on_press(Message::ToggleMenu)
-        .style(move |_: &Theme, state: button::Status| {
-            let fill = if open {
-                Some(look.press)
-            } else {
-                match state {
-                    button::Status::Hovered => Some(look.hover),
-                    button::Status::Pressed => Some(look.press),
-                    _ => None,
-                }
-            };
-            button::Style {
-                background: fill.map(Background::from),
-                text_color: look.text,
-                border: Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: 4.0.into(),
-                },
-                shadow: Shadow::default(),
-                snap: true,
-            }
-        })
+        .style(move |_: &Theme, state| fill(look, open, state))
         .into()
 }
 
-/// The status icons, in the order every desktop puts them: the network, then the volume, then the
-/// battery. An icon is there only when the system has something to say. P1.11 makes them one
-/// button that opens the system menu.
-fn status_icons(look: Palette, status: &Status) -> Element<'static, Message> {
-    let mut names = vec![status.network.icon()];
-    if let Some(volume) = status.volume {
-        names.push(volume.icon().to_string());
-    }
-    if let Some(battery) = status.battery {
-        names.push(battery.icon());
-    }
+/// The status icons, in the order every desktop puts them: the network, Bluetooth while a device is
+/// connected, the volume, then the battery. An icon is there only when the system has something
+/// to say. Together they are one button, which opens the system menu and is marked while it is
+/// open.
+fn status_button(look: Palette, status: &Status, open: bool) -> Element<'static, Message> {
     let mut line = row![].spacing(ICON_GAP).align_y(iced::Center);
-    for name in names {
-        if let Some(path) = icons::find(&name) {
-            line = line.push(
-                svg(svg::Handle::from_path(path))
-                    .width(ICON)
-                    .height(ICON)
-                    .style(move |_: &Theme, _| svg::Style {
-                        color: Some(look.text),
-                    }),
-            );
+    for name in status.icons() {
+        if icons::find(&name).is_some() {
+            line = line.push(icons::symbolic(look.text, &name, ICON));
         }
     }
-    container(line).center_y(Length::Fill).into()
+    button(container(line).center_y(Length::Fill))
+        .height(ITEM)
+        .padding([0, PAD])
+        .on_press(Message::ToggleSystem)
+        .style(move |_: &Theme, state| fill(look, open, state))
+        .into()
+}
+
+/// The fill behind a button of the bar: the pressed one while its menu is open, otherwise what the
+/// pointer is doing.
+fn fill(look: Palette, open: bool, state: button::Status) -> button::Style {
+    let fill = if open {
+        Some(look.press)
+    } else {
+        match state {
+            button::Status::Hovered => Some(look.hover),
+            button::Status::Pressed => Some(look.press),
+            button::Status::Active | button::Status::Disabled => None,
+        }
+    };
+    button::Style {
+        background: fill.map(Background::from),
+        text_color: look.text,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 4.0.into(),
+        },
+        shadow: Shadow::default(),
+        snap: true,
+    }
 }
 
 #[cfg(test)]

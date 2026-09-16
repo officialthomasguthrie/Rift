@@ -1,20 +1,25 @@
 //! Names, D-Bus addresses and paths shared by every Rift component, the OS commands Lens and
-//! the rift command run, the client side of the services on the system bus, the index for
-//! search by meaning, what the system calls itself, and how a drive is written.
+//! the rift command run, the client side of the services on the system bus (Rift's own, and
+//! `NetworkManager`, `BlueZ`, `UPower` and logind for the system menu), the index for search by meaning,
+//! what the system calls itself, and how a drive is written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
 //! which the asking side of the bus turns on, brings in zbus, and only the `disk` feature serde and
 //! getrandom.
 
 pub mod airlock;
+pub mod battery;
+pub mod bluetooth;
 pub mod bus;
 #[cfg(feature = "disk")]
 pub mod disk;
+pub mod network;
 pub mod orbit;
 pub mod os;
 pub mod quasar;
 pub mod release;
 pub mod search;
+pub mod session;
 pub mod vault;
 
 /// Version of the Rift workspace this crate was built from.

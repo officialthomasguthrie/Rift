@@ -1,7 +1,8 @@
 //! lens: the shell. The top bar along the top of the screen, the Applications menu under it,
 //! and four interpreters behind its field: the app launcher, the OS commands, nushell and Quasar.
 //!
-//! `lens` draws the bar and the menu as layer-shell surfaces on the running session. `lens
+//! `lens` draws the bar, the dock, the menus and the dialogs as layer-shell surfaces on the running
+//! session. `lens
 //! --route <words>` prints what the field would do with those words and runs nothing. `lens --do
 //! [--yes] <words>` does it from a terminal instead, with `--yes` standing in for the
 //! confirmation the field asks for. `lens --type <words>`, `lens --enter [<words>]` and
@@ -15,6 +16,8 @@ mod bar;
 mod clock;
 mod control;
 #[cfg(target_os = "linux")]
+mod dialog;
+#[cfg(target_os = "linux")]
 mod dock;
 mod horizon;
 #[cfg(target_os = "linux")]
@@ -27,9 +30,13 @@ mod route;
 #[cfg(target_os = "linux")]
 mod status;
 #[cfg(target_os = "linux")]
+mod system;
+#[cfg(target_os = "linux")]
 mod theme;
 #[cfg(target_os = "linux")]
 mod ui;
+#[cfg(target_os = "linux")]
+mod watch;
 
 use std::env;
 use std::process::ExitCode;

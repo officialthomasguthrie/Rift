@@ -1,6 +1,8 @@
 //! The system bus from a client's side. [`reason`] turns an error reply into the sentence a person
 //! reads. With the `bus` feature this module also opens the connection and the proxies that
-//! [`crate::quasar`] and [`crate::orbit`] ask through.
+//! [`crate::quasar`] and [`crate::orbit`] ask through, the ones for the services Rift did not
+//! write (`NetworkManager`, `BlueZ`, `UPower`, logind), and the signal watches that tell the shell one of
+//! those services has something new to say.
 
 #[cfg(feature = "bus")]
 use std::time::Duration;
@@ -18,7 +20,12 @@ pub(crate) const PROPERTY_TIMEOUT: Duration = Duration::from_secs(10);
 /// that came with it.
 #[must_use]
 pub fn reason(component: Component, error: &str, detail: Option<&str>) -> String {
-    let name = component.display_name();
+    said(component.display_name(), error, detail)
+}
+
+/// The same sentence for a service by the name a person knows it by, `NetworkManager` or `BlueZ`.
+#[must_use]
+pub fn said(name: &str, error: &str, detail: Option<&str>) -> String {
     match error {
         "org.freedesktop.DBus.Error.ServiceUnknown"
         | "org.freedesktop.DBus.Error.NameHasNoOwner" => format!("{name} is not running."),
@@ -68,16 +75,112 @@ fn build(
 /// The sentence for anything that went wrong while talking to `component`.
 #[cfg(feature = "bus")]
 pub(crate) fn sentence(component: Component, error: zbus::Error) -> String {
+    sentence_for(component.display_name(), error)
+}
+
+/// The sentence for anything that went wrong while talking to the service a person knows as `name`.
+#[cfg(feature = "bus")]
+pub(crate) fn sentence_for(name: &str, error: zbus::Error) -> String {
     match error {
-        zbus::Error::MethodError(name, detail, _) => {
-            reason(component, name.as_str(), detail.as_deref())
-        }
-        zbus::Error::FDO(error) => reason(component, error.name().as_str(), error.description()),
+        zbus::Error::MethodError(error, detail, _) => said(name, error.as_str(), detail.as_deref()),
+        zbus::Error::FDO(error) => said(name, error.name().as_str(), error.description()),
         zbus::Error::InputOutput(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-            format!("{} took too long to answer.", component.display_name())
+            format!("{name} took too long to answer.")
         }
-        other => format!("Could not talk to {}: {other}", component.display_name()),
+        other => format!("Could not talk to {name}: {other}"),
     }
+}
+
+/// A proxy for one interface of one object of a service Rift did not write. Nothing is cached, so
+/// a property is read fresh every time.
+#[cfg(feature = "bus")]
+pub(crate) fn object(
+    connection: &zbus::blocking::Connection,
+    service: &'static str,
+    path: &str,
+    interface: &'static str,
+) -> zbus::Result<zbus::blocking::Proxy<'static>> {
+    zbus::blocking::proxy::Builder::new(connection)
+        .destination(service)?
+        .path(path.to_string())?
+        .interface(interface)?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+}
+
+/// Every property of one interface of one object, in one call.
+#[cfg(feature = "bus")]
+pub(crate) fn properties(
+    connection: &zbus::blocking::Connection,
+    service: &'static str,
+    path: &str,
+    interface: &'static str,
+) -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>> {
+    object(connection, service, path, "org.freedesktop.DBus.Properties")?
+        .call("GetAll", &(interface,))
+}
+
+/// Whether a service is running now. Asking this first keeps a call from starting a service that
+/// has nothing to do on this machine, like `BlueZ` with no adapter.
+#[cfg(feature = "bus")]
+pub(crate) fn running(connection: &zbus::blocking::Connection, service: &str) -> bool {
+    zbus::blocking::fdo::DBusProxy::new(connection)
+        .ok()
+        .zip(zbus::names::BusName::try_from(service).ok())
+        .is_some_and(|(proxy, name)| proxy.name_has_owner(name).unwrap_or(false))
+}
+
+/// Call `each` for every signal `service` sends, until `each` says it wants no more. Blocks, so the
+/// caller runs it on a thread of its own. The bus delivers a well-known name's signals from
+/// whoever owns the name at the time, so a service that restarts is followed without asking again.
+///
+/// # Errors
+///
+/// When the bus cannot be reached or closes the connection.
+#[cfg(feature = "bus")]
+pub fn signals<F: FnMut() -> bool>(service: &str, each: F) -> Result<(), String> {
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender(service)
+        .map(zbus::match_rule::Builder::build);
+    watch(rule, each)
+}
+
+/// Call `each` whenever `service` starts or stops, until `each` says it wants no more.
+///
+/// # Errors
+///
+/// When the bus cannot be reached or closes the connection.
+#[cfg(feature = "bus")]
+pub fn owner_changes<F: FnMut() -> bool>(service: &str, each: F) -> Result<(), String> {
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.freedesktop.DBus")
+        .and_then(|builder| builder.interface("org.freedesktop.DBus"))
+        .and_then(|builder| builder.member("NameOwnerChanged"))
+        .and_then(|builder| builder.add_arg(service))
+        .map(zbus::match_rule::Builder::build);
+    watch(rule, each)
+}
+
+#[cfg(feature = "bus")]
+fn watch<F: FnMut() -> bool>(
+    rule: zbus::Result<zbus::MatchRule<'_>>,
+    mut each: F,
+) -> Result<(), String> {
+    let rule = rule.map_err(|e| format!("Could not make a match rule: {e}"))?;
+    let connection = zbus::blocking::Connection::system()
+        .map_err(|e| format!("Could not reach the system bus: {e}"))?;
+    // a burst of signals only has to wake the watcher once, so a short queue is plenty
+    let messages = zbus::blocking::MessageIterator::for_match_rule(rule, &connection, Some(64))
+        .map_err(|e| format!("Could not listen on the system bus: {e}"))?;
+    for message in messages {
+        message.map_err(|e| format!("The system bus failed: {e}"))?;
+        if !each() {
+            return Ok(());
+        }
+    }
+    Err("The system bus closed the connection.".to_string())
 }
 
 #[cfg(test)]

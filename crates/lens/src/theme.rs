@@ -24,6 +24,8 @@ pub struct Palette {
     pub press: Color,
     /// The inside of the field.
     pub field: Color,
+    /// A switch that is off, and the part of a slider past its handle.
+    pub track: Color,
     /// Focus, selection, the active item.
     pub accent: Color,
     /// Text on a selected row.
@@ -59,6 +61,7 @@ pub const DARK: Palette = Palette {
     hover: rgb(0x2a_2a2a),
     press: rgb(0x3c_3c3c),
     field: rgb(0x1e_1e1e),
+    track: rgb(0x54_5454),
     accent: rgb(0x78_aeed),
     selected: rgb(0x1e_1e1e),
     error: rgb(0xe0_6d6d),
@@ -77,6 +80,7 @@ pub const LIGHT: Palette = Palette {
     hover: rgb(0xdf_dfdf),
     press: rgb(0xd0_d0d0),
     field: rgb(0xff_ffff),
+    track: rgb(0xc4_c4c4),
     accent: rgb(0x35_84e4),
     selected: rgb(0xff_ffff),
     error: rgb(0xc0_1c28),
@@ -157,6 +161,7 @@ mod tests {
                 palette.hover,
                 palette.press,
                 palette.field,
+                palette.track,
             ] {
                 assert!(
                     (gray.r - gray.g).abs() < f32::EPSILON,

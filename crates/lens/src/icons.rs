@@ -181,6 +181,22 @@ pub fn draw<'a, Message: 'a>(text: Color, name: Option<&str>, size: f32) -> Elem
     }
 }
 
+/// A symbolic icon by name at this size, painted in one colour, or the same space left empty when no
+/// theme on the machine has it.
+#[must_use]
+pub fn symbolic<'a, Message: 'a>(colour: Color, name: &str, size: f32) -> Element<'a, Message> {
+    let Some(path) = find(name) else {
+        return space().width(size).height(size).into();
+    };
+    svg(svg::Handle::from_path(path))
+        .width(size)
+        .height(size)
+        .style(move |_: &Theme, _| svg::Style {
+            color: Some(colour),
+        })
+        .into()
+}
+
 /// The icon for a strength between 0 and 100, the way GNOME steps them.
 #[must_use]
 pub fn signal(kind: &str, strength: u8) -> String {

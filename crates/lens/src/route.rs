@@ -294,7 +294,13 @@ mod tests {
         assert_eq!(os("power off").args, ["poweroff"]);
         assert_eq!(os("power reboot").args, ["reboot"]);
         assert_eq!(os("power suspend").args, ["suspend"]);
+        assert_eq!(
+            os("power logout").args,
+            ["msg", "action", "quit", "--skip-confirmation"]
+        );
+        assert_eq!(os("power logout").program, "horizon");
         assert!(os("power off").mutating);
+        assert!(os("power logout").mutating);
         assert_eq!(os("power off").summary, "Turn the computer off");
         assert!(matches!(route("power nap", &[]), Interpretation::Usage(_)));
     }

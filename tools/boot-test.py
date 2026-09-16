@@ -97,7 +97,12 @@ their sections, typing an app's name with `lens --type` filters them, and `lens 
 one that is selected, which horizon then lists as a window. The field takes lines from the serial
 shell the same way: a nushell pipeline puts three rows under it, a command with arguments it does
 not know puts a line under it, the first `lens --escape` clears the field and the second closes
-the menu. Killing the shell brings it back, since it is a user unit that restarts. With --models as
+the menu. After the lock screen's own checks a pointer click on the status icons opens the system
+menu at the right of the bar: `lens --state` says the cable is connected and that the vm has no
+wireless card, Bluetooth adapter, backlight or battery, a click on the volume slider changes what
+`wpctl get-volume` reads, a second click on the icons closes the menu, Restart asks first and escape
+says no, and Lock starts the lock screen, which the owner's password unlocks. Killing the shell
+brings it back, since it is a user unit that restarts. With --models as
 well, a question goes through `lens --do`, which prints quasar's answer, and then into the field,
 where the answer shows up as rows under it.
 """
@@ -269,6 +274,20 @@ DOCK_MENU_PAD = 8
 DOCK_MENU_ROW = 28
 # the apps the dock keeps when the owner has said nothing, in their order, from the same file
 DOCK_KEPT = ["firefox", "com.mitchellh.ghostty", "dev.zed.Zed"]
+# lens's system menu, from crates/lens/src/{bar,system}.rs: the bar's padding at each end and the
+# status button's inside it, a status icon, and the menu's width, its margin from the right edge of
+# the screen, its padding, a row, the gap in a row and the space at the end of one, in logical pixels
+BAR_PAD = 8
+STATUS_PAD = 8
+STATUS_ICON = 16
+SYSTEM_WIDTH = 340
+SYSTEM_MARGIN = 8
+SYSTEM_PAD = 8
+SYSTEM_ROW = 32
+SYSTEM_GAP = 8
+SYSTEM_INSET = 8
+# the rows at the bottom of the system menu, in their order
+SESSION_ROWS = ["Lock", "Log out", "Restart", "Shut down"]
 # the app the menu starts, its name in the list and the app id its window has
 MENU_APP = "Ghostty"
 MENU_APP_ID = "com.mitchellh.ghostty"
@@ -282,7 +301,7 @@ WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
 # the words lens --state prints, and how the bar writes the time
 STATE_KEYS = ("clock", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
-              "dock", "workspaces", "item")
+              "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -415,12 +434,13 @@ def ink_in(width, rgb, top, bottom):
     return found
 
 
-def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False):
+def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False, system=None):
     """Count the desktop gray and the console's black in a screendump, and with lens the bar along
     the top with something drawn at its left, in its middle and at its right, the dock along the
     bottom with the apps in it, and with menu the Applications menu under the bar with the field in
     it. rows is a count, or (fewest, most) when the test cannot know how many rows there are: then
-    any count in that range that fits passes. Returns (ok, lines to print)."""
+    any count in that range that fits passes. system is the (width, height) lens says the system
+    menu has, which then hangs under the bar at the right. Returns (ok, lines to print)."""
     gray = black = menu_gray = 0
     bar_like = [0] * height
     # the rows that are part of the menu, and where its gray starts and ends in each
@@ -484,6 +504,22 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
     top = run[0][0] if run else -1
     left, right = (run[0][1], run[0][2]) if run else (-1, -1)
     box = (right - left + 1, len(run)) if run else (0, 0)
+    if system:
+        # the menu's gray starts inside its one pixel border, and its right edge is its margin from
+        # the edge of the screen
+        inside = ((system[0] - 2) * scale, (system[1] - 2) * scale)
+        edge = width - (SYSTEM_MARGIN + 1) * scale - 1
+        below = total - (bar_rows + dock_rows) * width - inside[0] * inside[1]
+        checks += [
+            ("the system menu hangs under the bar at the right",
+             abs(top - bar_rows - 1) <= 2 * scale and abs(right - edge) <= 2 * scale,
+             f"its gray runs from {left},{top} to {right}, the bar ends at {bar_rows}, expected its right at {edge:.0f}"),
+            ("the system menu is as wide and as tall as lens says",
+             abs(box[0] - inside[0]) <= 4 * scale and abs(box[1] - inside[1]) <= 4 * scale,
+             f"{box[0]}x{box[1]}, expected about {inside[0]:.0f}x{inside[1]:.0f}"),
+            ("the desktop background covers the rest", gray >= 0.9 * below, f"{gray} of {below:.0f}"),
+        ]
+        return report("desktop", [f"desktop: {width}x{height}"], checks)
     if not menu:
         below = total - (bar_rows + dock_rows) * width
         checks += [
@@ -759,19 +795,24 @@ def screendump(qmp_path, work, name):
     return read_ppm(ppm)
 
 
-def click(qmp_path, size, at, button="left"):
-    """Click at a point of the screen through the monitor. The tablet's absolute axes run over the
-    whole screen, so a point read off a screendump is a point on it. size and at are (width, height)
-    and (x, y)."""
+def point(qmp_path, size, at):
+    """Move the pointer to a point of the screen through the monitor. The tablet's absolute axes run
+    over the whole screen, so a point read off a screendump is a point on it. size and at are
+    (width, height) and (x, y)."""
     def axis(name, value, whole):
         return {"type": "abs", "data": {"axis": name, "value": round(value * 0x7FFF / whole)}}
 
+    qmp(qmp_path, {"execute": "input-send-event",
+                   "arguments": {"events": [axis("x", at[0], size[0]), axis("y", at[1], size[1])]}})
+
+
+def click(qmp_path, size, at, button="left"):
+    """Click at a point of the screen through the monitor."""
     def press(down):
         return {"execute": "input-send-event",
                 "arguments": {"events": [{"type": "btn", "data": {"down": down, "button": button}}]}}
 
-    qmp(qmp_path, {"execute": "input-send-event",
-                   "arguments": {"events": [axis("x", at[0], size[0]), axis("y", at[1], size[1])]}})
+    point(qmp_path, size, at)
     # the compositor takes the motion first, then the button, or the click lands where the pointer was
     time.sleep(0.3)
     qmp(qmp_path, press(True), press(False))
@@ -1939,7 +1980,8 @@ def main():
                 fail(f"the dock lists {list(items)}, expected the apps it keeps, {DOCK_KEPT}")
             if any(windows for windows, _ in items.values()):
                 fail(f"the dock shows a window before anything started: {items}")
-            # with nothing open horizon has the one workspace, and it is the one on screen
+            # horizon keeps an empty workspace after the last, so there are two with nothing open;
+            # the first of them is the one on screen
             spaces = bar_state("the workspaces in the dock").get("workspaces")
             if not (spaces or "").startswith("1*"):
                 fail(f"the dock says the workspaces are {spaces!r}, expected the one that is on screen")
@@ -1984,7 +2026,9 @@ def main():
             second = wait_for(60, lambda: [win for win in open_windows("horizon's windows")
                                            if win[1] not in (MENU_APP_ID, CONSOLE_APP_ID)])
             if not second:
-                fail(f"{DOCK_APP} opened no window of its own")
+                _, output = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
+                fail(f"{DOCK_APP} opened no window of its own: "
+                     f"{without_console(output).strip()[-400:]!r}")
             other, other_id = second[0][0], second[0][1]
             ok(f"{DOCK_APP} started from a command, window {other} as {other_id}")
 
@@ -2179,6 +2223,147 @@ def main():
                  journals=("lock", "horizon"))
             locked_hint("no", "after unlocking the lock from Mod+L")
             ok("Mod+L locked the session and the owner's password unlocked it")
+
+            # 5e2. the system menu. the status icons at the right of the bar are one button, and a
+            # click on it opens the menu under them. the vm has a sink and a cable and nothing else,
+            # so the menu is the volume slider, the cable, and the session
+            state = bar_state("the state before the system menu")
+            if state.get("system") != "closed":
+                fail(f"lens --state says the system menu is {state.get('system')!r} before anything opened it")
+            if state.get("wired") != "connected":
+                fail(f"lens --state says wired {state.get('wired')!r}, and the vm's cable is up")
+            absent = {key: state.get(key) for key in ("wifi", "bluetooth", "brightness", "battery")}
+            if any(value != "none" for value in absent.values()):
+                fail(f"lens --state says {absent}, and the vm has no wireless card, adapter, backlight or battery")
+            ok(f"lens --state says wired connected and none for {', '.join(absent)}")
+
+            def volume_now():
+                """The default sink's volume as wpctl reads it, or None."""
+                _, output = run("wpctl get-volume @DEFAULT_AUDIO_SINK@", "the sink's volume")
+                found = re.search(r"Volume: (\d+\.\d+)", without_console(output))
+                return float(found.group(1)) if found else None
+
+            def system_open(what):
+                """The size lens says the system menu has, when it is open."""
+                shown = bar_state(what).get("system") or ""
+                if not shown.startswith("open "):
+                    return None
+                return tuple(int(number) for number in shown.split()[1].split("x"))
+
+            width, height, rgb = screendump(args.qmp, work, "system")
+            size = (width, height)
+            bar_rows, _ = bar_and_dock(width, height, bar_gray_rows(width, height, rgb))
+            if not 0.9 * BAR_HEIGHT <= bar_rows <= 3 * BAR_HEIGHT:
+                fail(f"the bar is {bar_rows} rows of {height}, expected about {BAR_HEIGHT}")
+            scale = bar_rows / BAR_HEIGHT
+            # the last status icon is the button's padding and half an icon inside the bar's padding
+            status_icons = (round(width - (BAR_PAD + STATUS_PAD + STATUS_ICON / 2) * scale), round(bar_rows / 2))
+            menu_left = width - (SYSTEM_MARGIN + SYSTEM_WIDTH) * scale
+
+            def session_row(label, menu_size):
+                """Where the middle of a row of the session is: the four rows at the bottom of the menu."""
+                bottom = bar_rows + (menu_size[1] - SYSTEM_PAD) * scale
+                below = len(SESSION_ROWS) - SESSION_ROWS.index(label) - 0.5
+                return round(menu_left + SYSTEM_WIDTH * scale / 2), round(bottom - below * SYSTEM_ROW * scale)
+
+            before = volume_now()
+            if before is None:
+                fail("wpctl reads no volume for the default sink")
+            click(args.qmp, size, status_icons)
+            menu_size = wait_for(20, lambda: system_open("the state after a click on the status icons"))
+            if not menu_size:
+                _, output = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
+                fail(f"a click on the status icons opened no system menu: {without_console(output).strip()[-400:]!r}")
+            # the pointer over the button would cover a corner of the menu in the screendump
+            point(args.qmp, size, (round(width / 3), round(height / 2)))
+            look("the system menu", f"{stem}-system{extension}", 20, system=menu_size, journals=("lens",))
+            ok(f"a click on the status icons opened the system menu, {menu_size[0]}x{menu_size[1]}")
+
+            # the volume slider is the first row: the mute button at its left, the slider from there to
+            # the row's end. a click on it sets the sink to where it landed
+            wanted = 0.75 if before < 0.5 else 0.25
+            # not start and end: start is the test's own clock
+            rail_left = menu_left + (SYSTEM_PAD + SYSTEM_ROW + SYSTEM_GAP) * scale
+            rail_right = menu_left + (SYSTEM_WIDTH - SYSTEM_PAD - SYSTEM_INSET) * scale
+            click(args.qmp, size, (round(rail_left + wanted * (rail_right - rail_left)),
+                                   round(bar_rows + (SYSTEM_PAD + SYSTEM_ROW / 2) * scale)))
+
+            def moved():
+                level = volume_now()
+                return level is not None and abs(level - wanted) <= 0.03 and level > 0
+
+            if not wait_for(20, moved):
+                fail(f"a click at {wanted:.0%} of the volume slider left the sink at {volume_now()}, it was {before}")
+            after = volume_now()
+            shown = wait_for(20, lambda: bar_state("the bar's volume").get("volume") == str(round(after * 100)))
+            if not shown:
+                fail(f"wpctl says {after} and the bar says volume {bar_state('the bar volume').get('volume')!r}")
+            shot(f"{stem}-system-volume{extension}", "system-volume")
+            ok(f"a click on the volume slider moved the sink from {before:.2f} to {after:.2f}, and the bar follows")
+
+            # the button at the left of the slider mutes the sink, and the bar's icon and state follow;
+            # a second press unmutes it
+            mute = (round(menu_left + (SYSTEM_PAD + SYSTEM_ROW / 2) * scale),
+                    round(bar_rows + (SYSTEM_PAD + SYSTEM_ROW / 2) * scale))
+            for muted in (True, False):
+                click(args.qmp, size, mute)
+                word = f"{round(after * 100)} muted" if muted else str(round(after * 100))
+
+                def followed():
+                    _, output = run("wpctl get-volume @DEFAULT_AUDIO_SINK@", "whether the sink is muted")
+                    return ("[MUTED]" in without_console(output)) == muted and \
+                        bar_state("the bar's volume after the mute button").get("volume") == word
+
+                if not wait_for(20, followed):
+                    fail(f"the mute button did not {'mute' if muted else 'unmute'} the sink: the bar says "
+                         f"{bar_state('the bar volume').get('volume')!r}, expected {word!r}")
+            ok("the mute button muted the sink and unmuted it, and the bar followed both times")
+
+            # a second click on the status icons closes the menu, and it stays closed
+            click(args.qmp, size, status_icons)
+            if not wait_for(20, lambda: bar_state("the state after a second click").get("system") == "closed"):
+                fail("a second click on the status icons left the system menu open")
+            time.sleep(2)
+            if bar_state("the state a moment later").get("system") != "closed":
+                fail("the system menu opened again after the click that closed it")
+            ok("a second click on the status icons closed the system menu")
+
+            # Restart asks first. the shell runs as a user unit, outside the session, and logind has to
+            # let it restart the machine without a password, or the row would do nothing
+            _, output = run("systemd-run --user --wait --pipe --quiet busctl call org.freedesktop.login1 "
+                            "/org/freedesktop/login1 org.freedesktop.login1.Manager CanReboot",
+                            "whether logind allows the shell to restart the machine")
+            if '"yes"' not in without_console(output):
+                fail(f"logind does not let a user unit restart the machine: {without_console(output).strip()!r}")
+            click(args.qmp, size, status_icons)
+            menu_size = wait_for(20, lambda: system_open("the system menu again"))
+            if not menu_size:
+                fail("a click on the status icons did not open the system menu again")
+            click(args.qmp, size, session_row("Restart", menu_size))
+            if not wait_for(20, lambda: bar_state("the state after Restart").get("dialog") == "Restart the computer?"):
+                fail(f"Restart asked nothing: dialog {bar_state('the dialog').get('dialog')!r}")
+            shot(f"{stem}-system-restart{extension}", "system-restart")
+            press(["esc"], what="escape in the dialog")
+            if not wait_for(20, lambda: bar_state("the state after escape").get("dialog") == "closed"):
+                fail("escape did not close the dialog that asks about restarting")
+            ok("Restart in the system menu asked first, logind allows the shell to restart, and escape said no")
+
+            # Lock starts the lock screen, the same one logind's signal and Mod+L start
+            click(args.qmp, size, status_icons)
+            menu_size = wait_for(20, lambda: system_open("the system menu for Lock"))
+            if not menu_size:
+                fail("a click on the status icons did not open the system menu for Lock")
+            click(args.qmp, size, session_row("Lock", menu_size))
+            look("the lock screen from the system menu", f"{stem}-system-lock{extension}", 30, lock=False,
+                 journals=("lock", "horizon"))
+            locked_hint("yes", "after Lock in the system menu")
+            type_line(PASSWORD, "the owner's password")
+            look("the desktop after unlocking the lock from the system menu", f"{stem}-system-unlocked{extension}", 30,
+                 journals=("lock", "horizon"))
+            locked_hint("no", "after unlocking the lock from the system menu")
+            if bar_state("the state after the lock").get("system") != "closed":
+                fail("the system menu is still open after the lock")
+            ok("Lock in the system menu locked the session and the owner's password unlocked it")
 
             # 5f. a text console. ctrl+alt+f2 moves to the second one, where logind starts a getty that
             # shows /etc/issue: the name line without the logo, and a login that asks for a name, since
@@ -3118,9 +3303,6 @@ def main():
             "-smp", "2",
             "-m", args.memory,
             "-device", "virtio-vga",
-        # an absolute pointer, so a click can be sent to a point of the screendump through the
-        # monitor. the emulated ps/2 mouse only moves by so much at a time
-        "-device", "virtio-tablet-pci",
             "-display", "none",
             "-monitor", "none",
             "-serial", "stdio",

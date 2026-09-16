@@ -12,8 +12,9 @@ let
   cfg = config.rift.lens;
   lens = "${self.packages.${pkgs.stdenv.hostPlatform.system}.workspace}/bin/lens";
   systemctl = "${config.systemd.package}/bin/systemctl --user";
-  # the shell asks date, nmcli, wpctl and upower what to show, and starts apps from their desktop
-  # entries. the user manager does not inherit the session's path, so the unit names it
+  # the shell asks date, wpctl, pw-mon and brightnessctl what to show, reads networkmanager, upower,
+  # bluez and logind over the system bus, and starts apps from their desktop entries. the user
+  # manager does not inherit the session's path, so the unit names it
   path = lib.concatStringsSep ":" [
     "/run/wrappers/bin"
     "/etc/profiles/per-user/${config.rift.horizon.user}/bin"
@@ -49,9 +50,10 @@ in
         "${systemctl} reset-failed lens.service; exec ${systemctl} start lens.service"
       ]
     ];
-    # what the os commands run is already there: nmcli with networkmanager, wpctl with pipewire,
-    # brightnessctl with horizon, systemctl always. nushell is the third interpreter: lens runs
-    # this binary with an argument vector, and it is the interactive nushell as well
+    # what the os commands and the system menu run is already there: nmcli with networkmanager,
+    # wpctl and pw-mon with pipewire, brightnessctl and horizon with horizon, systemctl always.
+    # nushell is the third interpreter: lens runs this binary with an argument vector, and it is the
+    # interactive nushell as well
     environment.systemPackages = [ pkgs.nushell ];
   };
 }

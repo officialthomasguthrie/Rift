@@ -40,7 +40,7 @@ impl Action {
 const WIFI: &str = "wifi: list, status, on, off, connect <network> [password]";
 const DISPLAY: &str = "display: brightness [<percent>, +10, -10], outputs";
 const VOLUME: &str = "volume: <0 to 100>, up, down, mute, unmute";
-const POWER: &str = "power: off, reboot, suspend";
+const POWER: &str = "power: off, reboot, suspend, logout";
 
 /// Read the words of a line as an OS command. `None` when the first word is not one of the
 /// four, `Err` with the usage line when the arguments make no sense.
@@ -190,6 +190,13 @@ fn power(args: &[&str]) -> Result<Action, &'static str> {
             "systemctl",
             &["suspend"],
             "Put the computer to sleep",
+        )),
+        // the session is the compositor's, so ending it is asking the compositor to quit. the
+        // system menu asks first, the way the field does
+        ["logout"] => Ok(Action::change(
+            "horizon",
+            &["msg", "action", "quit", "--skip-confirmation"],
+            "Log out",
         )),
         _ => Err(POWER),
     }
