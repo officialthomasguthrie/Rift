@@ -734,12 +734,13 @@ mod tests {
         // past the last visible row it follows, one row at a time
         menu.step(1);
         assert_eq!(menu.top, 1);
-        // and back up at the top it stops there, with the header in sight
-        for _ in 0..LIST_ROWS {
+        // and back up at the first app it stops there, with the header over it in sight
+        for _ in 0..LIST_ROWS - 1 {
             menu.step(-1);
         }
+        assert_eq!(menu.selected, Some(0));
         assert_eq!(menu.top, 0);
-        // the last app is the last row, so the list is at its end
+        // one more wraps to the last app, which is the last row, so the list is at its end
         menu.step(-1);
         assert_eq!(menu.top, menu.results.len() - LIST_ROWS);
     }

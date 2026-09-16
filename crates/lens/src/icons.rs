@@ -43,10 +43,11 @@ const DIRECTORIES: [&str; 26] = [
     "16x16/places",
 ];
 
-/// The directories an app icon comes from, in the order a 16 px row wants them: the vector one,
-/// then the sizes from the one that scales down best, and a symbolic drawing only if the app
-/// ships nothing else.
-const APP_DIRECTORIES: [&str; 11] = [
+/// The directories an app's own drawing comes from, in the order a 16 px row wants them: the
+/// vector one, then the sizes from the one that scales down best. No symbolic directory: a theme
+/// is searched before the directories are, so one symbolic drawing in the first theme would beat
+/// every colour one in the next.
+const APP_DIRECTORIES: [&str; 10] = [
     "scalable/apps",
     "48x48/apps",
     "32x32/apps",
@@ -56,7 +57,6 @@ const APP_DIRECTORIES: [&str; 11] = [
     "128x128/apps",
     "256x256/apps",
     "512x512/apps",
-    "symbolic/apps",
     "scalable/mimetypes",
 ];
 
@@ -74,12 +74,13 @@ pub fn find(name: &str) -> Option<PathBuf> {
     remembered(&FOUND, name, &DIRECTORIES)
 }
 
-/// The same lookup for an app icon, which is drawn in its own colours and so comes from the
-/// directories the app puts its own drawing in.
+/// The same lookup for an app icon: the app's own drawing in its own colours first, and only when
+/// no theme has one, whatever the symbolic lookup finds, which the caller then paints in one
+/// colour.
 #[must_use]
 pub fn app(name: &str) -> Option<PathBuf> {
     static FOUND: Found = OnceLock::new();
-    remembered(&FOUND, name, &APP_DIRECTORIES)
+    remembered(&FOUND, name, &APP_DIRECTORIES).or_else(|| find(name))
 }
 
 /// What a lookup remembers: a name to where it was found, or to nothing.
@@ -277,9 +278,9 @@ mod tests {
     #[test]
     fn an_app_icon_comes_in_colour_before_a_symbolic_one() {
         let root = temporary("apps");
-        theme(&root, "hicolor", "48x48/apps", "firefox.png");
-        theme(&root, "Adwaita", "symbolic/apps", "firefox-symbolic.svg");
+        // the first theme has a symbolic drawing of it, the second the app's own in colour
         theme(&root, "Adwaita", "symbolic/apps", "firefox.svg");
+        theme(&root, "hicolor", "48x48/apps", "firefox.png");
         let found =
             look(std::slice::from_ref(&root), "firefox", &APP_DIRECTORIES).expect("the icon");
         assert!(found.to_string_lossy().ends_with("48x48/apps/firefox.png"));
