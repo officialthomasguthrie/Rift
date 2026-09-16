@@ -32,7 +32,7 @@ const THICK: f32 = 6.0;
 /// The corner of the bar.
 const RADIUS: f32 = 2.0;
 /// How long the bar is: what is left of the popup beside the icon.
-const LONG: f32 = 132.0;
+const LONG: f32 = 148.0;
 
 /// The popup while it is up.
 #[derive(Debug, Clone, Copy)]
