@@ -166,6 +166,13 @@ pub fn draw<'a, Message: 'a>(text: Color, name: Option<&str>, size: f32) -> Elem
     let Some(path) = found else {
         return space().width(size).height(size).into();
     };
+    picture(text, &path, size)
+}
+
+/// An icon file that was already found, at this size: a symbolic drawing painted in `text`, any
+/// other in its own colours.
+#[must_use]
+pub fn picture<'a, Message: 'a>(text: Color, path: &Path, size: f32) -> Element<'a, Message> {
     let colour = path.to_string_lossy().contains("symbolic").then_some(text);
     if path.extension().is_some_and(|ending| ending == "svg") {
         svg(svg::Handle::from_path(path))

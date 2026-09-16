@@ -133,11 +133,12 @@ let
         Ctrl+Print { screenshot-screen; }
         Alt+Print { screenshot-window; }
 
-        XF86AudioRaiseVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.05+" "-l" "1.0"; }
-        XF86AudioLowerVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.05-"; }
-        XF86AudioMute allow-when-locked=true { spawn "wpctl" "set-mute" "@DEFAULT_AUDIO_SINK@" "toggle"; }
-        XF86MonBrightnessUp allow-when-locked=true { spawn "brightnessctl" "set" "+10%"; }
-        XF86MonBrightnessDown allow-when-locked=true { spawn "brightnessctl" "set" "10%-"; }
+        // lens makes the change with wpctl or brightnessctl and shows the level in its key popup
+        XF86AudioRaiseVolume allow-when-locked=true { spawn "lens" "--volume" "up"; }
+        XF86AudioLowerVolume allow-when-locked=true { spawn "lens" "--volume" "down"; }
+        XF86AudioMute allow-when-locked=true { spawn "lens" "--volume" "mute"; }
+        XF86MonBrightnessUp allow-when-locked=true { spawn "lens" "--brightness" "up"; }
+        XF86MonBrightnessDown allow-when-locked=true { spawn "lens" "--brightness" "down"; }
 
         Mod+Escape allow-inhibiting=false { toggle-keyboard-shortcuts-inhibit; }
         Mod+Shift+E hotkey-overlay-title="End the session" { quit; }

@@ -7,14 +7,21 @@
 //! [--yes] <words>` does it from a terminal instead, with `--yes` standing in for the
 //! confirmation the field asks for. `lens --type <words>`, `lens --enter [<words>]` and
 //! `lens --escape` type into the field of the shell that is already running, `lens --menu` opens
-//! and closes the Applications menu, and `lens --state` prints what the bar shows.
+//! and closes the Applications menu, and `lens --state` prints what the bar shows. `lens --volume
+//! up|down|mute` and `lens --brightness up|down` are what the keys for them run: they make the
+//! change and the shell shows the level in the key popup.
 
 mod answer;
 #[cfg(target_os = "linux")]
+mod banner;
+#[cfg(target_os = "linux")]
 mod bar;
+mod calendar;
 #[cfg(target_os = "linux")]
 mod clock;
 mod control;
+#[cfg(target_os = "linux")]
+mod datemenu;
 #[cfg(target_os = "linux")]
 mod dialog;
 #[cfg(target_os = "linux")]
@@ -22,10 +29,16 @@ mod dock;
 mod horizon;
 #[cfg(target_os = "linux")]
 mod icons;
+#[cfg(target_os = "linux")]
+mod keys;
 mod launcher;
 #[cfg(target_os = "linux")]
 mod menu;
+#[cfg(target_os = "linux")]
+mod notice;
 mod nu;
+#[cfg(target_os = "linux")]
+mod popup;
 mod route;
 #[cfg(target_os = "linux")]
 mod status;
@@ -65,9 +78,13 @@ fn main() -> ExitCode {
         Some("--escape") => tell(&control::Command::Escape),
         Some("--menu") => tell(&control::Command::Menu),
         Some("--state") => show(),
+        #[cfg(target_os = "linux")]
+        Some("--volume") => key(keys::volume(args.get(1).map_or("", String::as_str))),
+        #[cfg(target_os = "linux")]
+        Some("--brightness") => key(keys::brightness(args.get(1).map_or("", String::as_str))),
         Some(other) => {
             eprintln!(
-                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --state]"
+                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --state | --volume up|down|mute | --brightness up|down]"
             );
             ExitCode::from(2)
         }
@@ -80,6 +97,22 @@ fn show() -> ExitCode {
     match control::ask(&control::Command::State) {
         Ok(lines) => {
             print!("{lines}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// A volume or a brightness key: the change is made, and the shell that is running shows the level.
+/// A shell that is not running changes nothing about the key.
+#[cfg(target_os = "linux")]
+fn key(done: Result<control::Level, String>) -> ExitCode {
+    match done {
+        Ok(level) => {
+            let _ = control::send(&control::Command::Popup(level));
             ExitCode::SUCCESS
         }
         Err(why) => {

@@ -286,6 +286,22 @@ pub fn toggle_mute() -> Result<(), String> {
     change("wpctl", &["set-mute", SINK, "toggle"])
 }
 
+/// Turn the default sink up by a step, never past full, and unmute it: a key that turns the sound
+/// up is asking to hear something. Down is the same step the other way and leaves a muted sink
+/// muted.
+///
+/// # Errors
+///
+/// When `wpctl` is not there or refuses.
+pub fn step_volume(up: bool) -> Result<(), String> {
+    if up {
+        change("wpctl", &["set-mute", SINK, "0"])?;
+        change("wpctl", &["set-volume", SINK, "0.05+", "-l", "1.0"])
+    } else {
+        change("wpctl", &["set-volume", SINK, "0.05-"])
+    }
+}
+
 /// The backlight in percent, when the machine has one. Only the backlight class counts: the
 /// keyboard's lights are brightness devices too.
 #[must_use]
@@ -307,6 +323,23 @@ fn read_brightness(printed: &str) -> Option<u8> {
         return None;
     }
     u8::try_from((current * 100 + max / 2) / max).ok()
+}
+
+/// Turn the backlight up or down by a step. Like the slider, it never goes all the way to black.
+///
+/// # Errors
+///
+/// When `brightnessctl` is not there, the machine has no backlight, or it refuses.
+pub fn step_brightness(up: bool) -> Result<(), String> {
+    change(
+        "brightnessctl",
+        &[
+            "--class=backlight",
+            "--min-value=1",
+            "set",
+            if up { "+10%" } else { "10%-" },
+        ],
+    )
 }
 
 /// Set the backlight. It never goes all the way to black, which would leave a screen that looks
