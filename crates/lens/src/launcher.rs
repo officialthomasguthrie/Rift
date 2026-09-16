@@ -1,5 +1,5 @@
-//! The app launcher: desktop entries from the XDG data directories, matched by name in the
-//! routing module and started here as detached processes.
+//! The app launcher: desktop entries from the XDG data directories and the Flatpak exports,
+//! matched by name in the routing module and started here as detached processes.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,6 +14,81 @@ pub struct App {
     pub exec: Vec<String>,
     /// The Terminal field: the app wants a terminal around it.
     pub terminal: bool,
+    /// The Icon field, a name to look up or a path.
+    pub icon: Option<String>,
+    /// The section of the menu the Categories field puts it in.
+    pub category: Category,
+}
+
+/// The section of the Applications menu an app is listed under. The six the menu of GNOME
+/// Classic shows on Tails, and Accessories takes whatever does not say where it belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Category {
+    /// Anything else, and an entry with no category at all.
+    Accessories,
+    /// Network.
+    Internet,
+    /// Office.
+    Office,
+    /// Development.
+    Programming,
+    /// System and Settings.
+    System,
+    /// Utility: the small tools.
+    Utilities,
+}
+
+// the menu is what lists the sections, and the menu is linux only
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl Category {
+    /// The sections in the order the menu lists them.
+    pub const ALL: [Self; 6] = [
+        Self::Accessories,
+        Self::Internet,
+        Self::Office,
+        Self::Programming,
+        Self::System,
+        Self::Utilities,
+    ];
+
+    /// The header over the section.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Accessories => "Accessories",
+            Self::Internet => "Internet",
+            Self::Office => "Office",
+            Self::Programming => "Programming",
+            Self::System => "System",
+            Self::Utilities => "Utilities",
+        }
+    }
+
+    /// Where a Categories field belongs. The words are tried in this order, so a terminal that
+    /// says System;TerminalEmulator;Utility is a system app and an editor that says
+    /// Development;TextEditor;Utility is programming.
+    #[must_use]
+    pub fn of(categories: &str) -> Self {
+        let words: Vec<&str> = categories
+            .split(';')
+            .map(str::trim)
+            .filter(|word| !word.is_empty())
+            .collect();
+        let has = |wanted: &str| words.contains(&wanted);
+        if has("Network") {
+            Self::Internet
+        } else if has("Office") {
+            Self::Office
+        } else if has("Development") {
+            Self::Programming
+        } else if has("System") || has("Settings") {
+            Self::System
+        } else if has("Utility") {
+            Self::Utilities
+        } else {
+            Self::Accessories
+        }
+    }
 }
 
 /// The terminal that wraps apps with `Terminal=true`.
@@ -48,14 +123,17 @@ pub fn load() -> Vec<App> {
     apps
 }
 
-/// The user's data directory first, then the system ones.
+/// The user's data directory first, then the system ones, then the two the Flatpak exports are
+/// in. A session that never sourced the profile has neither of those in its data directories, and
+/// an installed Flatpak belongs in the menu either way.
 fn data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    let home = env::var_os("HOME");
     match env::var_os("XDG_DATA_HOME") {
-        Some(home) => dirs.push(PathBuf::from(home)),
+        Some(data) => dirs.push(PathBuf::from(data)),
         None => {
-            if let Some(home) = env::var_os("HOME") {
-                dirs.push(Path::new(&home).join(".local/share"));
+            if let Some(home) = home.as_ref() {
+                dirs.push(Path::new(home).join(".local/share"));
             }
         }
     }
@@ -66,6 +144,11 @@ fn data_dirs() -> Vec<PathBuf> {
             .filter(|d| !d.is_empty())
             .map(PathBuf::from),
     );
+    if let Some(home) = home.as_ref() {
+        dirs.push(Path::new(home).join(".local/share/flatpak/exports/share"));
+    }
+    dirs.push(PathBuf::from("/var/lib/flatpak/exports/share"));
+    dirs.dedup();
     dirs
 }
 
@@ -78,6 +161,8 @@ pub fn parse(text: &str) -> Option<App> {
     let mut exec = None;
     let mut terminal = false;
     let mut kind = None;
+    let mut icon = None;
+    let mut categories = String::new();
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
@@ -95,6 +180,8 @@ pub fn parse(text: &str) -> Option<App> {
             "Exec" => exec = Some(value.trim().to_string()),
             "Type" => kind = Some(value.trim().to_string()),
             "Terminal" => terminal = value.trim() == "true",
+            "Icon" if !value.trim().is_empty() => icon = Some(value.trim().to_string()),
+            "Categories" => categories = value.trim().to_string(),
             "NoDisplay" | "Hidden" if value.trim() == "true" => return None,
             _ => {}
         }
@@ -110,6 +197,8 @@ pub fn parse(text: &str) -> Option<App> {
         name: name?,
         exec,
         terminal,
+        icon,
+        category: Category::of(&categories),
     })
 }
 
@@ -187,11 +276,46 @@ mod tests {
 
     #[test]
     fn reads_an_entry() {
-        let text = "[Desktop Entry]\nType=Application\nName=Firefox\nExec=firefox %u\nIcon=firefox\n\n[Desktop Action new-window]\nName=New window\nExec=firefox --new-window\n";
+        let text = "[Desktop Entry]\nType=Application\nName=Firefox\nExec=firefox %u\nIcon=firefox\nCategories=Network;WebBrowser;\n\n[Desktop Action new-window]\nName=New window\nExec=firefox --new-window\n";
         let app = parse(text).unwrap();
         assert_eq!(app.name, "Firefox");
         assert_eq!(app.exec, ["firefox"]);
         assert!(!app.terminal);
+        assert_eq!(app.icon.as_deref(), Some("firefox"));
+        assert_eq!(app.category, Category::Internet);
+    }
+
+    #[test]
+    fn an_entry_without_an_icon_or_a_category() {
+        let app =
+            parse("[Desktop Entry]\nType=Application\nName=Thing\nExec=thing\nIcon=\n").unwrap();
+        assert!(app.icon.is_none());
+        assert_eq!(app.category, Category::Accessories);
+    }
+
+    #[test]
+    fn the_categories_the_menu_knows() {
+        assert_eq!(Category::of("Network;WebBrowser;"), Category::Internet);
+        assert_eq!(Category::of("Office;WordProcessor;"), Category::Office);
+        assert_eq!(
+            Category::of("Development;TextEditor;Utility;"),
+            Category::Programming
+        );
+        assert_eq!(
+            Category::of("System;TerminalEmulator;Utility;"),
+            Category::System
+        );
+        assert_eq!(Category::of("GTK;Settings;"), Category::System);
+        assert_eq!(Category::of("Utility;Calculator;"), Category::Utilities);
+        assert_eq!(
+            Category::of("Graphics;RasterGraphics;"),
+            Category::Accessories
+        );
+        assert_eq!(Category::of(""), Category::Accessories);
+        // the words come in any order and the list may be padded
+        assert_eq!(Category::of(" GTK ; Network "), Category::Internet);
+        // a word that only starts with one the menu knows is not that word
+        assert_eq!(Category::of("Networking;"), Category::Accessories);
     }
 
     #[test]

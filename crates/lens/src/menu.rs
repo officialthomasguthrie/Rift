@@ -1,16 +1,19 @@
-//! The Applications menu: the surface that hangs under the Applications button. It holds the
-//! field and, under it, what the field matched, printed or answered. The app list goes under the
-//! field next.
+//! The Applications menu: the surface that hangs under the Applications button. The field is at
+//! the top of it, and under the field the apps in their sections, or what the field matched,
+//! printed or answered.
 
-use iced::widget::{column, container, text, text_input};
-use iced::{Border, Element, Font, Length, Theme, window};
+use iced::widget::{
+    button, column, container, image, row, scrollable, space, svg, text, text_input,
+};
+use iced::{Border, Color, Element, Font, Length, Shadow, Theme, window};
 use librift::os::Action;
 
 use crate::bar;
-use crate::launcher::App;
+use crate::icons;
+use crate::launcher::{App, Category};
 use crate::route;
 use crate::theme::Palette;
-use crate::ui::{FONT, MONO, Message};
+use crate::ui::{FONT, HEADING, MONO, Message};
 
 /// How wide the menu is in logical pixels.
 pub const WIDTH: u32 = 496;
@@ -26,24 +29,61 @@ pub const FIELD_WIDTH: f32 = 480.0;
 pub const FIELD_HEIGHT: u32 = 32;
 /// The height of one row of the list, and of the line under it.
 pub const ROW_HEIGHT: u32 = 28;
-/// How many rows the list shows at once.
+/// The same height where a length is wanted.
+const ROW: f32 = 28.0;
+/// How many rows of output or of an answer the list shows.
 pub const ROWS: usize = 8;
+/// How many rows of the app list it shows before the list scrolls. The tallest menu is then 612
+/// px, or 644 with a line under the list, which fits between the two bars on a 768 px screen.
+pub const LIST_ROWS: usize = 20;
+/// The app icon at the left of a row.
+const ICON: f32 = 16.0;
+/// The gap between the icon and the name.
+const ICON_GAP: f32 = 8.0;
 /// The line of text inside the field, so its height is the same everywhere.
 const FIELD_LINE: f32 = 18.0;
 /// The padding inside the field: 18 + 7 + 7 is the field's height.
 const FIELD_PAD: u16 = 7;
 /// The field's widget id, for the focus operation.
 const FIELD_ID: &str = "field";
+/// The list's widget id, for the scroll operation.
+const LIST_ID: &str = "list";
 /// What the field says when it is empty.
 const PLACEHOLDER: &str = "Type an app, a command or a question";
+
+/// A row of the list under the field.
+#[derive(Debug, Clone)]
+pub enum Row {
+    /// The name of a section, over the apps in it.
+    Header(&'static str),
+    /// An app, with its own icon at the left. Enter starts the one that is selected.
+    App(App),
+}
+
+/// Every app in its section, the sections in the menu's order. A section with nothing in it has
+/// no header.
+#[must_use]
+pub fn sections(apps: &[App]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for category in Category::ALL {
+        let mut found = apps.iter().filter(|app| app.category == category);
+        if let Some(first) = found.next() {
+            rows.push(Row::Header(category.name()));
+            rows.push(Row::App(first.clone()));
+            rows.extend(found.cloned().map(Row::App));
+        }
+    }
+    rows
+}
 
 /// What the list under the field is showing.
 #[derive(Debug)]
 pub enum Results {
     /// Nothing, and the menu is only the field high.
     None,
-    /// The apps the words match, best first. One of them is selected.
-    Matches(Vec<App>),
+    /// The apps: all of them in their sections when the field is empty, or the ones the words
+    /// match, best first, with no sections.
+    Apps(Vec<Row>),
     /// What a command or a pipeline printed.
     Output(Vec<String>),
     /// Quasar's answer, wrapped into rows.
@@ -51,12 +91,12 @@ pub enum Results {
 }
 
 impl Results {
-    /// How many rows it has.
+    /// How many rows it has, on screen or scrolled out of sight.
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
             Self::None => 0,
-            Self::Matches(apps) => apps.len(),
+            Self::Apps(rows) => rows.len(),
             Self::Output(lines) | Self::Answer(lines) => lines.len(),
         }
     }
@@ -65,6 +105,28 @@ impl Results {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// How many rows are on screen. The app list is as tall as it can be and scrolls past that;
+    /// output and an answer arrive short.
+    #[must_use]
+    pub fn shown(&self) -> usize {
+        match self {
+            Self::Apps(rows) => rows.len().min(LIST_ROWS),
+            other => other.len().min(ROWS),
+        }
+    }
+
+    /// The apps in it, in the order they are listed.
+    fn apps(&self) -> impl Iterator<Item = &App> {
+        let rows: &[Row] = match self {
+            Self::Apps(rows) => rows,
+            _ => &[],
+        };
+        rows.iter().filter_map(|row| match row {
+            Row::App(app) => Some(app),
+            Row::Header(_) => None,
+        })
     }
 }
 
@@ -77,8 +139,11 @@ pub struct Menu {
     pub input: String,
     /// What is under the field.
     pub results: Results,
-    /// Which row Enter would take.
-    pub selected: usize,
+    /// Which app Enter would start, counting only the app rows. Nothing is picked until the words
+    /// match something or an arrow key walks the list.
+    pub selected: Option<usize>,
+    /// The first row of the list on screen, which is where the arrows scroll it to.
+    pub top: usize,
     /// What went wrong, on the line under the list.
     pub error: Option<String>,
     /// What is happening, on the same line when there is no error.
@@ -90,18 +155,20 @@ pub struct Menu {
 }
 
 impl Menu {
-    /// An open menu with an empty field.
+    /// An open menu with an empty field and every app under it.
     #[must_use]
-    pub fn new(id: window::Id) -> Self {
+    pub fn new(id: window::Id, apps: &[App]) -> Self {
+        let results = Results::Apps(sections(apps));
         Self {
             id,
             input: String::new(),
-            results: Results::None,
-            selected: 0,
+            height: height(results.shown(), false),
+            results,
+            selected: None,
+            top: 0,
             error: None,
             notice: None,
             pending: None,
-            height: height(0, false),
         }
     }
 
@@ -112,63 +179,117 @@ impl Menu {
         self.notice = None;
         self.error = None;
         self.input = value;
-        self.selected = 0;
+        self.top = 0;
+        if self.input.trim().is_empty() {
+            self.results = Results::Apps(sections(apps));
+            self.selected = None;
+            return;
+        }
         // only an app shows a list while typing. a command or a pipeline has nothing to show
         // until it has run, and a list that does not agree with what Enter does is a trap
         self.results = match route::route(&self.input, apps) {
             route::Interpretation::Launch(_) => {
                 let mut found = route::matches(&self.input, apps);
-                found.truncate(ROWS);
-                Results::Matches(found.into_iter().cloned().collect())
+                found.truncate(LIST_ROWS);
+                Results::Apps(found.into_iter().cloned().map(Row::App).collect())
             }
             _ => Results::None,
         };
+        self.selected = (!self.results.is_empty()).then_some(0);
     }
 
-    /// Empty field, empty list, nothing pending.
-    pub fn clear(&mut self) {
-        self.input.clear();
-        self.results = Results::None;
-        self.selected = 0;
-        self.error = None;
-        self.notice = None;
-        self.pending = None;
+    /// Empty field, the app list back, nothing pending.
+    pub fn clear(&mut self, apps: &[App]) {
+        self.typed(apps, String::new());
     }
 
-    /// Whether there is anything to clear before the menu closes.
+    /// Whether there is anything to clear before the menu closes. The app list is what the menu
+    /// is, not something the last line left behind.
     #[must_use]
     pub fn has_anything(&self) -> bool {
         !self.input.is_empty()
-            || !self.results.is_empty()
             || self.error.is_some()
             || self.notice.is_some()
+            || matches!(self.results, Results::Output(_) | Results::Answer(_))
     }
 
-    /// Up and down walk the matches. Output rows are not a menu, nothing to select there.
+    /// Up and down walk the apps, and the list scrolls to keep the one they are on in sight.
+    /// Output rows are not a menu, nothing to select there.
     pub fn step(&mut self, step: isize) {
-        let Results::Matches(apps) = &self.results else {
+        let count = self.results.apps().count();
+        if count == 0 {
+            return;
+        }
+        let last = count - 1;
+        self.selected = Some(match self.selected {
+            None if step > 0 => 0,
+            Some(at) if step > 0 => {
+                if at >= last {
+                    0
+                } else {
+                    at + 1
+                }
+            }
+            None | Some(0) => last,
+            Some(at) => at - 1,
+        });
+        self.see();
+    }
+
+    /// The app Enter would start.
+    #[must_use]
+    pub fn selected_app(&self) -> Option<&App> {
+        self.results.apps().nth(self.selected?)
+    }
+
+    /// Which row the selected app is on, counting the headers above it, and whether the header
+    /// over it belongs to it.
+    fn selected_row(&self) -> Option<(usize, bool)> {
+        let Results::Apps(rows) = &self.results else {
+            return None;
+        };
+        let at = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, Row::App(_)))
+            .map(|(index, _)| index)
+            .nth(self.selected?)?;
+        let heads = at > 0 && matches!(rows[at - 1], Row::Header(_));
+        Some((at, heads))
+    }
+
+    /// Scroll as little as it takes to have the selected row on screen, with the header over it
+    /// when it is the first app of its section.
+    fn see(&mut self) {
+        let shown = self.results.shown();
+        let Some((row, heads)) = self.selected_row() else {
             return;
         };
-        let last = apps.len().saturating_sub(1);
-        if step > 0 {
-            self.selected = if self.selected >= last {
-                0
-            } else {
-                self.selected + 1
-            };
-        } else {
-            self.selected = if self.selected == 0 {
-                last
-            } else {
-                self.selected - 1
-            };
+        let first = if heads { row - 1 } else { row };
+        if first < self.top {
+            self.top = first;
+        } else if row >= self.top + shown {
+            self.top = row + 1 - shown;
         }
+        self.top = self.top.min(self.results.len().saturating_sub(shown));
+    }
+
+    /// Put the list where `top` says it is.
+    pub fn scroll(&self) -> iced::Task<Message> {
+        let top = f32::from(u16::try_from(self.top).unwrap_or(u16::MAX));
+        iced::widget::operation::scroll_to(
+            LIST_ID,
+            iced::widget::scrollable::AbsoluteOffset {
+                x: 0.0,
+                y: top * ROW,
+            },
+        )
     }
 
     /// How tall the surface should be for what it holds now.
     #[must_use]
     pub fn wanted_height(&self) -> u32 {
-        height(self.results.len(), self.line().is_some())
+        height(self.results.shown(), self.line().is_some())
     }
 
     /// The line under the list: what went wrong, or what is happening.
@@ -181,7 +302,7 @@ impl Menu {
     }
 }
 
-/// How tall a menu with this many rows, with or without the line under them, is.
+/// How tall a menu with this many rows on screen, with or without the line under them, is.
 #[must_use]
 pub fn height(rows: usize, line: bool) -> u32 {
     let rows = u32::try_from(rows).unwrap_or(0);
@@ -237,54 +358,183 @@ pub fn view(look: Palette, menu: &Menu) -> Element<'_, Message> {
         .into()
 }
 
-/// The rows under the field: the apps the words match, what the last line printed, or Quasar's
-/// answer.
+/// The rows under the field: the apps in their sections, the apps the words match, what the last
+/// line printed, or Quasar's answer. The app list is longer than the menu is tall, so it scrolls.
 fn list(look: Palette, menu: &Menu) -> Element<'_, Message> {
     let mut rows = column![];
     match &menu.results {
         Results::None => {}
-        Results::Matches(apps) => {
-            for (index, app) in apps.iter().enumerate() {
-                rows = rows.push(entry(look, &app.name, FONT, index == menu.selected));
+        Results::Apps(listed) => {
+            let mut at = 0;
+            for row in listed {
+                match row {
+                    Row::Header(name) => rows = rows.push(header(look, name)),
+                    Row::App(app) => {
+                        rows = rows.push(app_row(look, app, at, menu.selected == Some(at)));
+                        at += 1;
+                    }
+                }
             }
         }
         Results::Output(lines) => {
             for output in lines {
-                rows = rows.push(entry(look, output, MONO, false));
+                rows = rows.push(printed(look, output, MONO));
             }
         }
         Results::Answer(lines) => {
             for answer in lines {
-                rows = rows.push(entry(look, answer, FONT, false));
+                rows = rows.push(printed(look, answer, FONT));
             }
         }
     }
-    container(rows).width(FIELD_WIDTH).clip(true).into()
+    let tall = ROW * f32::from(u16::try_from(menu.results.shown()).unwrap_or(u16::MAX));
+    scrollable(rows)
+        .id(LIST_ID)
+        .width(FIELD_WIDTH)
+        .height(tall)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new().width(4).scroller_width(4),
+        ))
+        .style(move |_: &Theme, _| scrollable::Style {
+            container: container::Style::default(),
+            vertical_rail: rail(look),
+            horizontal_rail: rail(look),
+            gap: None,
+            auto_scroll: scrollable::AutoScroll {
+                background: look.menu.into(),
+                border: Border {
+                    color: look.edge,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                shadow: iced::Shadow::default(),
+                icon: look.text,
+            },
+        })
+        .into()
 }
 
-fn entry(look: Palette, label: &str, font: Font, selected: bool) -> Element<'_, Message> {
+/// The name of a section, over the apps in it.
+fn header(look: Palette, name: &str) -> Element<'static, Message> {
+    container(
+        text(name.to_string())
+            .size(bar::TEXT_SIZE)
+            .font(HEADING)
+            .color(look.text),
+    )
+    .width(Length::Fill)
+    .height(ROW_HEIGHT)
+    .padding([0, 4])
+    .align_y(iced::Center)
+    .clip(true)
+    .into()
+}
+
+/// One app in the list: its icon, its name, and a click starts it. The row Enter would take is
+/// the one in the accent; the one under the pointer is a shade lighter.
+fn app_row(look: Palette, app: &App, at: usize, selected: bool) -> Element<'static, Message> {
     let colour = if selected { look.selected } else { look.text };
-    let body = text(label)
-        .size(bar::TEXT_SIZE)
-        .font(font)
-        .color(colour)
-        .wrapping(iced::widget::text::Wrapping::None);
-    container(body)
+    let body = row![
+        icon(look, app),
+        text(app.name.clone())
+            .size(bar::TEXT_SIZE)
+            .color(colour)
+            .wrapping(iced::widget::text::Wrapping::None)
+    ]
+    .spacing(ICON_GAP)
+    .align_y(iced::Center);
+    // a button lays its content out at the top of its box, so the row is centred by hand
+    let inside = container(body)
         .width(Length::Fill)
-        .height(ROW_HEIGHT)
-        .padding([0, 4])
+        .height(Length::Fill)
         .align_y(iced::Center)
-        .clip(true)
-        .style(move |_: &Theme| container::Style {
-            background: selected.then(|| look.accent.into()),
+        .clip(true);
+    button(inside)
+        .width(Length::Fill)
+        .height(ROW)
+        .padding([0, 4])
+        .on_press(Message::Pick(at))
+        .style(move |_: &Theme, status| button::Style {
+            background: match (selected, status) {
+                (true, _) => Some(look.accent.into()),
+                (false, button::Status::Hovered | button::Status::Pressed) => {
+                    Some(look.press.into())
+                }
+                _ => None,
+            },
+            text_color: colour,
             border: Border {
-                color: iced::Color::TRANSPARENT,
+                color: Color::TRANSPARENT,
                 width: 0.0,
                 radius: 4.0.into(),
             },
-            ..container::Style::default()
+            shadow: Shadow::default(),
+            snap: true,
         })
         .into()
+}
+
+/// One line of what a command printed or of an answer. Nothing to click.
+fn printed(look: Palette, label: &str, font: Font) -> Element<'static, Message> {
+    container(
+        text(label.to_string())
+            .size(bar::TEXT_SIZE)
+            .font(font)
+            .color(look.text)
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .width(Length::Fill)
+    .height(ROW_HEIGHT)
+    .padding([0, 4])
+    .align_y(iced::Center)
+    .clip(true)
+    .into()
+}
+
+/// The app's own icon in its own colours, or the drawing for a program with nothing of its own.
+fn icon(look: Palette, app: &App) -> Element<'static, Message> {
+    let found = app
+        .icon
+        .as_deref()
+        .and_then(icons::app)
+        .or_else(|| icons::app(icons::UNKNOWN_APP));
+    let Some(path) = found else {
+        return space().width(ICON).height(ICON).into();
+    };
+    // a symbolic drawing has no colours of its own, so it is painted in the text colour, the way
+    // the status icons in the bar are
+    let colour = path
+        .to_string_lossy()
+        .contains("symbolic")
+        .then_some(look.text);
+    if path.extension().is_some_and(|ending| ending == "svg") {
+        svg(svg::Handle::from_path(path))
+            .width(ICON)
+            .height(ICON)
+            .style(move |_: &Theme, _| svg::Style { color: colour })
+            .into()
+    } else {
+        image(image::Handle::from_path(path))
+            .width(ICON)
+            .height(ICON)
+            .into()
+    }
+}
+
+/// The scrollbar: no rail, and a thin scroller in the menu's border gray.
+fn rail(look: Palette) -> scrollable::Rail {
+    scrollable::Rail {
+        background: None,
+        border: Border::default(),
+        scroller: scrollable::Scroller {
+            background: look.edge.into(),
+            border: Border {
+                color: iced::Color::TRANSPARENT,
+                width: 0.0,
+                radius: 2.0.into(),
+            },
+        },
+    }
 }
 
 fn field_style(look: Palette, status: text_input::Status) -> text_input::Style {
@@ -317,6 +567,36 @@ pub fn focus_field() -> iced::Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launcher::Category;
+
+    fn app(name: &str, category: Category) -> App {
+        App {
+            name: name.to_string(),
+            exec: vec![name.to_lowercase()],
+            terminal: false,
+            icon: Some(name.to_lowercase()),
+            category,
+        }
+    }
+
+    fn apps() -> Vec<App> {
+        vec![
+            app("Files", Category::Accessories),
+            app("Firefox", Category::Internet),
+            app("Ghostty", Category::System),
+            app("Helix", Category::Programming),
+            app("Zed", Category::Programming),
+        ]
+    }
+
+    fn names(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match row {
+                Row::Header(name) => format!("[{name}]"),
+                Row::App(app) => app.name.clone(),
+            })
+            .collect()
+    }
 
     #[test]
     fn the_height_follows_what_is_in_it() {
@@ -329,34 +609,138 @@ mod tests {
         );
     }
 
+    /// The menu hangs under the 32 px bar and the dock takes 44 px from the bottom, so the
+    /// tallest one has to fit in what a 768 px screen leaves between them.
+    #[test]
+    fn the_longest_list_fits_the_smallest_screen() {
+        assert_eq!(height(LIST_ROWS, false), 612);
+        assert!(height(LIST_ROWS, true) <= 768 - 32 - 44);
+    }
+
     #[test]
     fn the_field_fits_the_menu_and_its_line_fits_the_field() {
         assert!(f64::from(FIELD_WIDTH) + f64::from(2 * PAD) <= f64::from(WIDTH));
         assert_eq!(FIELD_HEIGHT, u32::from(2 * FIELD_PAD) + 18);
         assert_eq!(PAD, u32::from(INSIDE));
+        assert!((f64::from(ROW) - f64::from(ROW_HEIGHT)).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn a_menu_with_nothing_in_it_has_nothing_to_clear() {
-        let mut menu = Menu::new(window::Id::unique());
+    fn the_apps_come_in_their_sections() {
+        let rows = sections(&apps());
+        assert_eq!(
+            names(&rows),
+            [
+                "[Accessories]",
+                "Files",
+                "[Internet]",
+                "Firefox",
+                "[Programming]",
+                "Helix",
+                "Zed",
+                "[System]",
+                "Ghostty",
+            ]
+        );
+        // a section with nothing in it has no header
+        assert!(!names(&rows).contains(&"[Office]".to_string()));
+        assert!(sections(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_menu_with_nothing_typed_shows_the_apps_and_has_nothing_to_clear() {
+        let known = apps();
+        let mut menu = Menu::new(window::Id::unique(), &known);
+        assert_eq!(menu.results.len(), 9);
+        assert!(menu.selected_app().is_none(), "nothing is picked yet");
         assert!(!menu.has_anything());
+        assert_eq!(menu.wanted_height(), height(9, false));
         menu.input = "wifi".into();
         assert!(menu.has_anything());
-        menu.clear();
+        menu.clear(&known);
         assert!(!menu.has_anything());
-        assert_eq!(menu.wanted_height(), height(0, false));
+        assert_eq!(menu.results.len(), 9);
         menu.error = Some("Say wifi on or wifi off.".into());
-        assert_eq!(menu.wanted_height(), height(0, true));
+        assert_eq!(menu.wanted_height(), height(9, true));
         assert_eq!(menu.line(), Some(("Say wifi on or wifi off.", true)));
     }
 
     #[test]
-    fn up_and_down_walk_the_matches_and_wrap() {
-        let mut menu = Menu::new(window::Id::unique());
-        menu.results = Results::Output(vec!["one".into(), "two".into()]);
+    fn typing_filters_the_list_and_picks_the_best() {
+        let known = apps();
+        let mut menu = Menu::new(window::Id::unique(), &known);
+        menu.typed(&known, "fi".into());
+        assert_eq!(names(&rows_of(&menu)), ["Files", "Firefox"]);
+        assert_eq!(
+            menu.selected_app().map(|app| app.name.as_str()),
+            Some("Files")
+        );
+        // a pipeline has nothing to show until it has run
+        menu.typed(&known, "ls | first".into());
+        assert!(menu.results.is_empty());
+        assert!(menu.selected_app().is_none());
+        // and an empty field brings the sections back
+        menu.typed(&known, String::new());
+        assert_eq!(menu.results.len(), 9);
+        assert!(menu.selected_app().is_none());
+    }
+
+    fn rows_of(menu: &Menu) -> Vec<Row> {
+        match &menu.results {
+            Results::Apps(rows) => rows.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn up_and_down_walk_the_apps_and_wrap() {
+        let known = apps();
+        let mut menu = Menu::new(window::Id::unique(), &known);
         menu.step(1);
-        assert_eq!(menu.selected, 0, "output rows are not a menu");
-        menu.results = Results::Matches(Vec::new());
-        assert_eq!(menu.results.len(), 0);
+        assert_eq!(
+            menu.selected_app().map(|app| app.name.as_str()),
+            Some("Files")
+        );
+        menu.step(-1);
+        assert_eq!(
+            menu.selected_app().map(|app| app.name.as_str()),
+            Some("Ghostty")
+        );
+        menu.step(1);
+        assert_eq!(
+            menu.selected_app().map(|app| app.name.as_str()),
+            Some("Files")
+        );
+        menu.results = Results::Output(vec!["one".into(), "two".into()]);
+        menu.selected = None;
+        menu.step(1);
+        assert!(menu.selected_app().is_none(), "output rows are not a menu");
+    }
+
+    #[test]
+    fn the_list_scrolls_to_keep_the_selected_row_in_sight() {
+        let many: Vec<App> = (0..40)
+            .map(|at| app(&format!("App {at:02}"), Category::Accessories))
+            .collect();
+        let mut menu = Menu::new(window::Id::unique(), &many);
+        assert_eq!(menu.results.len(), 41, "a header over forty apps");
+        assert_eq!(menu.results.shown(), LIST_ROWS);
+        assert_eq!(menu.wanted_height(), height(LIST_ROWS, false));
+        // walking down the visible rows does not move the list
+        for _ in 0..LIST_ROWS - 1 {
+            menu.step(1);
+        }
+        assert_eq!(menu.top, 0);
+        // past the last visible row it follows, one row at a time
+        menu.step(1);
+        assert_eq!(menu.top, 1);
+        // and back up at the top it stops there, with the header in sight
+        for _ in 0..LIST_ROWS {
+            menu.step(-1);
+        }
+        assert_eq!(menu.top, 0);
+        // the last app is the last row, so the list is at its end
+        menu.step(-1);
+        assert_eq!(menu.top, menu.results.len() - LIST_ROWS);
     }
 }

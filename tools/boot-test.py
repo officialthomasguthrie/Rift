@@ -92,9 +92,11 @@ With --lens the desktop check expects lens's bar along the top of that screen: h
 layer surface with its namespace, and the screendump has the bar gray with something drawn at its
 left, in its middle and at its right, and the desktop gray below. `lens --state` prints what the bar
 shows and the test compares its clock with `date` in the vm and its network with nmcli's. The test
-then opens the Applications menu with `lens --menu` and types into its field from the serial shell
-with `lens --enter`: a nushell pipeline puts three rows under the field, a command with arguments it
-does not know puts a line under it, the first `lens --escape` clears the field and the second closes
+then opens the Applications menu with `lens --menu`: under the field are the apps of the session in
+their sections, typing an app's name with `lens --type` filters them, and `lens --enter` starts the
+one that is selected, which horizon then lists as a window. The field takes lines from the serial
+shell the same way: a nushell pipeline puts three rows under it, a command with arguments it does
+not know puts a line under it, the first `lens --escape` clears the field and the second closes
 the menu. Killing the shell brings it back, since it is a user unit that restarts. With --models as
 well, a question goes through `lens --do`, which prints quasar's answer, and then into the field,
 where the answer shows up as rows under it.
@@ -254,9 +256,15 @@ MENU_PAD = 8
 MENU_GAP = 4
 FIELD_SIZE = (480, 32)
 ROW_HEIGHT = 28
-LIST_ROWS = 8
+OUTPUT_ROWS = 8
+APP_ROWS = 20
+# the app the menu starts, its name in the list and the app id its window has
+MENU_APP = "Ghostty"
+MENU_APP_ID = "com.mitchellh.ghostty"
+# the name the test flatpak of nix/test-flatpak.nix is listed under once it is installed
+FLATPAK_APP = "Rift test app"
 # the words lens --state prints, and how the bar writes the time
-STATE_KEYS = ("clock", "network", "volume", "battery", "menu", "field", "rows", "error", "notice")
+STATE_KEYS = ("clock", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -1730,19 +1738,59 @@ def main():
                 fail(f"the bar says the menu is {bar.get('menu')!r} before anything opened it")
             ok(f"the bar's status: network {bar['network']}, volume {bar['volume']}, battery {bar['battery']}")
 
-            # 5c. the Applications menu. Mod+Space runs `lens --menu`, and the field inside the menu
-            # takes a line from the terminal over the socket in the session's runtime directory
+            # 5c. the Applications menu with the app list in it. Mod+Space runs `lens --menu`, and
+            # the list under the field is every desktop entry the session has, in its section
             run("lens --menu", "the Applications menu")
-            look("the Applications menu", f"{stem}-menu{extension}", 20, menu=True, journals=("lens",))
-            if bar_state("the state with the menu open").get("menu") != "open":
+            state = bar_state("the state with the menu open")
+            if state.get("menu") != "open":
                 fail("lens --state does not say the menu is open after lens --menu")
+            known = int(state.get("apps") or 0)
+            listed = int(state.get("rows") or 0)
+            if known < 3 or listed < 4 or listed > APP_ROWS:
+                fail(f"the menu lists {listed} rows for {known} apps")
+            look("the Applications menu", f"{stem}-menu{extension}", 20, menu=True, rows=listed,
+                 journals=("lens",))
+            ok(f"the menu lists {listed} rows of the {known} apps the shell found")
 
+            # the words in the field filter the list at once, and the best match is the one Enter
+            # takes. --type does not press it
+            run(f'lens --type "{MENU_APP}"', "an app's name typed into the field")
+            state = bar_state("the state with the name in the field")
+            found = int(state.get("rows") or 0)
+            if state.get("field") != MENU_APP or not 1 <= found < listed:
+                fail(f"the field says {state.get('field')!r} with {found} rows under it, "
+                     f"expected {MENU_APP!r} with fewer than the {listed} of the whole list")
+            look("the app search", f"{stem}-menu-search{extension}", 20, menu=True, rows=found)
+            ok(f"typing {MENU_APP!r} left {found} of the {listed} rows")
+
+            # Enter starts the app that is selected and closes the menu. the window it opens is
+            # horizon's, so the compositor is what says whether the app started
+            run("lens --enter", "enter on the app the list selected")
+            until = time.monotonic() + 60
+            while True:
+                _, output = run("horizon msg --json windows", "horizon's windows")
+                window = re.search(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":"'
+                                   + re.escape(MENU_APP_ID) + r'"', without_console(output).replace("\n", ""))
+                if window or time.monotonic() > until:
+                    break
+                time.sleep(2)
+            if not window:
+                _, output = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
+                fail(f"horizon lists no {MENU_APP_ID} window after Enter in the menu: "
+                     f"{without_console(output).strip()[-400:]!r}")
+            if bar_state("the state after the app started").get("menu") != "closed":
+                fail("the menu is still open after Enter started the app")
+            run(f"horizon msg action close-window --id {window.group(1)}", f"closing {MENU_APP}'s window")
+            look("the desktop after the app closed", f"{stem}-menu-started{extension}", 30)
+            ok(f"the menu started {MENU_APP}, window {window.group(1)}, and closed itself")
+
+            # the field, with the same four interpreters as before, under the same list
             run(f'lens --enter "{RESULT_LINE}"', "a pipeline typed into the field")
             look("the result list", f"{stem}-lens{extension}", 20, menu=True, rows=RESULT_ROWS,
                  journals=("lens",))
-            listed = bar_state("the state with the list open").get("rows")
-            if listed != str(RESULT_ROWS):
-                fail(f"lens --state says {listed} rows under the field, expected {RESULT_ROWS}")
+            printed = bar_state("the state with the list open").get("rows")
+            if printed != str(RESULT_ROWS):
+                fail(f"lens --state says {printed} rows under the field, expected {RESULT_ROWS}")
 
             run(f'lens --enter "{ERROR_LINE}"', "a wrong command typed into the field")
             look("the line under the field", f"{stem}-lens-error{extension}", 20, menu=True, line=True)
@@ -1750,7 +1798,8 @@ def main():
                 fail("lens --state prints no error after a command it does not understand")
 
             run("lens --escape", "escape in the field")
-            look("the menu back at the field", f"{stem}-lens-empty{extension}", 20, menu=True)
+            look("the menu back at the field and the app list", f"{stem}-lens-empty{extension}", 20,
+                 menu=True, rows=listed)
             run("lens --escape", "escape again, which closes the menu")
             look("the desktop with the menu closed", f"{stem}-lens-closed{extension}", 20)
             if bar_state("the state with the menu closed").get("menu") != "closed":
@@ -1935,7 +1984,7 @@ def main():
 
                 run(f'lens --enter "{QUESTION}"', "a question typed into the field")
                 look("the answer under the field", f"{stem}-lens-answer{extension}", args.answer_timeout,
-                     menu=True, rows=(1, LIST_ROWS), journals=("lens",))
+                     menu=True, rows=(1, OUTPUT_ROWS), journals=("lens",))
                 run("lens --escape", "escape after the answer")
                 run("lens --escape", "escape again, which closes the menu")
 
@@ -2471,6 +2520,18 @@ def main():
             if not re.search(rf"^{re.escape(ref)}\s+test\s*$", printed, re.M):
                 fail(f"flatpak list does not show {ref} on its test branch")
         ok(f"flatpak installed dev.rift.TestPlatform and {app_id} for the owner from bundles")
+
+        # and an installed flatpak is in the applications menu: it exports a desktop entry into the
+        # owner's own data directory, and the shell reads the entries again every time the menu opens
+        if args.lens:
+            run("lens --menu", "the applications menu after the install")
+            run(f'lens --type "{FLATPAK_APP}"', "the flatpak's name typed into the field")
+            listed = bar_state("the state with the flatpak's name in the field").get("rows")
+            if listed != "1":
+                fail(f"the menu lists {listed} rows for {FLATPAK_APP!r}, expected the flatpak alone")
+            run("lens --escape", "escape in the field")
+            run("lens --escape", "escape again, which closes the menu")
+            ok(f"the applications menu lists the installed flatpak as {FLATPAK_APP!r}")
 
         # a file of home, exported for the app by the document portal. the app finds it under
         # /run/flatpak/doc and not where it is

@@ -5,6 +5,8 @@ let
   inherit (pkgs) lib;
   runtime = "dev.rift.TestPlatform";
   app = "dev.rift.TestApp";
+  # the name the applications menu lists the installed app under
+  appName = "Rift test app";
   branch = "test";
   # what the app does: reads the file the document portal gave it, then the same file where it is in
   # home, asks the desktop portal whether there is a network, and asks the user manager for
@@ -43,8 +45,17 @@ pkgs.runCommand "rift-test-flatpak" { nativeBuildInputs = [ pkgs.flatpak ]; } ''
   EOF
   flatpak build-export --runtime --disable-fsync repo platform ${branch}
 
-  mkdir -p testapp/files/bin testapp/export
+  mkdir -p testapp/files/bin testapp/export/share/applications
   install -m 755 ${probe} testapp/files/bin/probe
+  # an exported desktop entry, so the test can see an installed flatpak in the applications menu
+  cat > testapp/export/share/applications/${app}.desktop <<EOF
+  [Desktop Entry]
+  Type=Application
+  Name=${appName}
+  Exec=probe
+  Icon=${app}
+  Categories=Utility;
+  EOF
   cat > testapp/metadata <<EOF
   [Application]
   name=${app}

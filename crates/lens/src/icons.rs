@@ -1,6 +1,7 @@
 //! Icons by name, the way the XDG icon theme specification says: through the data directories,
-//! the Adwaita theme and then hicolor, the symbolic directories first. Status icons are symbolic
-//! SVGs the bar draws in one colour; app icons come from the same lookup, in colour.
+//! the Adwaita theme and then hicolor. A status icon is the symbolic drawing the bar paints in
+//! one colour, so those directories come first; an app icon is the app's own drawing in its own
+//! colours, so that lookup starts at the app directories instead.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -42,21 +43,57 @@ const DIRECTORIES: [&str; 26] = [
     "16x16/places",
 ];
 
+/// The directories an app icon comes from, in the order a 16 px row wants them: the vector one,
+/// then the sizes from the one that scales down best, and a symbolic drawing only if the app
+/// ships nothing else.
+const APP_DIRECTORIES: [&str; 11] = [
+    "scalable/apps",
+    "48x48/apps",
+    "32x32/apps",
+    "64x64/apps",
+    "24x24/apps",
+    "16x16/apps",
+    "128x128/apps",
+    "256x256/apps",
+    "512x512/apps",
+    "symbolic/apps",
+    "scalable/mimetypes",
+];
+
 /// The file endings, vector first.
 const ENDINGS: [&str; 2] = ["svg", "png"];
+
+/// What a desktop entry with no icon of its own, or with one no theme has, is drawn with.
+pub const UNKNOWN_APP: &str = "application-x-executable";
 
 /// Where a named icon is, or `None` when no theme on this machine has it. The answer is
 /// remembered: a view asks for the same few names on every frame.
 #[must_use]
 pub fn find(name: &str) -> Option<PathBuf> {
-    static FOUND: OnceLock<Mutex<HashMap<String, Option<PathBuf>>>> = OnceLock::new();
-    let cache = FOUND.get_or_init(|| Mutex::new(HashMap::new()));
+    static FOUND: Found = OnceLock::new();
+    remembered(&FOUND, name, &DIRECTORIES)
+}
+
+/// The same lookup for an app icon, which is drawn in its own colours and so comes from the
+/// directories the app puts its own drawing in.
+#[must_use]
+pub fn app(name: &str) -> Option<PathBuf> {
+    static FOUND: Found = OnceLock::new();
+    remembered(&FOUND, name, &APP_DIRECTORIES)
+}
+
+/// What a lookup remembers: a name to where it was found, or to nothing.
+type Found = OnceLock<Mutex<HashMap<String, Option<PathBuf>>>>;
+
+/// One name in one order, remembered in the cache the caller keeps.
+fn remembered(cache: &Found, name: &str, directories: &[&str]) -> Option<PathBuf> {
+    let cache = cache.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(cache) = cache.lock() {
         if let Some(found) = cache.get(name) {
             return found.clone();
         }
     }
-    let found = look(&bases(), name);
+    let found = look(&bases(), name, directories);
     if let Ok(mut cache) = cache.lock() {
         cache.insert(name.to_string(), found.clone());
     }
@@ -88,7 +125,7 @@ fn bases() -> Vec<PathBuf> {
     bases
 }
 
-fn look(bases: &[PathBuf], name: &str) -> Option<PathBuf> {
+fn look(bases: &[PathBuf], name: &str, directories: &[&str]) -> Option<PathBuf> {
     // a name with a slash or a name that walks up is not an icon name
     if name.is_empty() || name.contains('/') || name.contains("..") {
         return None;
@@ -100,7 +137,7 @@ fn look(bases: &[PathBuf], name: &str) -> Option<PathBuf> {
     }
     for base in bases {
         for theme in THEMES {
-            for directory in DIRECTORIES {
+            for directory in directories {
                 for ending in ENDINGS {
                     let path = base
                         .join(theme)
@@ -162,8 +199,12 @@ mod tests {
             "scalable/status",
             "audio-volume-high-symbolic.svg",
         );
-        let found =
-            look(std::slice::from_ref(&root), "audio-volume-high-symbolic").expect("the icon");
+        let found = look(
+            std::slice::from_ref(&root),
+            "audio-volume-high-symbolic",
+            &DIRECTORIES,
+        )
+        .expect("the icon");
         assert!(found.to_string_lossy().contains("symbolic/status"));
         let _ = fs::remove_dir_all(&root);
     }
@@ -185,8 +226,12 @@ mod tests {
             "network-wired-symbolic.svg",
         );
         // the first base wins over the theme order
-        let found =
-            look(&[first.clone(), second.clone()], "network-wired-symbolic").expect("the icon");
+        let found = look(
+            &[first.clone(), second.clone()],
+            "network-wired-symbolic",
+            &DIRECTORIES,
+        )
+        .expect("the icon");
         assert!(found.starts_with(&first));
         // and inside one base, Adwaita wins
         theme(
@@ -201,8 +246,12 @@ mod tests {
             "symbolic/devices",
             "network-offline-symbolic.svg",
         );
-        let found =
-            look(std::slice::from_ref(&second), "network-offline-symbolic").expect("the icon");
+        let found = look(
+            std::slice::from_ref(&second),
+            "network-offline-symbolic",
+            &DIRECTORIES,
+        )
+        .expect("the icon");
         assert!(found.to_string_lossy().contains("Adwaita"));
         let _ = fs::remove_dir_all(&first);
         let _ = fs::remove_dir_all(&second);
@@ -212,9 +261,31 @@ mod tests {
     fn png_is_taken_when_there_is_no_svg() {
         let root = temporary("png");
         theme(&root, "hicolor", "48x48/apps", "firefox.png");
-        let found = look(std::slice::from_ref(&root), "firefox").expect("the icon");
+        let found = look(std::slice::from_ref(&root), "firefox", &DIRECTORIES).expect("the icon");
         assert!(found.to_string_lossy().ends_with("firefox.png"));
-        assert!(look(std::slice::from_ref(&root), "nothing-like-this").is_none());
+        assert!(
+            look(
+                std::slice::from_ref(&root),
+                "nothing-like-this",
+                &DIRECTORIES
+            )
+            .is_none()
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_app_icon_comes_in_colour_before_a_symbolic_one() {
+        let root = temporary("apps");
+        theme(&root, "hicolor", "48x48/apps", "firefox.png");
+        theme(&root, "Adwaita", "symbolic/apps", "firefox-symbolic.svg");
+        theme(&root, "Adwaita", "symbolic/apps", "firefox.svg");
+        let found =
+            look(std::slice::from_ref(&root), "firefox", &APP_DIRECTORIES).expect("the icon");
+        assert!(found.to_string_lossy().ends_with("48x48/apps/firefox.png"));
+        // and the bar, which paints one colour over what it draws, takes the symbolic one
+        let found = look(std::slice::from_ref(&root), "firefox", &DIRECTORIES).expect("the icon");
+        assert!(found.to_string_lossy().contains("symbolic/apps"));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -227,12 +298,20 @@ mod tests {
             "symbolic/status",
             "battery-level-50-symbolic.svg",
         );
-        assert!(look(std::slice::from_ref(&root), "").is_none());
-        assert!(look(std::slice::from_ref(&root), "../../etc/passwd").is_none());
+        assert!(look(std::slice::from_ref(&root), "", &DIRECTORIES).is_none());
         assert!(
             look(
                 std::slice::from_ref(&root),
-                "symbolic/status/battery-level-50-symbolic"
+                "../../etc/passwd",
+                &DIRECTORIES
+            )
+            .is_none()
+        );
+        assert!(
+            look(
+                std::slice::from_ref(&root),
+                "symbolic/status/battery-level-50-symbolic",
+                &DIRECTORIES
             )
             .is_none()
         );

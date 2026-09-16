@@ -38,6 +38,12 @@ pub const MONO: Font = Font {
     family: font::Family::Name("DejaVu Sans Mono"),
     ..Font::DEFAULT
 };
+/// The name over a group of rows, the same size as the rows and in bold, the way a settings page
+/// heads a section.
+pub const HEADING: Font = Font {
+    weight: font::Weight::Bold,
+    ..FONT
+};
 
 /// What `lens --state` prints. The shell writes it after every message and the thread that
 /// answers the socket reads it, so a query never waits for the one that draws.
@@ -70,6 +76,8 @@ pub enum Message {
     Submit,
     /// Up or down the list.
     Move(isize),
+    /// A click on a row of the app list: that app starts.
+    Pick(usize),
     /// Escape: clear the field, or close the menu when it is already empty.
     Escape,
     /// Close the menu, whatever surface it is on.
@@ -281,19 +289,17 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ToggleMenu => toggle(state),
-        Message::Input(value) => {
-            let Lens { apps, menu, .. } = state;
-            if let Some(menu) = menu.as_mut() {
-                menu.typed(apps, value);
-            }
-            Task::none()
-        }
+        Message::Input(value) => write(state, value),
         Message::Submit => submit(state),
-        Message::Move(step) => {
+        Message::Move(step) => state.menu.as_mut().map_or_else(Task::none, |menu| {
+            menu.step(step);
+            menu.scroll()
+        }),
+        Message::Pick(at) => {
             if let Some(menu) = state.menu.as_mut() {
-                menu.step(step);
+                menu.selected = Some(at);
             }
-            Task::none()
+            submit(state)
         }
         Message::Escape => escape(state),
         Message::Dismiss => close(state),
@@ -330,8 +336,11 @@ fn open(state: &mut Lens) -> Task<Message> {
     if state.menu.is_some() {
         return Task::none();
     }
+    // the entries are read again here, so an app installed since the session started is in the
+    // list without a restart. it is a walk of a few directories, once per opening
+    state.apps = launcher::load();
     let id = window::Id::unique();
-    let menu = Menu::new(id);
+    let menu = Menu::new(id, &state.apps);
     let height = menu.height;
     state.menu = Some(menu);
     Task::done(Message::Open(id, height))
@@ -347,11 +356,12 @@ fn close(state: &mut Lens) -> Task<Message> {
 /// Escape clears the field first, the way a search entry does, and closes the menu when there is
 /// nothing left to clear.
 fn escape(state: &mut Lens) -> Task<Message> {
-    match state.menu.as_mut() {
+    let Lens { apps, menu, .. } = state;
+    match menu.as_mut() {
         None => Task::none(),
         Some(menu) if menu.has_anything() => {
-            menu.clear();
-            menu::focus_field()
+            menu.clear(apps);
+            Task::batch([menu::focus_field(), menu.scroll()])
         }
         Some(_) => Task::done(Message::Dismiss),
     }
@@ -376,15 +386,16 @@ fn typed(state: &mut Lens, command: Command) -> Task<Message> {
     match command {
         Command::Type(words) => {
             let opening = open(state);
-            write(state, words);
-            opening
+            Task::batch([opening, write(state, words)])
         }
         Command::Enter(words) => {
             let opening = open(state);
-            if !words.is_empty() {
-                write(state, words);
-            }
-            Task::batch([opening, submit(state)])
+            let writing = if words.is_empty() {
+                Task::none()
+            } else {
+                write(state, words)
+            };
+            Task::batch([opening, writing, submit(state)])
         }
         Command::Escape => escape(state),
         Command::Menu => toggle(state),
@@ -393,11 +404,14 @@ fn typed(state: &mut Lens, command: Command) -> Task<Message> {
     }
 }
 
-fn write(state: &mut Lens, words: String) {
+/// New words in the field. The list is shorter or longer for them, so it goes back to its top,
+/// which the widget itself does not do when its contents change.
+fn write(state: &mut Lens, words: String) -> Task<Message> {
     let Lens { apps, menu, .. } = state;
-    if let Some(menu) = menu.as_mut() {
+    menu.as_mut().map_or_else(Task::none, |menu| {
         menu.typed(apps, words);
-    }
+        menu.scroll()
+    })
 }
 
 /// Ask the compositor for a taller or shorter menu when it changed shape.
@@ -423,6 +437,7 @@ fn remember(state: &Lens) {
         lines.push('\n');
     };
     line("clock", &state.clock);
+    line("apps", &state.apps.len().to_string());
     line("network", &state.status.network.word());
     line(
         "volume",
@@ -443,7 +458,7 @@ fn remember(state: &Lens) {
         Some(menu) => {
             line("menu", "open");
             line("field", &menu.input);
-            line("rows", &menu.results.len().to_string());
+            line("rows", &menu.results.shown().to_string());
             if let Some((text, wrong)) = menu.line() {
                 line(if wrong { "error" } else { "notice" }, text);
             }
@@ -465,11 +480,9 @@ fn submit(state: &mut Lens) -> Task<Message> {
         return start(action);
     }
     // the list is a menu: Enter takes the row that is selected, not always the first
-    if let Results::Matches(matched) = &menu.results {
-        if let Some(app) = matched.get(menu.selected).cloned() {
-            launch(menu, &app);
-            return Task::done(Message::Dismiss);
-        }
+    if let Some(app) = menu.selected_app().cloned() {
+        launch(menu, &app);
+        return Task::done(Message::Dismiss);
     }
     let reading = route::route(&menu.input, apps);
     eprintln!("lens: {:?} -> {reading:?}", menu.input);
@@ -568,7 +581,7 @@ fn launch(menu: &mut Menu, app: &App) {
     }
     menu.input.clear();
     menu.results = Results::None;
-    menu.selected = 0;
+    menu.selected = None;
 }
 
 fn start(action: Action) -> Task<Message> {

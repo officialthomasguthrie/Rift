@@ -149,28 +149,22 @@ fn looks_like_shell(line: &str, words: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    fn app(name: &str, program: &str, terminal: bool) -> App {
+        App {
+            name: name.into(),
+            exec: vec![program.into()],
+            terminal,
+            icon: Some(program.into()),
+            category: crate::launcher::Category::Accessories,
+        }
+    }
+
     fn apps() -> Vec<App> {
         vec![
-            App {
-                name: "Firefox".into(),
-                exec: vec!["firefox".into()],
-                terminal: false,
-            },
-            App {
-                name: "Text editor".into(),
-                exec: vec!["gnome-text-editor".into()],
-                terminal: false,
-            },
-            App {
-                name: "Helix".into(),
-                exec: vec!["hx".into()],
-                terminal: true,
-            },
-            App {
-                name: "Files".into(),
-                exec: vec!["nautilus".into()],
-                terminal: false,
-            },
+            app("Firefox", "firefox", false),
+            app("Text editor", "gnome-text-editor", false),
+            app("Helix", "hx", true),
+            app("Files", "nautilus", false),
         ]
     }
 
@@ -218,11 +212,7 @@ mod tests {
 
     #[test]
     fn os_words_beat_app_names() {
-        let apps = vec![App {
-            name: "Power statistics".into(),
-            exec: vec!["gnome-power-statistics".into()],
-            terminal: false,
-        }];
+        let apps = vec![app("Power statistics", "gnome-power-statistics", false)];
         assert!(matches!(route("power off", &apps), Interpretation::Os(_)));
         assert!(matches!(route("power", &apps), Interpretation::Usage(_)));
         assert!(matches!(

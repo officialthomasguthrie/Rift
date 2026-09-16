@@ -18,9 +18,13 @@ librift = { workspace = true, features = ["bus"] }
 
 # the shell needs a wayland session and layer-shell, so it only exists on linux. the software
 # renderer is the one that works on every machine, so wgpu stays out
-# svg draws the symbolic icons of the Adwaita theme in the bar, each in one colour
+# svg draws the symbolic icons of the Adwaita theme in the bar, each in one colour, and the image
+# widget draws the app icons that ship as png, which most of them do. iced's image feature would
+# read every format there is, which is a hundred crates and the avif and jpeg xl encoders; the
+# icon themes hold png and svg, so the reader is named here with png alone
 [target.'cfg(target_os = "linux")'.dependencies]
-iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "wayland", "thread-pool", "svg"] }
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "wayland", "thread-pool", "svg", "image-without-codecs"] }
+image = { version = "0.25.9", default-features = false, features = ["png"] }
 iced_layershell = { version = "0.19.1", default-features = false }
 
 [lints]
