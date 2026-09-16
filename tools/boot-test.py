@@ -2517,6 +2517,7 @@ def main():
             if not menu_size:
                 fail("a click on the clock opened no clock menu")
             point(args.qmp, size, away)
+            time.sleep(1)
             look("the clock menu", f"{stem}-clock{extension}", 20, clock=menu_size, journals=("lens",))
             if bar_state("what the clock menu lists").get("latest") != NOTIFY_SUMMARY:
                 fail(f"the clock menu lists {bar_state('the list').get('latest')!r}, expected {NOTIFY_SUMMARY!r}")
@@ -2541,6 +2542,7 @@ def main():
             if not grown:
                 fail(f"the clock menu is {clock_open('the clock menu')} with two notifications, it was {menu_size}")
             point(args.qmp, size, away)
+            time.sleep(1)
             shot(f"{stem}-clock-quiet{extension}", "clock-quiet")
             click(args.qmp, size, switch_point(grown))
             if wait_for(20, lambda: bar_state("the state after the switch again").get("do-not-disturb") == "off") is not True:
@@ -2557,28 +2559,51 @@ def main():
             point(args.qmp, size, away)
             ok("a second click on the clock closed the clock menu")
 
-            # the volume key shows the popup for a second. the screendumps follow the key at once,
-            # without a command on the serial line in between
+            # the volume key shows the popup for a second. a full check of a screendump takes seconds,
+            # longer than the popup is up, so the screendumps follow the key as fast as they come and
+            # each is only looked at in three points of the popup's padding; the one that has it gets
+            # the full check
+
+            def popup_up(width, height, rgb):
+                """Whether the popup's gray is in the padding along its top edge."""
+                y = round(height - dock_rows - (POPUP_ABOVE + POPUP_SIZE[1] - 4) * scale)
+                points = [round(width / 2 + offset * scale) for offset in (-90, 0, 90)]
+                return all(near(rgb[(y * width + x) * 3:(y * width + x) * 3 + 3], MENU, 3) for x in points)
+
+            def popup_after(what, send):
+                """Send a key or a command, then screendumps for three seconds. Returns the first that has
+                the popup, or None, and the last one taken."""
+                send()
+                until = time.monotonic() + 3
+                frame = None
+                while time.monotonic() < until:
+                    frame = screendump(args.qmp, work, "popup")
+                    if popup_up(*frame):
+                        return frame, frame
+                print(f"\nboot-test: no popup in three seconds after {what}", flush=True)
+                return None, frame
+
             before = volume_now()
             found = None
             for _ in range(3):
-                press(["volumeup"], what="the volume key")
-                until = time.monotonic() + 3
-                while time.monotonic() < until:
-                    width, height, rgb = screendump(args.qmp, work, "popup")
-                    good, lines = check_desktop(width, height, rgb, lens=True, popup=POPUP_SIZE)
-                    if good:
-                        found = (width, height, rgb, lines)
-                        break
+                found, last = popup_after("the volume key", lambda: press(["volumeup"], what="the volume key"))
                 if found:
                     break
             if not found:
-                write_png(f"{stem}-popup{extension}", width, height, rgb)
-                print("\nboot-test: " + "\nboot-test: ".join(lines), flush=True)
+                write_png(f"{stem}-popup{extension}", *last)
+                pressed = volume_now()
+                # the verb the key runs, from the serial line, tells the key and the popup apart
+                by_hand, _ = popup_after("lens --volume up", lambda: run("lens --volume up", "the verb the volume key runs"))
                 _, output = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
-                fail(f"the volume key showed no popup, see {stem}-popup{extension}: {without_console(output).strip()[-400:]!r}")
-            write_png(f"{stem}-popup{extension}", found[0], found[1], found[2])
-            print("\nboot-test: " + "\nboot-test: ".join(found[3]), flush=True)
+                _, horizon_log = run("journalctl -b -t horizon -o cat -n 20 --no-pager | cat", "horizon's log")
+                fail(f"the volume key showed no popup: the sink was {before} and is {pressed} after three presses, "
+                     f"and lens --volume up {'did' if by_hand else 'did not'} show it. lens: "
+                     f"{without_console(output).strip()[-300:]!r} horizon: {without_console(horizon_log).strip()[-300:]!r}")
+            good, lines = check_desktop(*found, lens=True, popup=POPUP_SIZE)
+            write_png(f"{stem}-popup{extension}", *found)
+            print("\nboot-test: " + "\nboot-test: ".join(lines), flush=True)
+            if not good:
+                fail(f"the key popup is not where it belongs, see {stem}-popup{extension}")
             after = volume_now()
             if before is None or after is None or after <= before:
                 fail(f"the volume key left the sink at {after}, it was {before}")
