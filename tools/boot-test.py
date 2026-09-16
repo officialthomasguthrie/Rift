@@ -258,13 +258,31 @@ FIELD_SIZE = (480, 32)
 ROW_HEIGHT = 28
 OUTPUT_ROWS = 8
 APP_ROWS = 20
+# lens's dock, from crates/lens/src/dock.rs: its height, the padding at each end, one item and the
+# gap between two of them, and the menu a right click on an item opens, all in logical pixels
+DOCK_HEIGHT = 44
+DOCK_PAD = 6
+DOCK_ITEM = 40
+DOCK_GAP = 4
+DOCK_MENU_WIDTH = 240
+DOCK_MENU_PAD = 8
+DOCK_MENU_ROW = 28
+# the apps the dock keeps when the owner has said nothing, in their order, from the same file
+DOCK_KEPT = ["firefox", "com.mitchellh.ghostty", "dev.zed.Zed"]
 # the app the menu starts, its name in the list and the app id its window has
 MENU_APP = "Ghostty"
 MENU_APP_ID = "com.mitchellh.ghostty"
+# the second app, which is not in the dock until the test pins it. it wants a terminal, so lens
+# starts it in one with a class of its own and its window is its, not the terminal's
+DOCK_APP = "Helix"
 # the name the test flatpak of nix/test-flatpak.nix is listed under once it is installed
 FLATPAK_APP = "Rift test app"
+# one window of `horizon msg --json windows`, whose fields come in the order niri-ipc declares them
+WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
+                    r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
 # the words lens --state prints, and how the bar writes the time
-STATE_KEYS = ("clock", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice")
+STATE_KEYS = ("clock", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
+              "dock", "workspaces", "item")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -358,17 +376,54 @@ def menu_height(rows, line):
     return MENU_PAD + FIELD_SIZE[1] + listed + under + MENU_PAD
 
 
+def bar_gray_rows(width, height, rgb):
+    """How much of each row is one of the bar's two grays. The bar is the run of those rows from the
+    top of the screen and the dock the run from the bottom; the same gray anywhere else is the
+    field's, inside a menu."""
+    rows = []
+    for y in range(height):
+        row = y * width * 3
+        found = 0
+        for x in range(width):
+            px = rgb[row + x * 3 : row + x * 3 + 3]
+            if near(px, BAR, 3) or near(px, BAR_LINE, 3):
+                found += 1
+        rows.append(found)
+    return rows
+
+
+def bar_and_dock(width, height, rows):
+    """(the bar's rows at the top, the dock's rows at the bottom) from the counts of one screendump."""
+    bar = 0
+    while bar < height and rows[bar] > width / 2:
+        bar += 1
+    dock = 0
+    while bar + dock < height and rows[height - 1 - dock] > width / 2:
+        dock += 1
+    return bar, dock
+
+
+def ink_in(width, rgb, top, bottom):
+    """What is drawn on the bar's gray in these rows, counted by third of the screen's width."""
+    found = [0, 0, 0]
+    for y in range(top, bottom):
+        row = y * width * 3
+        for x in range(width):
+            px = rgb[row + x * 3 : row + x * 3 + 3]
+            if not near(px, BAR, 3) and not near(px, BAR_LINE, 3):
+                found[min(2, x * 3 // width)] += 1
+    return found
+
+
 def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False):
     """Count the desktop gray and the console's black in a screendump, and with lens the bar along
-    the top with something drawn at its left, in its middle and at its right, and with menu the
-    Applications menu under the bar with the field in it. rows is a count, or (fewest, most) when
-    the test cannot know how many rows there are: then any count in that range that fits passes.
-    Returns (ok, lines to print)."""
-    gray = black = menu_gray = field = 0
-    bar_rows = 0
-    # what is drawn in the bar, by third of its width: the button, the clock, the status icons
-    ink = [0, 0, 0]
-    # the rows under the bar that are part of the menu, and where its gray starts and ends in each
+    the top with something drawn at its left, in its middle and at its right, the dock along the
+    bottom with the apps in it, and with menu the Applications menu under the bar with the field in
+    it. rows is a count, or (fewest, most) when the test cannot know how many rows there are: then
+    any count in that range that fits passes. Returns (ok, lines to print)."""
+    gray = black = menu_gray = 0
+    bar_like = [0] * height
+    # the rows that are part of the menu, and where its gray starts and ends in each
     menu_rows = []
     for y in range(height):
         row = y * width * 3
@@ -385,21 +440,17 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
             elif near(px, MENU, 3):
                 row_menu += 1
                 first, last = (x if first < 0 else first), x
+        bar_like[y] = row_bar
         menu_gray += row_menu
-        # the bar is the run of rows from the top that are mostly its two grays; under it the same
-        # gray is the field's
-        if row_bar > width / 2 and bar_rows == y:
-            bar_rows += 1
-            for x in range(width):
-                px = rgb[row + x * 3 : row + x * 3 + 3]
-                if not near(px, BAR, 3) and not near(px, BAR_LINE, 3):
-                    ink[min(2, x * 3 // width)] += 1
-            continue
-        field += row_bar
         # a row of the menu has at least its padding on either side of whatever is in it; a pixel
         # of the menu's gray anywhere else is the edge of a letter or of the pointer
         if row_menu >= 12:
             menu_rows.append((y, first, last))
+    bar_rows, dock_rows = bar_and_dock(width, height, bar_like)
+    # the same gray between the two bars is the field's, inside the menu, and only the rows between
+    # them can be the menu's: a few pixels of its gray in the bar are the edges of letters
+    field = sum(bar_like[bar_rows : height - dock_rows])
+    menu_rows = [found for found in menu_rows if bar_rows <= found[0] < height - dock_rows]
     total = width * height
     checks = [
         ("no console black", black <= 0.02 * total, f"{black} of {total}"),
@@ -410,11 +461,17 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
         return report("desktop", lines, checks)
     # the compositor may scale the bar, so its height on screen gives the scale
     scale = bar_rows / BAR_HEIGHT if bar_rows else 1
+    ink = ink_in(width, rgb, 0, bar_rows)
+    dock_ink = ink_in(width, rgb, height - dock_rows, height)
     checks += [
         ("the bar is along the top", 0.9 * BAR_HEIGHT <= bar_rows <= 3 * BAR_HEIGHT,
          f"{bar_rows} rows, expected about {BAR_HEIGHT} at scale 1"),
         ("the button, the clock and the icons are in it", all(count >= 30 for count in ink),
          f"{ink[0]} pixels at the left, {ink[1]} in the middle, {ink[2]} at the right"),
+        ("the dock is along the bottom", 0.9 * DOCK_HEIGHT <= dock_rows <= 3 * DOCK_HEIGHT,
+         f"{dock_rows} rows, expected about {DOCK_HEIGHT} at scale 1"),
+        ("the apps are in it and the workspaces at its right", dock_ink[0] >= 300 and dock_ink[2] >= 20,
+         f"{dock_ink[0]} pixels at the left, {dock_ink[2]} at the right"),
     ]
     # the run of rows the menu covers, and where its gray starts and ends in the first of them,
     # which is the padding above the field and so the full width of the menu inside its border
@@ -428,7 +485,7 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
     left, right = (run[0][1], run[0][2]) if run else (-1, -1)
     box = (right - left + 1, len(run)) if run else (0, 0)
     if not menu:
-        below = total - bar_rows * width
+        below = total - (bar_rows + dock_rows) * width
         checks += [
             ("the desktop background covers the rest", gray >= 0.95 * below, f"{gray} of {below}"),
             # the menu's padding is eight rows before anything else in it
@@ -441,7 +498,7 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
         wanted = menu_height(count, line)
         inside = ((MENU_WIDTH - 2) * scale, (wanted - 2) * scale)
         field_area = FIELD_SIZE[0] * FIELD_SIZE[1] * scale * scale
-        below = total - bar_rows * width - inside[0] * inside[1]
+        below = total - (bar_rows + dock_rows) * width - inside[0] * inside[1]
         return wanted, [
             ("the menu hangs under the bar at the left", abs(top - bar_rows - 1) <= 2 * scale and abs(left - (MENU_PAD + 1) * scale) <= 2 * scale,
              f"its gray starts at {left},{top}, the bar ends at {bar_rows}"),
@@ -531,7 +588,7 @@ def check_console(width, height, rgb):
     greeting from its first line down: fastfetch's rows alone, as the console is too short for the
     whole logo beside them. Returns (ok, lines to print)."""
     gray = black = logo = 0
-    bar_rows = 0
+    bar_like = [0] * height
     console_top, console_rows, console_width = -1, 0, 0
     text_rows = []
     for y in range(height):
@@ -555,8 +612,7 @@ def check_console(width, height, rgb):
                 row_black += 1
             elif near(px, BAR, 3) or near(px, BAR_LINE, 3):
                 row_bar += 1
-        if row_bar > width / 2 and bar_rows == y:
-            bar_rows += 1
+        bar_like[y] = row_bar
         # the first run of rows that are mostly the console's background. a line of text in the
         # terminal covers only some of a row. the edges of text on its near black are near black
         # too, so black counts only outside the console
@@ -571,9 +627,10 @@ def check_console(width, height, rgb):
         else:
             black += row_black
     total = width * height
+    bar_rows, dock_rows = bar_and_dock(width, height, bar_like)
     scale = bar_rows / BAR_HEIGHT if bar_rows else 1
     wanted = CONSOLE_HEIGHT * scale
-    below = total - (bar_rows + console_rows) * width
+    below = total - (bar_rows + dock_rows + console_rows) * width
     # a line of DejaVu Sans Mono 11 is 17 rows. the greeting starts a few rows under the window's
     # top, and fastfetch's rows run down most of the window
     greeting = bool(text_rows) and text_rows[0] - console_top <= 12 * scale \
@@ -581,6 +638,7 @@ def check_console(width, height, rgb):
     checks = [
         ("no console black", black <= 0.02 * total, f"{black} of {total}"),
         ("the bar is along the top", 0.9 * BAR_HEIGHT <= bar_rows <= 3 * BAR_HEIGHT, f"{bar_rows} rows"),
+        ("the dock is along the bottom", 0.9 * DOCK_HEIGHT <= dock_rows <= 3 * DOCK_HEIGHT, f"{dock_rows} rows"),
         ("the console starts under the bar", console_top >= 0 and bar_rows <= console_top <= bar_rows + 16 * scale,
          f"first row {console_top}, the bar ends at {bar_rows}"),
         ("the console is as tall as the window rule says", 0.95 * wanted <= console_rows <= 1.05 * wanted,
@@ -701,6 +759,24 @@ def screendump(qmp_path, work, name):
     return read_ppm(ppm)
 
 
+def click(qmp_path, size, at, button="left"):
+    """Click at a point of the screen through the monitor. The tablet's absolute axes run over the
+    whole screen, so a point read off a screendump is a point on it. size and at are (width, height)
+    and (x, y)."""
+    def axis(name, value, whole):
+        return {"type": "abs", "data": {"axis": name, "value": round(value * 0x7FFF / whole)}}
+
+    def press(down):
+        return {"execute": "input-send-event",
+                "arguments": {"events": [{"type": "btn", "data": {"down": down, "button": button}}]}}
+
+    qmp(qmp_path, {"execute": "input-send-event",
+                   "arguments": {"events": [axis("x", at[0], size[0]), axis("y", at[1], size[1])]}})
+    # the compositor takes the motion first, then the button, or the click lands where the pointer was
+    time.sleep(0.3)
+    qmp(qmp_path, press(True), press(False))
+
+
 class Tee:
     def __init__(self, path):
         self.file = open(path, "w", encoding="utf-8", errors="replace")
@@ -767,6 +843,9 @@ def main():
         "-smp", "2",
         "-m", args.memory,
         "-device", "virtio-vga",
+        # an absolute pointer, so a click can be sent to a point of the screendump through the
+        # monitor. the emulated ps/2 mouse only moves by so much at a time
+        "-device", "virtio-tablet-pci",
         # a sound card that plays nowhere, so pipewire has a sink: the bar's volume icon and the
         # system menu's slider need one, and the vm has no sound hardware otherwise
         "-audiodev", "none,id=quiet",
@@ -1805,6 +1884,169 @@ def main():
             if bar_state("the state with the menu closed").get("menu") != "closed":
                 fail("the menu is still open after the second escape")
             ok("the menu opened under the bar, took a line, cleared it and closed")
+
+            # 5c2. the dock along the bottom. it is a surface of its own, made when the shell
+            # starts, and it lists the apps that stay in it before anything is running
+            _, output = run("horizon msg --json layers", "horizon's layer surfaces again")
+            if not re.search(r'"namespace":\s*"lens-dock"', without_console(output)):
+                fail("horizon lists no layer surface named lens-dock")
+
+            def dock_items(what):
+                """What the dock lists, as a dict of app id to (its windows, whether it is in front)."""
+                listed = bar_state(what).get("dock") or ""
+                found = {}
+                for word in listed.split():
+                    key, _, count = word.rpartition(":")
+                    found[key] = (int(count.rstrip("*") or 0), count.endswith("*"))
+                return found
+
+            def dock_when(what, seconds, fits):
+                """The dock's items once they fit, or what they were when the wait ran out."""
+                until = time.monotonic() + seconds
+                while True:
+                    items = dock_items(what)
+                    if fits(items) or time.monotonic() > until:
+                        return items
+                    time.sleep(2)
+
+            def open_windows(what):
+                """Horizon's windows as (id, app id, whether it has the focus)."""
+                status, output = run("horizon msg --json windows", what)
+                printed = without_console(output).replace("\n", "")
+                if status != 0:
+                    fail(f"horizon msg windows exited with {status}: {printed.strip()[-300:]!r}")
+                return [(int(found.group(1)), found.group(2) or "", found.group(3) == "true")
+                        for found in WINDOW.finditer(printed)]
+
+            def wait_for(seconds, ready):
+                """Poll until ready() answers something, or give up and answer what it last said."""
+                until = time.monotonic() + seconds
+                while True:
+                    found = ready()
+                    if found or time.monotonic() > until:
+                        return found
+                    time.sleep(2)
+
+            def shot(png, name="dock"):
+                """A screendump written as it is, with no checks: a picture for a person to look at."""
+                width, height, rgb = screendump(args.qmp, work, name)
+                write_png(png, width, height, rgb)
+                print(f"\nboot-test: wrote {png}", flush=True)
+
+            items = dock_when("what the dock lists", 20, lambda items: list(items) == DOCK_KEPT
+                              and not any(windows for windows, _ in items.values()))
+            if list(items) != DOCK_KEPT:
+                fail(f"the dock lists {list(items)}, expected the apps it keeps, {DOCK_KEPT}")
+            if any(windows for windows, _ in items.values()):
+                fail(f"the dock shows a window before anything started: {items}")
+            # with nothing open horizon has the one workspace, and it is the one on screen
+            spaces = bar_state("the workspaces in the dock").get("workspaces")
+            if not (spaces or "").startswith("1*"):
+                fail(f"the dock says the workspaces are {spaces!r}, expected the one that is on screen")
+            ok(f"the dock lists {' '.join(items)} and workspace {spaces}")
+
+            # a click on the icon of a pinned app that is not running starts it. the pointer goes to
+            # the middle of its item, which is where the dock draws it: the padding at the end of
+            # the bar, then one item and its gap for each app before it
+            width, height, rgb = screendump(args.qmp, work, "dock")
+            size = (width, height)
+            _, dock_rows = bar_and_dock(width, height, bar_gray_rows(width, height, rgb))
+            if not 0.9 * DOCK_HEIGHT <= dock_rows <= 3 * DOCK_HEIGHT:
+                fail(f"the dock is {dock_rows} rows of {height}, expected about {DOCK_HEIGHT}")
+            scale = dock_rows / DOCK_HEIGHT
+
+            def dock_point(place):
+                """Where the middle of the item at this place in the dock is on screen."""
+                x = (DOCK_PAD + place * (DOCK_ITEM + DOCK_GAP) + DOCK_ITEM / 2) * scale
+                return round(x), round(height - dock_rows / 2)
+
+            def menu_point(place, row, rows):
+                """Where the middle of a row of an item's menu is. The menu stands on the dock with
+                its left edge where the item is."""
+                left = (DOCK_PAD + place * (DOCK_ITEM + DOCK_GAP)) * scale
+                top = height - dock_rows - (2 * DOCK_MENU_PAD + rows * DOCK_MENU_ROW) * scale
+                return (round(left + DOCK_MENU_WIDTH * scale / 2),
+                        round(top + (DOCK_MENU_PAD + (row + 0.5) * DOCK_MENU_ROW) * scale))
+
+            click(args.qmp, size, dock_point(DOCK_KEPT.index(MENU_APP_ID)))
+            started = wait_for(60, lambda: [win for win in open_windows("horizon's windows")
+                                            if win[1] == MENU_APP_ID])
+            if not started:
+                _, output = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
+                fail(f"a click on {MENU_APP}'s icon opened no window: "
+                     f"{without_console(output).strip()[-400:]!r}")
+            ghostty = started[0][0]
+            ok(f"a click on {MENU_APP}'s icon in the dock started it, window {ghostty}")
+
+            # and a second app from a command. it wants a terminal, so lens starts it in one with a
+            # class of its own, and the window is the app's and not the terminal's
+            run(f'lens --enter "{DOCK_APP}"', f"{DOCK_APP} started from the field")
+            second = wait_for(60, lambda: [win for win in open_windows("horizon's windows")
+                                           if win[1] not in (MENU_APP_ID, CONSOLE_APP_ID)])
+            if not second:
+                fail(f"{DOCK_APP} opened no window of its own")
+            other, other_id = second[0][0], second[0][1]
+            ok(f"{DOCK_APP} started from a command, window {other} as {other_id}")
+
+            items = dock_when("the dock with both apps in it", 30,
+                              lambda items: len(items) > len(DOCK_KEPT))
+            key = next((key for key in items if key not in DOCK_KEPT), None)
+            if key is None:
+                fail(f"the dock does not list {DOCK_APP}: {items}")
+            if items[MENU_APP_ID][0] != 1 or items[key][0] != 1:
+                fail(f"the dock shows {items}, expected one window each for {MENU_APP_ID} and {key}")
+            if not items[key][1]:
+                fail(f"the dock does not mark {key} as the app in front: {items}")
+            shot(f"{stem}-dock{extension}")
+            ok(f"the dock shows {MENU_APP_ID} and {key} with a window mark each, {key} in front")
+
+            # a click on the other app's icon moves horizon's focus to its window
+            click(args.qmp, size, dock_point(DOCK_KEPT.index(MENU_APP_ID)))
+            moved = wait_for(30, lambda: [win for win in open_windows("horizon's windows")
+                                          if win[1] == MENU_APP_ID and win[2]])
+            if not moved:
+                fail(f"a click on {MENU_APP}'s icon did not move the focus to window {ghostty}")
+            items = dock_when("the dock after the click", 20,
+                              lambda items: items.get(MENU_APP_ID, (0, False))[1])
+            if not items.get(MENU_APP_ID, (0, False))[1]:
+                fail(f"the dock does not mark {MENU_APP_ID} as the app in front: {items}")
+            ok(f"a click on {MENU_APP}'s icon moved horizon's focus to window {ghostty}")
+
+            # a right click opens the menu of that app: its window by title, New window, Pin to
+            # dock and Close
+            place = len(DOCK_KEPT)
+            click(args.qmp, size, dock_point(place), button="right")
+            item = wait_for(20, lambda: bar_state("the state with the item menu open").get("item"))
+            if not item or not item.startswith(f"{key} "):
+                fail(f"a right click on {key}'s icon says item {item!r}")
+            menu_rows = int(item.split()[-1])
+            if menu_rows != 4:
+                fail(f"the menu of {key} has {menu_rows} rows, expected its window, "
+                     "New window, Pin to dock and Close")
+            shot(f"{stem}-dock-menu{extension}", "dock-menu")
+            ok(f"a right click on {key}'s icon opened its menu with {menu_rows} rows")
+
+            # Pin to dock is the third row of that menu, and it writes the list back
+            click(args.qmp, size, menu_point(place, 2, menu_rows))
+            kept = wait_for(20, lambda: [word for word in
+                                         without_console(run("cat ~/.config/rift/dock", "the pinned list")[1]).split()
+                                         if word == key])
+            if not kept:
+                fail(f"Pin to dock did not write {key} into ~/.config/rift/dock")
+            ok(f"Pin to dock kept {key} in the list")
+
+            # with both windows closed and the shell started again, the app it pinned is still
+            # there, with no window marks under it
+            for window in (ghostty, other):
+                run(f"horizon msg action close-window --id {window}", f"closing window {window}")
+            run("systemctl --user restart lens.service", "the shell started again")
+            if not wait_for(30, lambda: run("lens --state", "the state after the restart")[0] == 0):
+                fail("lens --state does not answer after the shell was started again")
+            items = dock_when("the dock after the restart", 20, lambda items: key in items)
+            if items.get(key) != (0, False):
+                fail(f"the dock lists {items} after the restart, expected {key} in it with no window")
+            look("the desktop with the dock", f"{stem}-dock-desktop{extension}", 30, journals=("lens",))
+            ok(f"{key} is still in the dock after the shell started again: {' '.join(items)}")
 
             # 5d. the console. Mod+Grave runs toggle-console with the arguments in
             # nix/modules/horizon.nix, and horizon msg runs the same action without the key. the first
@@ -2876,6 +3118,9 @@ def main():
             "-smp", "2",
             "-m", args.memory,
             "-device", "virtio-vga",
+        # an absolute pointer, so a click can be sent to a point of the screendump through the
+        # monitor. the emulated ps/2 mouse only moves by so much at a time
+        "-device", "virtio-tablet-pci",
             "-display", "none",
             "-monitor", "none",
             "-serial", "stdio",

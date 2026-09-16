@@ -8,6 +8,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use iced::widget::{image, space, svg};
+use iced::{Color, Element, Theme};
+
 /// The themes to look in, in order. hicolor is where an app that ships one icon puts it.
 const THEMES: [&str; 2] = ["Adwaita", "hicolor"];
 
@@ -152,6 +155,30 @@ fn look(bases: &[PathBuf], name: &str, directories: &[&str]) -> Option<PathBuf> 
         }
     }
     None
+}
+
+/// An app's own drawing at this size, for a menu row or a dock item. A symbolic drawing has no
+/// colours of its own, so it is painted in `text`, the way the status icons in the bar are, and a
+/// name no theme has falls back to the drawing for a program with nothing of its own.
+#[must_use]
+pub fn draw<'a, Message: 'a>(text: Color, name: Option<&str>, size: f32) -> Element<'a, Message> {
+    let found = name.and_then(app).or_else(|| app(UNKNOWN_APP));
+    let Some(path) = found else {
+        return space().width(size).height(size).into();
+    };
+    let colour = path.to_string_lossy().contains("symbolic").then_some(text);
+    if path.extension().is_some_and(|ending| ending == "svg") {
+        svg(svg::Handle::from_path(path))
+            .width(size)
+            .height(size)
+            .style(move |_: &Theme, _| svg::Style { color: colour })
+            .into()
+    } else {
+        image(image::Handle::from_path(path))
+            .width(size)
+            .height(size)
+            .into()
+    }
 }
 
 /// The icon for a strength between 0 and 100, the way GNOME steps them.

@@ -2558,6 +2558,7 @@ dependencies = [
  "iced_layershell",
  "image",
  "librift",
+ "niri-ipc",
 ]
 
 [[package]]

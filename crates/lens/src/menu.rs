@@ -2,9 +2,7 @@
 //! the top of it, and under the field the apps in their sections, or what the field matched,
 //! printed or answered.
 
-use iced::widget::{
-    button, column, container, image, row, scrollable, space, svg, text, text_input,
-};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Border, Color, Element, Font, Length, Shadow, Theme, window};
 use librift::os::Action;
 
@@ -435,7 +433,7 @@ fn header(look: Palette, name: &str) -> Element<'static, Message> {
 fn app_row(look: Palette, app: &App, at: usize, selected: bool) -> Element<'static, Message> {
     let colour = if selected { look.selected } else { look.text };
     let body = row![
-        icon(look, app),
+        icons::draw(look.text, app.icon.as_deref(), ICON),
         text(app.name.clone())
             .size(bar::TEXT_SIZE)
             .color(colour)
@@ -491,36 +489,6 @@ fn printed(look: Palette, label: &str, font: Font) -> Element<'static, Message> 
     .into()
 }
 
-/// The app's own icon in its own colours, or the drawing for a program with nothing of its own.
-fn icon(look: Palette, app: &App) -> Element<'static, Message> {
-    let found = app
-        .icon
-        .as_deref()
-        .and_then(icons::app)
-        .or_else(|| icons::app(icons::UNKNOWN_APP));
-    let Some(path) = found else {
-        return space().width(ICON).height(ICON).into();
-    };
-    // a symbolic drawing has no colours of its own, so it is painted in the text colour, the way
-    // the status icons in the bar are
-    let colour = path
-        .to_string_lossy()
-        .contains("symbolic")
-        .then_some(look.text);
-    if path.extension().is_some_and(|ending| ending == "svg") {
-        svg(svg::Handle::from_path(path))
-            .width(ICON)
-            .height(ICON)
-            .style(move |_: &Theme, _| svg::Style { color: colour })
-            .into()
-    } else {
-        image(image::Handle::from_path(path))
-            .width(ICON)
-            .height(ICON)
-            .into()
-    }
-}
-
 /// The scrollbar: no rail, and a thin scroller in the menu's border gray.
 fn rail(look: Palette) -> scrollable::Rail {
     scrollable::Rail {
@@ -571,10 +539,12 @@ mod tests {
 
     fn app(name: &str, category: Category) -> App {
         App {
+            id: name.to_lowercase(),
             name: name.to_string(),
             exec: vec![name.to_lowercase()],
             terminal: false,
             icon: Some(name.to_lowercase()),
+            wm_class: None,
             category,
         }
     }

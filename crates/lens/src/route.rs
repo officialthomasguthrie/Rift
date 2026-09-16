@@ -151,10 +151,12 @@ mod tests {
 
     fn app(name: &str, program: &str, terminal: bool) -> App {
         App {
+            id: program.into(),
             name: name.into(),
             exec: vec![program.into()],
             terminal,
             icon: Some(program.into()),
+            wm_class: None,
             category: crate::launcher::Category::Accessories,
         }
     }

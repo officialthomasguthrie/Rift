@@ -1,5 +1,5 @@
-//! The shell: the top bar along the top of the screen, and the Applications menu that hangs under
-//! it with the field in it. One process with a layer surface per part, drawn with iced on the
+//! The shell: the top bar along the top of the screen, the dock along the bottom, and the menus
+//! that come and go over them. One process with a layer surface per part, drawn with iced on the
 //! software renderer and placed by the layer-shell protocol, so it works on any machine the drive
 //! meets.
 
@@ -21,6 +21,8 @@ use crate::answer;
 use crate::bar;
 use crate::clock;
 use crate::control::{self, Command};
+use crate::dock::{self, Dock};
+use crate::horizon::{self, Open};
 use crate::launcher::{self, App};
 use crate::menu::{self, Menu, Results};
 use crate::nu;
@@ -52,13 +54,15 @@ fn kept() -> &'static Mutex<String> {
     KEPT.get_or_init(|| Mutex::new(String::new()))
 }
 
-/// The shell's state. The bar is always there; the menu comes and goes with its surface.
+/// The shell's state. The bar and the dock are always there; a menu comes and goes with its
+/// surface.
 struct Lens {
     look: Palette,
     apps: Vec<App>,
     clock: String,
     status: Status,
     menu: Option<Menu>,
+    dock: Dock,
 }
 
 /// What happens to the shell.
@@ -88,6 +92,22 @@ pub enum Message {
     Answered(Result<(String, String), String>),
     /// A line came in on the socket.
     Typed(Command),
+    /// Horizon opened, closed or focused something.
+    Windows(Open),
+    /// A click on a dock item: its app starts, or its window comes forward.
+    Dock(String),
+    /// A middle click on one: another window of that app.
+    DockNew(String),
+    /// A right click on one: the menu of what can be done with it.
+    DockMenu(String),
+    /// A row of that menu.
+    DockRow(dock::Row),
+    /// A click on a workspace button.
+    Space(u8),
+    /// Open the dock's surface.
+    OpenDock(window::Id),
+    /// Open the menu of a dock item, this tall, with its left edge here.
+    OpenItemMenu(window::Id, u32, i32),
     /// Open the menu's surface, this tall.
     Open(window::Id, u32),
     /// The menu's surface has to grow or shrink.
@@ -114,6 +134,20 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
                     id,
                 },
             )),
+            Message::OpenDock(id) => Ok(Self::new(
+                None,
+                LayerShellCustomAction::NewLayerShell {
+                    settings: dock_surface(),
+                    id,
+                },
+            )),
+            Message::OpenItemMenu(id, height, left) => Ok(Self::new(
+                None,
+                LayerShellCustomAction::NewLayerShell {
+                    settings: item_menu_surface(height, left),
+                    id,
+                },
+            )),
             Message::Resize(id, height) => Ok(Self::new(
                 Some(id),
                 LayerShellCustomAction::SizeChange((menu::WIDTH, height)),
@@ -134,6 +168,40 @@ fn menu_surface(height: u32) -> NewLayerShellSettings {
         anchor: Anchor::Top | Anchor::Left,
         exclusive_zone: Some(0),
         margin: Some((0, 0, 0, i32::try_from(menu::PAD).unwrap_or(0))),
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::Active,
+        events_transparent: false,
+        namespace: Some("lens-menu".to_string()),
+    }
+}
+
+/// The dock's surface: along the bottom edge, full width, with its own height reserved so that a
+/// window sits over it and nothing is ever hidden behind it. A bar never takes the keyboard.
+fn dock_surface() -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((0, dock::HEIGHT)),
+        layer: Layer::Top,
+        anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
+        exclusive_zone: Some(i32::try_from(dock::HEIGHT).unwrap_or(0)),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::Active,
+        events_transparent: false,
+        namespace: Some("lens-dock".to_string()),
+    }
+}
+
+/// The menu a right click on a dock item opens: standing on the dock, its left edge where the item
+/// is. A surface that reserves nothing is placed inside the working area, so the dock's own height
+/// is already taken off and the margin under it is nothing. It takes the keyboard the same way the
+/// Applications menu does, so a click anywhere else closes it.
+fn item_menu_surface(height: u32, left: i32) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((dock::MENU_WIDTH, height)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Bottom | Anchor::Left,
+        exclusive_zone: Some(0),
+        margin: Some((0, 0, 0, left)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -187,19 +255,24 @@ fn palette(look: Palette) -> theme::Palette {
 }
 
 fn boot(look: Palette, apps: Vec<App>) -> (Lens, Task<Message>) {
+    // the dock is made here, not when something opens it: it is a part of the shell like the bar,
+    // and it takes its own height from the screen before the first window is placed
+    let dock = Dock::new(window::Id::unique(), &apps);
+    let opening = Task::done(Message::OpenDock(dock.id));
     let state = Lens {
         look,
         apps,
         clock: clock::now(),
         status: Status::default(),
         menu: None,
+        dock,
     };
     remember(&state);
-    (state, Task::none())
+    (state, opening)
 }
 
 fn subscription(_: &Lens) -> Subscription<Message> {
-    Subscription::batch([keys(), focus(), terminal(), ticker()])
+    Subscription::batch([keys(), focus(), terminal(), ticker(), windows()])
 }
 
 // the field takes the printable keys for itself, so these come from every event, not only the
@@ -278,6 +351,22 @@ fn ticker() -> Subscription<Message> {
     })
 }
 
+// horizon's windows and workspaces, read on a thread of its own because the stream blocks until
+// the compositor has something to say. every event the dock draws from turns into one message
+fn windows() -> Subscription<Message> {
+    Subscription::run(|| {
+        let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            horizon::watch(|open| {
+                sender
+                    .unbounded_send(Message::Windows(open.clone()))
+                    .is_ok()
+            });
+        });
+        receiver
+    })
+}
+
 fn update(state: &mut Lens, message: Message) -> Task<Message> {
     let task = match message {
         Message::Tick(now) => {
@@ -314,9 +403,28 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             .as_mut()
             .map_or_else(Task::none, |menu| answered(menu, result)),
         Message::Typed(command) => typed(state, command),
+        Message::Windows(open) => {
+            state.dock.changed(&state.apps, open);
+            Task::none()
+        }
+        Message::Dock(key) => dock_click(state, &key),
+        Message::DockNew(key) => {
+            new_window(state, &key);
+            Task::none()
+        }
+        Message::DockMenu(key) => dock_menu(state, &key),
+        Message::DockRow(row) => dock_row(state, &row),
+        Message::Space(number) => {
+            report(horizon::activate(number));
+            Task::none()
+        }
         Message::Focus(id, has) => focused(state, id, has),
         // the runtime takes these before update ever sees them
-        Message::Open(..) | Message::Resize(..) | Message::Close(..) => Task::none(),
+        Message::Open(..)
+        | Message::OpenDock(_)
+        | Message::OpenItemMenu(..)
+        | Message::Resize(..)
+        | Message::Close(..) => Task::none(),
     };
     let grow = resize(state);
     remember(state);
@@ -367,9 +475,109 @@ fn escape(state: &mut Lens) -> Task<Message> {
     }
 }
 
-/// A surface took or lost the keyboard. The menu closes when it loses it, which is what happens
-/// when anything outside it is clicked; when it takes it, the cursor goes in the field.
+/// A click on a dock item: the app starts when it is not running, its window comes forward when
+/// it is, and the next of its windows when one of them is the one being used.
+fn dock_click(state: &mut Lens, key: &str) -> Task<Message> {
+    let closing = close_item_menu(state);
+    let Some(item) = state.dock.item(key) else {
+        return closing;
+    };
+    if let Some(window) = item.next() {
+        report(horizon::focus(window));
+    } else if let Some(app) = item.app.as_ref() {
+        open_app(app);
+    }
+    closing
+}
+
+/// A middle click on an item, and New window in its menu: one more window of that app.
+fn new_window(state: &Lens, key: &str) {
+    if let Some(app) = state.dock.item(key).and_then(|item| item.app.as_ref()) {
+        open_app(app);
+    }
+}
+
+/// A right click on an item: the menu of what can be done with it, on a surface of its own where
+/// the item is. A second right click on the same item closes it again.
+fn dock_menu(state: &mut Lens, key: &str) -> Task<Message> {
+    let same = state.dock.menu.as_ref().is_some_and(|menu| menu.key == key);
+    let closing = close_item_menu(state);
+    if same {
+        return closing;
+    }
+    let Some(rows) = state.dock.item(key).map(dock::Item::rows) else {
+        return closing;
+    };
+    if rows.is_empty() {
+        return closing;
+    }
+    let left = state.dock.left_of(key);
+    let height = dock::menu_height(rows.len());
+    let id = window::Id::unique();
+    state.dock.menu = Some(dock::Menu {
+        id,
+        key: key.to_string(),
+        rows,
+    });
+    Task::batch([closing, Task::done(Message::OpenItemMenu(id, height, left))])
+}
+
+/// A row of that menu. Every one of them closes it.
+fn dock_row(state: &mut Lens, row: &dock::Row) -> Task<Message> {
+    let Some(key) = state.dock.menu.as_ref().map(|menu| menu.key.clone()) else {
+        return Task::none();
+    };
+    let closing = close_item_menu(state);
+    match row {
+        dock::Row::Window(window, _) => report(horizon::focus(*window)),
+        dock::Row::New => new_window(state, &key),
+        dock::Row::Pin(_) => state.dock.pin(&key, &state.apps),
+        dock::Row::Close => {
+            let windows: Vec<u64> = state
+                .dock
+                .item(&key)
+                .map(|item| item.windows.iter().map(|(id, _)| *id).collect())
+                .unwrap_or_default();
+            for window in windows {
+                report(horizon::close(window));
+            }
+        }
+    }
+    closing
+}
+
+/// Close the menu a right click opened, when one is open.
+fn close_item_menu(state: &mut Lens) -> Task<Message> {
+    state
+        .dock
+        .menu
+        .take()
+        .map_or_else(Task::none, |menu| Task::done(Message::Close(menu.id)))
+}
+
+/// Start an app from the dock. What went wrong goes in the journal: the dock has no line to say
+/// it on, and the app either opens a window or it does not.
+fn open_app(app: &App) {
+    report(launcher::launch(app));
+}
+
+fn report(done: Result<(), String>) {
+    if let Err(why) = done {
+        eprintln!("lens: {why}");
+    }
+}
+
+/// A surface took or lost the keyboard. A menu closes when it loses it, which is what happens
+/// when anything outside it is clicked; when the Applications menu takes it, the cursor goes in
+/// the field.
 fn focused(state: &mut Lens, id: window::Id, has: bool) -> Task<Message> {
+    if state.dock.menu.as_ref().is_some_and(|menu| menu.id == id) {
+        return if has {
+            Task::none()
+        } else {
+            close_item_menu(state)
+        };
+    }
     if state.menu.as_ref().is_none_or(|menu| menu.id != id) {
         return Task::none();
     }
@@ -463,6 +671,11 @@ fn remember(state: &Lens) {
                 line(if wrong { "error" } else { "notice" }, text);
             }
         }
+    }
+    line("dock", &state.dock.line());
+    line("workspaces", &state.dock.spaces_line());
+    if let Some(menu) = &state.dock.menu {
+        line("item", &format!("{} {}", menu.key, menu.rows.len()));
     }
     if let Ok(mut kept) = kept().lock() {
         *kept = lines;
@@ -613,16 +826,22 @@ fn finish(menu: &mut Menu, result: Result<String, String>) {
 }
 
 fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
-    match &state.menu {
-        Some(menu) if menu.id == id => menu::view(state.look, menu),
-        _ => container(bar::view(
-            state.look,
-            &state.clock,
-            &state.status,
-            state.menu.is_some(),
-        ))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into(),
+    if let Some(menu) = state.menu.as_ref().filter(|menu| menu.id == id) {
+        return menu::view(state.look, menu);
     }
+    if let Some(menu) = state.dock.menu.as_ref().filter(|menu| menu.id == id) {
+        return dock::menu_view(state.look, menu);
+    }
+    if id == state.dock.id {
+        return dock::view(state.look, &state.dock);
+    }
+    container(bar::view(
+        state.look,
+        &state.clock,
+        &state.status,
+        state.menu.is_some(),
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }

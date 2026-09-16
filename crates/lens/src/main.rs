@@ -15,6 +15,9 @@ mod bar;
 mod clock;
 mod control;
 #[cfg(target_os = "linux")]
+mod dock;
+mod horizon;
+#[cfg(target_os = "linux")]
 mod icons;
 mod launcher;
 #[cfg(target_os = "linux")]

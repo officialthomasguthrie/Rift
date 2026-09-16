@@ -16,6 +16,9 @@ path = "src/main.rs"
 # questions go to quasard on the system bus
 librift = { workspace = true, features = ["bus"] }
 
+# the dock follows horizon's windows and workspaces over its ipc socket
+niri-ipc = { path = "../horizon/niri-ipc" }
+
 # the shell needs a wayland session and layer-shell, so it only exists on linux. the software
 # renderer is the one that works on every machine, so wgpu stays out
 # svg draws the symbolic icons of the Adwaita theme in the bar, each in one colour, and the image

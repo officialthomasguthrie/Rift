@@ -8,6 +8,9 @@ use std::{env, fs};
 /// An app from a desktop entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
+    /// The entry's file name without the ending, which is also the app id most apps give their
+    /// windows.
+    pub id: String,
     /// The Name field.
     pub name: String,
     /// The Exec field split into words, field codes removed.
@@ -16,6 +19,9 @@ pub struct App {
     pub terminal: bool,
     /// The Icon field, a name to look up or a path.
     pub icon: Option<String>,
+    /// The `StartupWMClass` field: the app id this app gives its windows when it is not the
+    /// entry's own name.
+    pub wm_class: Option<String>,
     /// The section of the menu the Categories field puts it in.
     pub category: Category,
 }
@@ -91,8 +97,41 @@ impl Category {
     }
 }
 
-/// The terminal that wraps apps with `Terminal=true`.
-const TERMINAL: [&str; 2] = ["ghostty", "-e"];
+/// The terminal that wraps apps with `Terminal=true`. It is given the app's own class, so the
+/// window belongs to that app and not to the terminal, and the dock has one item per app.
+const TERMINAL: &str = "ghostty";
+
+impl App {
+    /// The class the terminal takes when it wraps this app. Ghostty reads a class as a GTK
+    /// application id, which has to be dotted parts that each start with a letter: an entry named
+    /// the way Flatpak names them already is one, and anything else goes under Rift's own name,
+    /// the way the console's window does.
+    #[must_use]
+    pub fn class(&self) -> String {
+        let plain: String = self
+            .id
+            .chars()
+            .map(|letter| {
+                if letter.is_ascii_alphanumeric() || letter == '-' || letter == '_' || letter == '.'
+                {
+                    letter
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let parts: Vec<&str> = plain.split('.').collect();
+        if parts.len() > 1
+            && parts
+                .iter()
+                .all(|part| part.starts_with(|letter: char| letter.is_ascii_alphabetic()))
+        {
+            plain
+        } else {
+            format!("dev.rift.{}", plain.replace('.', "-"))
+        }
+    }
+}
 
 /// Every usable app in the data directories, sorted by name, one per entry id.
 #[must_use]
@@ -108,13 +147,20 @@ pub fn load() -> Vec<App> {
             if path.extension().is_none_or(|ext| ext != "desktop") {
                 continue;
             }
-            let Some(id) = path.file_name().map(std::ffi::OsStr::to_os_string) else {
+            let Some(id) = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+            else {
                 continue;
             };
-            if !seen.insert(id) {
+            if !seen.insert(id.clone()) {
                 continue;
             }
-            if let Some(app) = fs::read_to_string(&path).ok().as_deref().and_then(parse) {
+            if let Some(app) = fs::read_to_string(&path)
+                .ok()
+                .as_deref()
+                .and_then(|text| parse(&id, text))
+            {
                 apps.push(app);
             }
         }
@@ -152,16 +198,17 @@ fn data_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Read a desktop entry. `None` for anything that is not an app to show: hidden entries,
-/// entries without a command, other types.
+/// Read a desktop entry, whose file name without the ending is its id. `None` for anything that
+/// is not an app to show: hidden entries, entries without a command, other types.
 #[must_use]
-pub fn parse(text: &str) -> Option<App> {
+pub fn parse(id: &str, text: &str) -> Option<App> {
     let mut in_entry = false;
     let mut name = None;
     let mut exec = None;
     let mut terminal = false;
     let mut kind = None;
     let mut icon = None;
+    let mut wm_class = None;
     let mut categories = String::new();
     for line in text.lines() {
         let line = line.trim();
@@ -181,6 +228,9 @@ pub fn parse(text: &str) -> Option<App> {
             "Type" => kind = Some(value.trim().to_string()),
             "Terminal" => terminal = value.trim() == "true",
             "Icon" if !value.trim().is_empty() => icon = Some(value.trim().to_string()),
+            "StartupWMClass" if !value.trim().is_empty() => {
+                wm_class = Some(value.trim().to_string());
+            }
             "Categories" => categories = value.trim().to_string(),
             "NoDisplay" | "Hidden" if value.trim() == "true" => return None,
             _ => {}
@@ -194,10 +244,12 @@ pub fn parse(text: &str) -> Option<App> {
         return None;
     }
     Some(App {
+        id: id.to_string(),
         name: name?,
         exec,
         terminal,
         icon,
+        wm_class,
         category: Category::of(&categories),
     })
 }
@@ -252,9 +304,10 @@ pub fn split_exec(value: &str) -> Vec<String> {
 ///
 /// When the program cannot be started.
 pub fn launch(app: &App) -> Result<(), String> {
+    let class = app.terminal.then(|| format!("--class={}", app.class()));
     let mut words: Vec<&str> = Vec::new();
-    if app.terminal {
-        words.extend(TERMINAL);
+    if let Some(class) = class.as_deref() {
+        words.extend([TERMINAL, class, "-e"]);
     }
     words.extend(app.exec.iter().map(String::as_str));
     let (program, args) = words
@@ -277,20 +330,55 @@ mod tests {
     #[test]
     fn reads_an_entry() {
         let text = "[Desktop Entry]\nType=Application\nName=Firefox\nExec=firefox %u\nIcon=firefox\nCategories=Network;WebBrowser;\n\n[Desktop Action new-window]\nName=New window\nExec=firefox --new-window\n";
-        let app = parse(text).unwrap();
+        let app = parse("firefox", text).unwrap();
+        assert_eq!(app.id, "firefox");
         assert_eq!(app.name, "Firefox");
         assert_eq!(app.exec, ["firefox"]);
         assert!(!app.terminal);
         assert_eq!(app.icon.as_deref(), Some("firefox"));
         assert_eq!(app.category, Category::Internet);
+        // with no StartupWMClass the entry's id is what its windows are called
+        assert!(app.wm_class.is_none());
+    }
+
+    #[test]
+    fn an_entry_that_says_what_its_windows_are_called() {
+        let app = parse(
+            "code",
+            "[Desktop Entry]\nType=Application\nName=Code\nExec=code\nStartupWMClass=Code\n",
+        )
+        .unwrap();
+        assert_eq!(app.wm_class.as_deref(), Some("Code"));
     }
 
     #[test]
     fn an_entry_without_an_icon_or_a_category() {
-        let app =
-            parse("[Desktop Entry]\nType=Application\nName=Thing\nExec=thing\nIcon=\n").unwrap();
+        let app = parse(
+            "thing",
+            "[Desktop Entry]\nType=Application\nName=Thing\nExec=thing\nIcon=\n",
+        )
+        .unwrap();
         assert!(app.icon.is_none());
         assert_eq!(app.category, Category::Accessories);
+    }
+
+    #[test]
+    fn the_class_the_terminal_takes_reads_as_an_application_id() {
+        let of = |id: &str| {
+            parse(
+                id,
+                "[Desktop Entry]\nType=Application\nName=X\nExec=x\nTerminal=true\n",
+            )
+            .unwrap()
+            .class()
+        };
+        // an entry named the way flatpak names them is already one
+        assert_eq!(of("com.mitchellh.ghostty"), "com.mitchellh.ghostty");
+        // a plain name is not: one part, and a part that starts with a digit is not a part
+        assert_eq!(of("Helix"), "dev.rift.Helix");
+        assert_eq!(of("btop"), "dev.rift.btop");
+        assert_eq!(of("7zip.gui"), "dev.rift.7zip-gui");
+        assert_eq!(of("my app+"), "dev.rift.my-app-");
     }
 
     #[test]
@@ -320,19 +408,30 @@ mod tests {
 
     #[test]
     fn skips_what_is_not_an_app() {
-        assert!(parse("[Desktop Entry]\nType=Link\nName=Docs\nURL=x\n").is_none());
+        assert!(parse("docs", "[Desktop Entry]\nType=Link\nName=Docs\nURL=x\n").is_none());
         assert!(
-            parse("[Desktop Entry]\nType=Application\nName=Hidden\nExec=x\nNoDisplay=true\n")
-                .is_none()
+            parse(
+                "hidden",
+                "[Desktop Entry]\nType=Application\nName=Hidden\nExec=x\nNoDisplay=true\n"
+            )
+            .is_none()
         );
-        assert!(parse("[Desktop Entry]\nType=Application\nName=No command\n").is_none());
+        assert!(
+            parse(
+                "none",
+                "[Desktop Entry]\nType=Application\nName=No command\n"
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn terminal_apps_are_marked() {
-        let app =
-            parse("[Desktop Entry]\nType=Application\nName=Helix\nExec=hx %F\nTerminal=true\n")
-                .unwrap();
+        let app = parse(
+            "Helix",
+            "[Desktop Entry]\nType=Application\nName=Helix\nExec=hx %F\nTerminal=true\n",
+        )
+        .unwrap();
         assert!(app.terminal);
         assert_eq!(app.exec, ["hx"]);
     }
