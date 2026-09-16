@@ -1,6 +1,6 @@
 [package]
 name = "lens"
-description = "Lens: the omnibar shell"
+description = "Lens: the Rift desktop shell"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,10 +16,11 @@ path = "src/main.rs"
 # questions go to quasard on the system bus
 librift = { workspace = true, features = ["bus"] }
 
-# the panel needs a wayland session and layer-shell, so it only exists on linux. the software
+# the shell needs a wayland session and layer-shell, so it only exists on linux. the software
 # renderer is the one that works on every machine, so wgpu stays out
+# svg draws the symbolic icons of the Adwaita theme in the bar, each in one colour
 [target.'cfg(target_os = "linux")'.dependencies]
-iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "wayland", "thread-pool"] }
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "wayland", "thread-pool", "svg"] }
 iced_layershell = { version = "0.19.1", default-features = false }
 
 [lints]

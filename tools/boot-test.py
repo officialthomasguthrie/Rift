@@ -88,13 +88,16 @@ With --desktop the test checks that greetd is up and takes a screendump of the r
 paints its background gray over the whole screen, a console would show black with text. The vm has a
 virtio gpu for this, horizon renders on it in software.
 
-With --lens the desktop check expects lens's panel along the top of that screen: horizon reports a
-layer surface with its namespace, and the screendump has the panel gray, the field inside it and the
-desktop gray below. The test then types into the field from the serial shell with `lens --enter`
-and looks again: a nushell pipeline puts three rows under the field, a command with arguments it does
-not know puts an error line there, and `lens --escape` leaves the panel the height it started at.
-With --models as well, a question goes through `lens --do`, which prints quasar's answer, and then
-into the field, where the answer shows up as rows under it.
+With --lens the desktop check expects lens's bar along the top of that screen: horizon reports a
+layer surface with its namespace, and the screendump has the bar gray with something drawn at its
+left, in its middle and at its right, and the desktop gray below. `lens --state` prints what the bar
+shows and the test compares its clock with `date` in the vm and its network with nmcli's. The test
+then opens the Applications menu with `lens --menu` and types into its field from the serial shell
+with `lens --enter`: a nushell pipeline puts three rows under the field, a command with arguments it
+does not know puts a line under it, the first `lens --escape` clears the field and the second closes
+the menu. Killing the shell brings it back, since it is a user unit that restarts. With --models as
+well, a question goes through `lens --do`, which prints quasar's answer, and then into the field,
+where the answer shows up as rows under it.
 """
 
 import argparse
@@ -238,16 +241,24 @@ OK_GREEN = (0, 170, 0)
 MARK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nix", "liftoff", "logo", "rift-mark.png")
 # what horizon paints with no window open, the background from nix/modules/horizon.nix
 DESKTOP = (36, 36, 36)
-# lens's panel, from crates/lens/src/ui.rs: panel gray, field gray, and the sizes in logical
-# pixels. the panel is the field's row plus whatever the result list and the error line need
-PANEL = (30, 30, 30)
-FIELD = (46, 46, 46)
-PANEL_HEIGHT = 32
-FIELD_SIZE = (480, 24)
-ROW_HEIGHT = 22
-ERROR_HEIGHT = 22
-BOTTOM_PAD = 4
+# lens's bar and menu, from crates/lens/src/{bar,menu,theme}.rs: the bar's gray and the hairline
+# along its bottom, the menu's gray and the field's, and the sizes in logical pixels. the field has
+# the bar's own gray, and they never share a row
+BAR = (30, 30, 30)
+BAR_LINE = (20, 20, 20)
+MENU = (46, 46, 46)
+FIELD = BAR
+BAR_HEIGHT = 32
+MENU_WIDTH = 496
+MENU_PAD = 8
+MENU_GAP = 4
+FIELD_SIZE = (480, 32)
+ROW_HEIGHT = 28
 LIST_ROWS = 8
+# the words lens --state prints, and how the bar writes the time
+STATE_KEYS = ("clock", "network", "volume", "battery", "menu", "field", "rows", "error", "notice")
+DATE_FORMAT = "+%a %-d %b %H:%M"
+CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
 RESULT_LINE = "echo [rift rift rift]"
 RESULT_ROWS = 3
@@ -332,69 +343,120 @@ def check_splash(width, height, rgb):
     return ok, lines
 
 
-def panel_height(rows, error):
-    """How tall lens's panel is with this many result rows and with or without the error line."""
-    under = rows * ROW_HEIGHT + (ERROR_HEIGHT if error else 0)
-    return PANEL_HEIGHT + under + BOTTOM_PAD if under else PANEL_HEIGHT
+def menu_height(rows, line):
+    """How tall lens's menu is with this many result rows and with or without the line under them."""
+    listed = 0 if rows == 0 else MENU_GAP + rows * ROW_HEIGHT
+    under = MENU_GAP + ROW_HEIGHT if line else 0
+    return MENU_PAD + FIELD_SIZE[1] + listed + under + MENU_PAD
 
 
-def check_desktop(width, height, rgb, lens=False, rows=0, error=False):
-    """Count the desktop gray and the console's black in a screendump, and with lens the panel
-    along the top, the field in it and the result list under it. rows is a count, or (fewest, most)
-    when the test cannot know how many rows there are: then any count in that range that fits the
-    screen passes. Returns (ok, lines to print)."""
-    gray = black = panel = field = 0
-    panel_rows = 0
+def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False):
+    """Count the desktop gray and the console's black in a screendump, and with lens the bar along
+    the top with something drawn at its left, in its middle and at its right, and with menu the
+    Applications menu under the bar with the field in it. rows is a count, or (fewest, most) when
+    the test cannot know how many rows there are: then any count in that range that fits passes.
+    Returns (ok, lines to print)."""
+    gray = black = menu_gray = field = 0
+    bar_rows = 0
+    # what is drawn in the bar, by third of its width: the button, the clock, the status icons
+    ink = [0, 0, 0]
+    # the rows under the bar that are part of the menu, and where its gray starts and ends in each
+    menu_rows = []
     for y in range(height):
         row = y * width * 3
-        row_panel = row_field = 0
+        row_bar = row_menu = 0
+        first = last = -1
         for x in range(width):
             px = rgb[row + x * 3 : row + x * 3 + 3]
-            if near(px, DESKTOP, 3):
+            if near(px, BAR, 3) or near(px, BAR_LINE, 3):
+                row_bar += 1
+            elif near(px, DESKTOP, 3):
                 gray += 1
             elif near(px, MOON, 8):
                 black += 1
-            elif near(px, PANEL, 3):
-                row_panel += 1
-            elif near(px, FIELD, 3):
-                row_field += 1
-        panel += row_panel
-        field += row_field
-        # the panel is the run of rows from the top that are mostly its two grays
-        if row_panel + row_field > width / 2 and panel_rows == y:
-            panel_rows += 1
+            elif near(px, MENU, 3):
+                row_menu += 1
+                first, last = (x if first < 0 else first), x
+        menu_gray += row_menu
+        # the bar is the run of rows from the top that are mostly its two grays; under it the same
+        # gray is the field's
+        if row_bar > width / 2 and bar_rows == y:
+            bar_rows += 1
+            for x in range(width):
+                px = rgb[row + x * 3 : row + x * 3 + 3]
+                if not near(px, BAR, 3) and not near(px, BAR_LINE, 3):
+                    ink[min(2, x * 3 // width)] += 1
+            continue
+        field += row_bar
+        # a row of the menu has at least its padding on either side of whatever is in it; a pixel
+        # of the menu's gray anywhere else is the edge of a letter or of the pointer
+        if row_menu >= 12:
+            menu_rows.append((y, first, last))
     total = width * height
     checks = [
         ("no console black", black <= 0.02 * total, f"{black} of {total}"),
     ]
-    if lens:
-        below = total - panel_rows * width
-
-        def panel_checks(count):
-            # the compositor may scale the panel, so its size on screen gives the scale
-            wanted = panel_height(count, error)
-            scale = panel_rows / wanted
-            # the field, and under it one field-gray rectangle as tall as the rows it holds
-            field_area = (FIELD_SIZE[0] * FIELD_SIZE[1] + FIELD_SIZE[0] * count * ROW_HEIGHT) * scale * scale
-            return wanted, [
-                ("the desktop background covers the rest", gray >= 0.95 * below, f"{gray} of {below}"),
-                ("the panel is as tall as its contents", 0.9 * wanted <= panel_rows <= 3 * wanted and panel >= 0.3 * panel_rows * width,
-                 f"{panel_rows} rows, expected about {wanted} for {count} result rows, {panel} panel pixels"),
-                ("the field and the list are in it", 0.6 * field_area <= field <= 1.1 * field_area,
-                 f"{field}, expected about {field_area:.0f} at scale {scale:.2f}"),
-            ]
-
-        fewest, most = rows if isinstance(rows, tuple) else (rows, rows)
-        options = [panel_checks(count) for count in range(fewest, most + 1)]
-        # the first count that fits, or when none does, the one closest to the panel on screen
-        fits = [found for wanted, found in options if all(passed for _, passed, _ in found)]
-        checks += fits[0] if fits else min(options, key=lambda option: abs(option[0] - panel_rows))[1]
-    else:
+    if not lens:
         checks.insert(0, ("the desktop background covers the screen", gray >= 0.95 * total, f"{gray} of {total}"))
-    lines = [f"desktop: {width}x{height}"]
+        lines = [f"desktop: {width}x{height}"]
+        return report("desktop", lines, checks)
+    # the compositor may scale the bar, so its height on screen gives the scale
+    scale = bar_rows / BAR_HEIGHT if bar_rows else 1
+    checks += [
+        ("the bar is along the top", 0.9 * BAR_HEIGHT <= bar_rows <= 3 * BAR_HEIGHT,
+         f"{bar_rows} rows, expected about {BAR_HEIGHT} at scale 1"),
+        ("the button, the clock and the icons are in it", all(count >= 30 for count in ink),
+         f"{ink[0]} pixels at the left, {ink[1]} in the middle, {ink[2]} at the right"),
+    ]
+    # the run of rows the menu covers, and where its gray starts and ends in the first of them,
+    # which is the padding above the field and so the full width of the menu inside its border
+    run = []
+    for found in menu_rows:
+        if not run or found[0] == run[-1][0] + 1:
+            run.append(found)
+        else:
+            break
+    top = run[0][0] if run else -1
+    left, right = (run[0][1], run[0][2]) if run else (-1, -1)
+    box = (right - left + 1, len(run)) if run else (0, 0)
+    if not menu:
+        below = total - bar_rows * width
+        checks += [
+            ("the desktop background covers the rest", gray >= 0.95 * below, f"{gray} of {below}"),
+            # the menu's padding is eight rows before anything else in it
+            ("no menu is open", len(run) < 3, f"{len(run)} rows of the menu's gray under the bar"),
+        ]
+        return report("desktop", [f"desktop: {width}x{height}"], checks)
+
+    def menu_checks(count):
+        # the menu's gray starts inside its one pixel border, and the field is a rectangle in it
+        wanted = menu_height(count, line)
+        inside = ((MENU_WIDTH - 2) * scale, (wanted - 2) * scale)
+        field_area = FIELD_SIZE[0] * FIELD_SIZE[1] * scale * scale
+        below = total - bar_rows * width - inside[0] * inside[1]
+        return wanted, [
+            ("the menu hangs under the bar at the left", abs(top - bar_rows - 1) <= 2 * scale and abs(left - (MENU_PAD + 1) * scale) <= 2 * scale,
+             f"its gray starts at {left},{top}, the bar ends at {bar_rows}"),
+            ("the menu is as wide and as tall as its contents", abs(box[0] - inside[0]) <= 4 * scale and abs(box[1] - inside[1]) <= 4 * scale,
+             f"{box[0]}x{box[1]}, expected about {inside[0]:.0f}x{inside[1]:.0f} for {count} result rows"),
+            ("the field is in it", 0.6 * field_area <= field <= 1.1 * field_area,
+             f"{field} pixels of the field's gray, expected about {field_area:.0f}"),
+            ("the desktop background covers the rest", gray >= 0.9 * below, f"{gray} of {below:.0f}"),
+        ]
+
+    fewest, most = rows if isinstance(rows, tuple) else (rows, rows)
+    options = [menu_checks(count) for count in range(fewest, most + 1)]
+    # the first count that fits, or when none does, the one closest to the menu on screen
+    fits = [found for wanted, found in options if all(passed for _, passed, _ in found)]
+    checks += fits[0] if fits else min(options, key=lambda option: abs(option[0] - box[1]))[1]
+    return report("desktop", [f"desktop: {width}x{height}"], checks)
+
+
+def report(what, lines, checks):
+    """Print one line per check and say whether they all passed."""
     ok = True
     for name, passed, detail in checks:
-        lines.append(f"desktop: {'ok  ' if passed else 'FAIL'} {name}: {detail}")
+        lines.append(f"{what}: {'ok  ' if passed else 'FAIL'} {name}: {detail}")
         ok = ok and passed
     return ok, lines
 
@@ -456,17 +518,17 @@ def check_text_splash(width, height, rgb):
 
 
 def check_console(width, height, rgb):
-    """Find the console in a screendump: lens's panel along the top, under it a run of rows that
+    """Find the console in a screendump: lens's bar along the top, under it a run of rows that
     are mostly the console's background, and the desktop under that. The terminal shows fish's
     greeting from its first line down: fastfetch's rows alone, as the console is too short for the
     whole logo beside them. Returns (ok, lines to print)."""
     gray = black = logo = 0
-    panel_rows = 0
+    bar_rows = 0
     console_top, console_rows, console_width = -1, 0, 0
     text_rows = []
     for y in range(height):
         row = y * width * 3
-        row_panel = row_console = row_text = row_ice = row_black = 0
+        row_bar = row_console = row_text = row_ice = row_black = 0
         for x in range(width):
             px = rgb[row + x * 3 : row + x * 3 + 3]
             if near(px, CONSOLE, 1):
@@ -483,10 +545,10 @@ def check_console(width, height, rgb):
                 gray += 1
             elif near(px, MOON, 8):
                 row_black += 1
-            elif near(px, PANEL, 3) or near(px, FIELD, 3):
-                row_panel += 1
-        if row_panel > width / 2 and panel_rows == y:
-            panel_rows += 1
+            elif near(px, BAR, 3) or near(px, BAR_LINE, 3):
+                row_bar += 1
+        if row_bar > width / 2 and bar_rows == y:
+            bar_rows += 1
         # the first run of rows that are mostly the console's background. a line of text in the
         # terminal covers only some of a row. the edges of text on its near black are near black
         # too, so black counts only outside the console
@@ -501,18 +563,18 @@ def check_console(width, height, rgb):
         else:
             black += row_black
     total = width * height
-    scale = panel_rows / PANEL_HEIGHT if panel_rows else 1
+    scale = bar_rows / BAR_HEIGHT if bar_rows else 1
     wanted = CONSOLE_HEIGHT * scale
-    below = total - (panel_rows + console_rows) * width
+    below = total - (bar_rows + console_rows) * width
     # a line of DejaVu Sans Mono 11 is 17 rows. the greeting starts a few rows under the window's
     # top, and fastfetch's rows run down most of the window
     greeting = bool(text_rows) and text_rows[0] - console_top <= 12 * scale \
         and text_rows[-1] - text_rows[0] >= 18 * 17 * scale
     checks = [
         ("no console black", black <= 0.02 * total, f"{black} of {total}"),
-        ("the panel is along the top", 0.9 * PANEL_HEIGHT <= panel_rows <= 3 * PANEL_HEIGHT, f"{panel_rows} rows"),
-        ("the console starts under the panel", console_top >= 0 and panel_rows <= console_top <= panel_rows + 16 * scale,
-         f"first row {console_top}, the panel ends at {panel_rows}"),
+        ("the bar is along the top", 0.9 * BAR_HEIGHT <= bar_rows <= 3 * BAR_HEIGHT, f"{bar_rows} rows"),
+        ("the console starts under the bar", console_top >= 0 and bar_rows <= console_top <= bar_rows + 16 * scale,
+         f"first row {console_top}, the bar ends at {bar_rows}"),
         ("the console is as tall as the window rule says", 0.95 * wanted <= console_rows <= 1.05 * wanted,
          f"{console_rows} rows, expected about {wanted:.0f}"),
         ("the console is as wide as the screen", console_width >= 0.9 * width, f"{console_width} of {width} in its widest row"),
@@ -563,7 +625,7 @@ def check_tty(width, height, rgb):
 
 def check_lock(width, height, rgb, refused=False):
     """Find the lock screen in a screendump: its gray over the whole screen, the field in the middle
-    with the blue ring around it, and none of the desktop, lens's panel or the console. With
+    with the blue ring around it, and none of the desktop, lens's bar or the console. With
     refused, the red sentence is under the field, without it there is none. Returns (ok, lines to
     print)."""
     ground = desktop = console = ring = red = field = 0
@@ -666,7 +728,7 @@ def main():
     ap.add_argument("--splash-only", action="store_true", help="end once the shell is up after the splash")
     ap.add_argument("--desktop", help="take a screendump of the session, check it, save it as this png")
     ap.add_argument("--desktop-timeout", type=int, default=60, help="seconds for horizon to paint its first frame")
-    ap.add_argument("--lens", action="store_true", help="expect lens's panel on the desktop")
+    ap.add_argument("--lens", action="store_true", help="expect lens's bar on the desktop")
     ap.add_argument("--updates", help="an ext4 image labelled updates with a newer version's update files, "
                     "install them and reboot into that version")
     ap.add_argument("--backup", help="an empty ext4 image labelled backup, back up home onto it and restore from it")
@@ -697,6 +759,11 @@ def main():
         "-smp", "2",
         "-m", args.memory,
         "-device", "virtio-vga",
+        # a sound card that plays nowhere, so pipewire has a sink: the bar's volume icon and the
+        # system menu's slider need one, and the vm has no sound hardware otherwise
+        "-audiodev", "none,id=quiet",
+        "-device", "intel-hda",
+        "-device", "hda-output,audiodev=quiet",
         "-display", "none",
         "-monitor", "none",
         "-serial", "stdio",
@@ -915,6 +982,7 @@ def main():
         return loader.group(1)
 
     def unit_state(unit):
+        """What systemctl says about a unit. `--user <name>` asks the owner's manager."""
         _, output = run(f"systemctl is-active {unit}", f"the state of {unit}")
         found = re.search(r"^(active|inactive|failed|activating|deactivating)\s*$", without_console(output), re.M)
         return found.group(1) if found else without_console(output).strip()
@@ -965,12 +1033,12 @@ def main():
 
         if counted:
             # the boot is marked good once orbit and greetd are up, a little after the shell
-            deadline = time.monotonic() + 120
+            until = time.monotonic() + 120
             while True:
                 state = unit_state("systemd-bless-boot")
                 if state == "active":
                     break
-                if state == "failed" or time.monotonic() > deadline:
+                if state == "failed" or time.monotonic() > until:
                     _, output = run("systemctl status --no-pager systemd-bless-boot boot-complete.target",
                                     "why the boot was not marked good")
                     print(f"\nboot-test: systemctl status printed:\n{without_console(output)}", flush=True)
@@ -1033,9 +1101,9 @@ def main():
         uki = f"rift_{version}.efi"
         loader = started_by_systemd_boot(uki)
 
-        deadline = time.monotonic() + 120
+        until = time.monotonic() + 120
         while (state := unit_state(NEVER_GOOD)) != "failed":
-            if time.monotonic() > deadline:
+            if time.monotonic() > until:
                 fail(f"{NEVER_GOOD} is {state} after {since()}, expected failed")
             time.sleep(3)
         for unit in ("boot-complete.target", "systemd-bless-boot"):
@@ -1556,9 +1624,9 @@ def main():
             fail(f"greetd.service is {state}, expected active")
 
         def look(what, png, seconds, console=False, lock=None, journals=(), **shape):
-            """Screendump until the panel has the shape we asked for, or the console is open, or the
-            lock screen is up (lock says whether it has refused a password), or give up and save
-            it. On a failure the journal of each tag in journals is printed."""
+            """Screendump until the bar and the menu have the shape we asked for, or the console is
+            open, or the lock screen is up (lock says whether it has refused a password), or give up
+            and save it. On a failure the journal of each tag in journals is printed."""
             deadline = time.monotonic() + seconds
             while True:
                 try:
@@ -1592,22 +1660,104 @@ def main():
                             "horizon's layer surfaces")
             if not re.search(r'"namespace":\s*"lens"', output):
                 fail("horizon lists no layer surface named lens")
-            ok("lens panel")
+            ok("lens's bar")
 
-            # 5b. the field takes a line from the terminal, over the socket in the session's
-            # runtime directory, and what the line printed lands in the list under it
             stem, extension = os.path.splitext(args.desktop)
             run("set -x XDG_RUNTIME_DIR /run/user/(id -u)", "the runtime directory")
+
+            def bar_state(what):
+                """What `lens --state` prints, as a dict of the words it knows."""
+                status, output = run("lens --state", what)
+                printed = without_console(output)
+                if status != 0:
+                    fail(f"lens --state exited with {status}: {printed.strip()[-300:]!r}")
+                state = {}
+                for printed_line in printed.splitlines():
+                    key, _, value = printed_line.strip().partition(" ")
+                    if key in STATE_KEYS:
+                        state[key] = value.strip()
+                return state
+
+            def vm_clock(what):
+                """The minute the vm's own clock is in, in the format the bar writes."""
+                _, output = run(f"date '{DATE_FORMAT}'", what)
+                found = CLOCK.findall(without_console(output))
+                if not found:
+                    fail(f"date printed no time in the bar's format: {without_console(output).strip()[-200:]!r}")
+                return found[-1]
+
+            # 5b. what the bar shows. its unit is up, and `lens --state` agrees with the system: the
+            # clock with date, the network icon with nmcli. the minute can turn between the two
+            # readings, so either of them is right
+            state = unit_state("--user lens.service")
+            if state != "active":
+                fail(f"lens.service is {state} for the owner, expected active")
+            # the unit is not a child of the compositor, so it only finds desktop entries if the
+            # session's data directories reached the user manager
+            _, output = run("journalctl --user -u lens -b -o cat | cat", "the shell's log")
+            found = re.search(r"lens \S+: (\d+) apps, opening the bar", without_console(output))
+            if not found or int(found.group(1)) == 0:
+                fail(f"the shell found no apps: {without_console(output).strip()[-300:]!r}")
+            ok(f"the shell runs as a user unit and found {found.group(1)} apps")
+            # the bar turns its clock on the minute and the readings here are a second or so apart,
+            # so the minute can turn between them; either of them is right, and a moment later one
+            # of them has to be
+            until = time.monotonic() + 20
+            while True:
+                before = vm_clock("the time in the vm")
+                bar = bar_state("what the bar shows")
+                after = vm_clock("the time in the vm again")
+                if bar.get("clock") in (before, after):
+                    break
+                if time.monotonic() > until:
+                    fail(f"the bar's clock says {bar.get('clock')!r}, date in the vm says {before!r}")
+                time.sleep(2)
+            ok(f"the bar's clock says {bar['clock']}, the minute date in the vm is in")
+            # the bar reads the status on the minute, so a connection that came up after its last
+            # tick reaches it at the next one
+            until = time.monotonic() + 80
+            while True:
+                _, output = run("nmcli -t -f TYPE,STATE device status", "what nmcli says about the devices")
+                wired = "ethernet:connected" in without_console(output)
+                bar = bar_state("what the bar shows")
+                if wired == (bar.get("network") == "wired"):
+                    break
+                if time.monotonic() > until:
+                    fail(f"the bar says network {bar.get('network')!r} and nmcli says "
+                         f"{'a cable is up' if wired else 'no cable is up'}")
+                time.sleep(5)
+            if bar.get("menu") != "closed":
+                fail(f"the bar says the menu is {bar.get('menu')!r} before anything opened it")
+            ok(f"the bar's status: network {bar['network']}, volume {bar['volume']}, battery {bar['battery']}")
+
+            # 5c. the Applications menu. Mod+Space runs `lens --menu`, and the field inside the menu
+            # takes a line from the terminal over the socket in the session's runtime directory
+            run("lens --menu", "the Applications menu")
+            look("the Applications menu", f"{stem}-menu{extension}", 20, menu=True, journals=("lens",))
+            if bar_state("the state with the menu open").get("menu") != "open":
+                fail("lens --state does not say the menu is open after lens --menu")
+
             run(f'lens --enter "{RESULT_LINE}"', "a pipeline typed into the field")
-            look("the result list", f"{stem}-lens{extension}", 20, rows=RESULT_ROWS)
+            look("the result list", f"{stem}-lens{extension}", 20, menu=True, rows=RESULT_ROWS,
+                 journals=("lens",))
+            listed = bar_state("the state with the list open").get("rows")
+            if listed != str(RESULT_ROWS):
+                fail(f"lens --state says {listed} rows under the field, expected {RESULT_ROWS}")
 
             run(f'lens --enter "{ERROR_LINE}"', "a wrong command typed into the field")
-            look("the error line", f"{stem}-lens-error{extension}", 20, rows=0, error=True)
+            look("the line under the field", f"{stem}-lens-error{extension}", 20, menu=True, line=True)
+            if "error" not in bar_state("the state with the error line"):
+                fail("lens --state prints no error after a command it does not understand")
 
             run("lens --escape", "escape in the field")
-            look("the panel back at the field", f"{stem}-lens-empty{extension}", 20, rows=0)
+            look("the menu back at the field", f"{stem}-lens-empty{extension}", 20, menu=True)
+            run("lens --escape", "escape again, which closes the menu")
+            look("the desktop with the menu closed", f"{stem}-lens-closed{extension}", 20)
+            if bar_state("the state with the menu closed").get("menu") != "closed":
+                fail("the menu is still open after the second escape")
+            ok("the menu opened under the bar, took a line, cleared it and closed")
 
-            # 5c. the console. Mod+Grave runs toggle-console with the arguments in
+            # 5d. the console. Mod+Grave runs toggle-console with the arguments in
             # nix/modules/horizon.nix, and horizon msg runs the same action without the key. the first
             # time it starts ghostty, after that it hides and shows that same window
             status, printed = run("ghostty +validate-config", "ghostty's settings")
@@ -1641,10 +1791,10 @@ def main():
             if not programs:
                 fail(f"ghostty {pid} runs nothing in the console")
             shell = programs[0]
-            ok(f"the console is open under the panel, window {window_id}, ghostty {pid}, shell {shell}")
+            ok(f"the console is open under the bar, window {window_id}, ghostty {pid}, shell {shell}")
 
             run(toggle, "the hide action")
-            look("the desktop and the panel with the console hidden", f"{stem}-console-hidden{extension}", 20, rows=0)
+            look("the desktop and the bar with the console hidden", f"{stem}-console-hidden{extension}", 20)
             if console_window():
                 fail("horizon still lists the console window after the hide action")
             status, _ = run(f"kill -0 {shell}", "the shell in the hidden console")
@@ -1660,7 +1810,7 @@ def main():
             if shell not in children(pid, "the program in the console again"):
                 fail(f"the console's shell {shell} is gone after showing it again")
             run(toggle, "the hide action again")
-            look("the panel back without the console", f"{stem}-console-closed{extension}", 20, rows=0)
+            look("the bar back without the console", f"{stem}-console-closed{extension}", 20)
             ok(f"the same console came back with shell {shell} and went away again")
 
             # 5e. the lock screen. logind signals the session greetd opened when it is asked to lock
@@ -1711,7 +1861,7 @@ def main():
                 fail(f"loginctl lock-session {session} exited with {status}: {without_console(output).strip()!r}")
             look("the lock screen", f"{stem}-lock{extension}", 30, lock=False, journals=("lock", "horizon"))
             locked_hint("yes", "with the lock screen up")
-            ok(f"loginctl locked session {session}, the lock screen covers the console and the panel")
+            ok(f"loginctl locked session {session}, the lock screen covers the console and the bar")
 
             type_line(WRONG_PASSWORD, "a wrong password")
             look("the lock screen refusing a wrong password", f"{stem}-lock-refused{extension}", 30, lock=True,
@@ -1727,14 +1877,14 @@ def main():
             if shell not in children(pid, "the program in the console after unlocking"):
                 fail(f"the console's shell {shell} is gone after unlocking")
             run(toggle, "the hide action after unlocking")
-            look("the desktop and the panel after unlocking", f"{stem}-lock-desktop{extension}", 20, rows=0)
+            look("the desktop and the bar after unlocking", f"{stem}-lock-desktop{extension}", 20)
             ok(f"the owner's password unlocked it, the console came back with shell {shell}")
 
             # Mod+L on the same keyboard runs horizon-lock from the bind
             press(["meta_l", "l"], what="Mod+L")
             look("the lock screen from Mod+L", f"{stem}-lock-key{extension}", 30, lock=False, journals=("lock", "horizon"))
             type_line(PASSWORD, "the owner's password")
-            look("the desktop and the panel after unlocking again", f"{stem}-lock-desktop-again{extension}", 30, rows=0,
+            look("the desktop and the bar after unlocking again", f"{stem}-lock-desktop-again{extension}", 30,
                  journals=("lock", "horizon"))
             locked_hint("no", "after unlocking the lock from Mod+L")
             ok("Mod+L locked the session and the owner's password unlocked it")
@@ -1769,9 +1919,9 @@ def main():
                 fail("the getty on tty2 logs someone in by itself")
             ok("tty2 shows the name and a login from /etc/issue without the logo, and logs no one in by itself")
             press(["ctrl", "alt", "f1"], what="ctrl+alt+f1")
-            look("the desktop back from tty2", f"{stem}-tty2-back{extension}", 30, rows=0, journals=("horizon",))
+            look("the desktop back from tty2", f"{stem}-tty2-back{extension}", 30, journals=("horizon",))
 
-            # 5d. a question for quasar, from the terminal first, which prints the answer here, and
+            # 5g. a question for quasar, from the terminal first, which prints the answer here, and
             # then typed into the field. the answer is as many rows as the model makes it, so the
             # list is only expected to have at least one
             if args.models:
@@ -1785,7 +1935,23 @@ def main():
 
                 run(f'lens --enter "{QUESTION}"', "a question typed into the field")
                 look("the answer under the field", f"{stem}-lens-answer{extension}", args.answer_timeout,
-                     rows=(1, LIST_ROWS))
+                     menu=True, rows=(1, LIST_ROWS), journals=("lens",))
+                run("lens --escape", "escape after the answer")
+                run("lens --escape", "escape again, which closes the menu")
+
+            # 5h. the shell draws the bar and the menu in one process, so it runs as a user unit
+            # that restarts: killing it brings the bar back by itself
+            status, _ = run("pkill -x lens", "killing the shell")
+            if status != 0:
+                fail("pkill found no lens process to kill")
+            look("the bar after the shell was killed", f"{stem}-lens-restarted{extension}", 30,
+                 journals=("lens",))
+            _, output = run("systemctl --user show -p NRestarts --value lens.service | cat",
+                            "how often the shell has restarted")
+            restarts = re.search(r"^(\d+)\s*$", without_console(output), re.M)
+            if not restarts or int(restarts.group(1)) < 1:
+                fail(f"systemd did not restart the shell: NRestarts={without_console(output).strip()!r}")
+            ok(f"the shell came back after it was killed, restart {restarts.group(1)}")
 
     # 6. timeline. vault answers on the bus and a timer takes a snapshot of home every hour. take one,
     # change a file and delete another, find the snapshot through rift snapshot and on the bus,

@@ -65,7 +65,7 @@ let
 
     prefer-no-csd
 
-    // the console floats along the top of the working area, under lens's panel, full width
+    // the console floats along the top of the working area, under lens's bar, full width
     window-rule {
         match app-id=r#"^${lib.escapeRegex console.appId}$"#
         open-floating true
@@ -87,6 +87,7 @@ let
     binds {
         Mod+Shift+Slash hotkey-overlay-title="Show these shortcuts" { show-hotkey-overlay; }
         Mod+T hotkey-overlay-title="Open a terminal" { spawn "ghostty"; }
+        Mod+Space hotkey-overlay-title="Show the Applications menu" { spawn "lens" "--menu"; }
         Mod+Grave hotkey-overlay-title="Show or hide the console" { toggle-console app-id="${console.appId}" "${config.systemd.package}/bin/systemd-cat" "-t" "console" "ghostty" "--class=${console.appId}"; }
         // while the session is locked the key starts a lock screen again, in case the one that
         // locked it has gone. horizon turns a second one away while the first is still there
@@ -208,12 +209,16 @@ in
       pkgs.ghostty
       pkgs.wl-clipboard
       pkgs.brightnessctl
+      pkgs.adwaita-icon-theme
+      pkgs.hicolor-icon-theme
     ];
 
     fonts.packages = [
       pkgs.noto-fonts
       pkgs.dejavu_fonts
     ];
+    # the icon theme lens looks names up in, and the one gtk apps fall back to
+    environment.pathsToLink = [ "/share/icons" ];
     fonts.fontconfig.defaultFonts = {
       sansSerif = [ "Noto Sans" ];
       monospace = [ "DejaVu Sans Mono" ];

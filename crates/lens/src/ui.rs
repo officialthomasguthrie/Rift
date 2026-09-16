@@ -1,144 +1,165 @@
-//! The panel: a strip along the top of the screen with the field in it, and under the field a
-//! list of results and a line for what went wrong. Drawn with iced on the software renderer,
-//! placed by the layer-shell protocol, so it works on any machine the drive meets. Sizes and
-//! colours are the ones the boot test counts.
+//! The shell: the top bar along the top of the screen, and the Applications menu that hangs under
+//! it with the field in it. One process with a layer surface per part, drawn with iced on the
+//! software renderer and placed by the layer-shell protocol, so it works on any machine the drive
+//! meets.
 
-use iced::widget::{column, container, row, text, text_input};
+use std::sync::{Mutex, OnceLock};
+
+use iced::widget::container;
 use iced::{
-    Border, Color, Element, Font, Length, Subscription, Task, Theme, event, font, keyboard, theme,
+    Element, Font, Length, Subscription, Task, Theme, event, font, keyboard, theme, window,
 };
 use iced_layershell::actions::{LayerShellCustomAction, LayerShellCustomActionWithId};
-use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
+use iced_layershell::reexport::{
+    Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
+};
 use iced_layershell::settings::{LayerShellSettings, Settings};
 use librift::os::{self, Action};
 use librift::quasar;
 
 use crate::answer;
+use crate::bar;
+use crate::clock;
 use crate::control::{self, Command};
 use crate::launcher::{self, App};
+use crate::menu::{self, Menu, Results};
 use crate::nu;
 use crate::route::{self, Interpretation};
+use crate::status::{Battery, Status, Volume};
+use crate::theme::Palette;
 
-/// Height of the field's row in logical pixels. The compositor keeps windows below it, and it
-/// stays the exclusive zone however tall the panel grows, so the desktop never jumps.
-pub const PANEL_HEIGHT: u32 = 32;
-/// Height of one row of the result list.
-const ROW_HEIGHT: u32 = 22;
-/// Height of the error line.
-const ERROR_HEIGHT: u32 = 22;
-/// The gap under whatever the panel grew to show.
-const BOTTOM_PAD: u32 = 4;
-/// How many results the list shows at once.
-const ROWS: usize = 8;
-const FIELD_WIDTH: f32 = 480.0;
-const TEXT_SIZE: f32 = 14.0;
-const FIELD_ID: &str = "field";
-
-const PANEL: Color = Color::from_rgb(0.118, 0.118, 0.118); // #1e1e1e
-const FIELD: Color = Color::from_rgb(0.180, 0.180, 0.180); // #2e2e2e
-const EDGE: Color = Color::from_rgb(0.235, 0.235, 0.235); // #3c3c3c
-const TEXT: Color = Color::from_rgb(0.902, 0.902, 0.902); // #e6e6e6
-const DIM: Color = Color::from_rgb(0.549, 0.549, 0.549); // #8c8c8c
-const ACCENT: Color = Color::from_rgb(0.471, 0.682, 0.929); // #78aeed
-const ERROR: Color = Color::from_rgb(0.878, 0.427, 0.427); // #e06d6d
-const OK: Color = Color::from_rgb(0.4, 0.7, 0.4);
-const WARN: Color = Color::from_rgb(0.85, 0.7, 0.3);
-
-const FONT: Font = Font {
+/// The interface font.
+pub const FONT: Font = Font {
     family: font::Family::Name("Noto Sans"),
     ..Font::DEFAULT
 };
-// what a command printed is terminal output, and a table only lines up in a fixed width
-const MONO: Font = Font {
+/// What a command printed is terminal output, and a table only lines up in a fixed width.
+pub const MONO: Font = Font {
     family: font::Family::Name("DejaVu Sans Mono"),
     ..Font::DEFAULT
 };
 
+/// What `lens --state` prints. The shell writes it after every message and the thread that
+/// answers the socket reads it, so a query never waits for the one that draws.
+fn kept() -> &'static Mutex<String> {
+    static KEPT: OnceLock<Mutex<String>> = OnceLock::new();
+    KEPT.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// The shell's state. The bar is always there; the menu comes and goes with its surface.
 struct Lens {
-    input: String,
+    look: Palette,
     apps: Vec<App>,
-    results: Results,
-    selected: usize,
-    error: Option<String>,
-    notice: Option<String>,
-    pending: Option<Action>,
-    height: u32,
+    clock: String,
+    status: Status,
+    menu: Option<Menu>,
 }
 
-/// What the list under the field is showing.
-enum Results {
-    /// Nothing, and the panel is only the field's row high.
-    None,
-    /// The apps the words match, best first. One of them is selected.
-    Matches(Vec<App>),
-    /// What a command or a pipeline printed.
-    Output(Vec<String>),
-    /// Quasar's answer, wrapped into rows.
-    Answer(Vec<String>),
-}
-
-impl Results {
-    fn len(&self) -> usize {
-        match self {
-            Self::None => 0,
-            Self::Matches(apps) => apps.len(),
-            Self::Output(lines) | Self::Answer(lines) => lines.len(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
+/// What happens to the shell.
 #[derive(Debug, Clone)]
-enum Message {
+pub enum Message {
+    /// The minute turned, and this is the clock's line now.
+    Tick(String),
+    /// What the status sources say now.
+    Status(Status),
+    /// The Applications button, or Mod+Space.
+    ToggleMenu,
+    /// New words in the field.
     Input(String),
+    /// Enter in the field.
     Submit,
+    /// Up or down the list.
     Move(isize),
+    /// Escape: clear the field, or close the menu when it is already empty.
     Escape,
+    /// Close the menu, whatever surface it is on.
+    Dismiss,
+    /// A command or a pipeline finished.
     Done(Result<String, String>),
+    /// Quasar answered.
     Answered(Result<(String, String), String>),
+    /// A line came in on the socket.
     Typed(Command),
-    Resize(u32),
+    /// Open the menu's surface, this tall.
+    Open(window::Id, u32),
+    /// The menu's surface has to grow or shrink.
+    Resize(window::Id, u32),
+    /// Close a surface.
+    Close(window::Id),
+    /// A surface took or lost the keyboard.
+    Focus(window::Id, bool),
 }
 
-// the layer-shell runtime asks every message whether it is one of its own actions. only the
-// resize is: the panel grows and shrinks with the list under the field, and the surface has to
-// grow with it. the exclusive zone stays at the field's own height
+// the layer-shell runtime asks every message whether it is one of its own actions. the three that
+// are carry a surface: opening the menu, resizing it as the list grows, and closing it. an action
+// that makes a new surface must not name it as the target, or the runtime waits for a surface
+// that does not exist yet
 impl TryFrom<Message> for LayerShellCustomActionWithId {
     type Error = Message;
 
     fn try_from(message: Message) -> Result<Self, Message> {
         match message {
-            Message::Resize(height) => Ok(Self::new(
+            Message::Open(id, height) => Ok(Self::new(
                 None,
-                LayerShellCustomAction::SizeChange((0, height)),
+                LayerShellCustomAction::NewLayerShell {
+                    settings: menu_surface(height),
+                    id,
+                },
             )),
+            Message::Resize(id, height) => Ok(Self::new(
+                Some(id),
+                LayerShellCustomAction::SizeChange((menu::WIDTH, height)),
+            )),
+            Message::Close(id) => Ok(Self::new(Some(id), LayerShellCustomAction::RemoveWindow)),
             other => Err(other),
         }
     }
 }
 
-/// Open the panel on the session's Wayland display and run until it is closed.
+/// The menu's surface: on the overlay layer, hanging under the bar inside the working area, its
+/// left edge under the Applications button. It takes the keyboard on demand, which the compositor
+/// gives it as it appears and takes away as soon as anything else is clicked.
+fn menu_surface(height: u32) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((menu::WIDTH, height)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top | Anchor::Left,
+        exclusive_zone: Some(0),
+        margin: Some((0, 0, 0, i32::try_from(menu::PAD).unwrap_or(0))),
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::Active,
+        events_transparent: false,
+        namespace: Some("lens-menu".to_string()),
+    }
+}
+
+/// Open the shell on the session's Wayland display and run until it is closed.
 ///
 /// # Errors
 ///
 /// When there is no display or the compositor has no layer-shell.
 pub fn run(apps: Vec<App>) -> Result<(), iced_layershell::Error> {
-    iced_layershell::application(move || boot(apps.clone()), "lens", update, view)
-        .theme(|_: &Lens| Theme::custom("Rift", PALETTE))
+    let look = crate::theme::load();
+    iced_layershell::daemon(move || boot(look, apps.clone()), "lens", update, view)
+        .theme(|state: &Lens, _| Theme::custom("Rift", palette(state.look)))
+        .style(|state: &Lens, _: &Theme| theme::Style {
+            // every surface paints its own background over all of itself; this is what shows if
+            // one ever does not, and a software-rendered surface has no transparency
+            background_color: state.look.bar,
+            text_color: state.look.text,
+        })
         .subscription(subscription)
         .settings(Settings {
-            id: Some("dev.rift.Lens".into()),
+            id: Some("dev.rift.Lens".to_string()),
             default_font: FONT,
-            default_text_size: TEXT_SIZE.into(),
+            default_text_size: bar::TEXT_SIZE.into(),
             layer_settings: LayerShellSettings {
                 anchor: Anchor::Top | Anchor::Left | Anchor::Right,
                 layer: Layer::Top,
-                exclusive_zone: i32::try_from(PANEL_HEIGHT).unwrap_or(0),
-                size: Some((0, PANEL_HEIGHT)),
-                keyboard_interactivity: KeyboardInteractivity::OnDemand,
+                exclusive_zone: i32::try_from(bar::HEIGHT).unwrap_or(0),
+                size: Some((0, bar::HEIGHT)),
+                // a bar never takes the keyboard away from a window
+                keyboard_interactivity: KeyboardInteractivity::None,
                 ..LayerShellSettings::default()
             },
             ..Settings::default()
@@ -146,35 +167,35 @@ pub fn run(apps: Vec<App>) -> Result<(), iced_layershell::Error> {
         .run()
 }
 
-const PALETTE: theme::Palette = theme::Palette {
-    background: PANEL,
-    text: TEXT,
-    primary: ACCENT,
-    success: OK,
-    warning: WARN,
-    danger: ERROR,
-};
+fn palette(look: Palette) -> theme::Palette {
+    theme::Palette {
+        background: look.bar,
+        text: look.text,
+        primary: look.accent,
+        success: look.ok,
+        warning: look.warn,
+        danger: look.error,
+    }
+}
 
-fn boot(apps: Vec<App>) -> (Lens, Task<Message>) {
+fn boot(look: Palette, apps: Vec<App>) -> (Lens, Task<Message>) {
     let state = Lens {
-        input: String::new(),
+        look,
         apps,
-        results: Results::None,
-        selected: 0,
-        error: None,
-        notice: None,
-        pending: None,
-        height: PANEL_HEIGHT,
+        clock: clock::now(),
+        status: Status::default(),
+        menu: None,
     };
-    (state, iced::widget::operation::focus(FIELD_ID))
+    remember(&state);
+    (state, Task::none())
 }
 
 fn subscription(_: &Lens) -> Subscription<Message> {
-    Subscription::batch([keys(), terminal()])
+    Subscription::batch([keys(), focus(), terminal(), ticker()])
 }
 
-// the field takes the printable keys and Escape for itself, so these come from every event, not
-// only the ones no widget wanted
+// the field takes the printable keys for itself, so these come from every event, not only the
+// ones no widget wanted
 fn keys() -> Subscription<Message> {
     event::listen_with(|event, _, _| match event {
         iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => match key {
@@ -187,15 +208,62 @@ fn keys() -> Subscription<Message> {
     })
 }
 
-// the socket in the runtime directory, read on a thread of its own
+// the compositor gives an on-demand surface the keyboard as it appears and takes it back when
+// something else is clicked, which is how a click outside closes the menu. the surface is drawn
+// before the keyboard reaches it, so the cursor goes in the field on either event
+fn focus() -> Subscription<Message> {
+    event::listen_with(|event, _, id| match event {
+        iced::Event::Window(window::Event::Opened { .. } | window::Event::Focused) => {
+            Some(Message::Focus(id, true))
+        }
+        iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(id, false)),
+        _ => None,
+    })
+}
+
+// the socket in the runtime directory, read on a thread of its own. the state query is answered
+// there, from the lines the shell keeps up to date
 fn terminal() -> Subscription<Message> {
     Subscription::run(|| {
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
-            if let Err(why) = control::serve(|command| {
-                let _ = sender.unbounded_send(Message::Typed(command));
-            }) {
+            if let Err(why) =
+                control::serve(|command| {
+                    if command == Command::State {
+                        return Some(kept().lock().map_or_else(
+                            |_| "the shell is busy".to_string(),
+                            |lines| lines.clone(),
+                        ));
+                    }
+                    let _ = sender.unbounded_send(Message::Typed(command));
+                    None
+                })
+            {
                 eprintln!("lens: {why}");
+            }
+        });
+        receiver
+    })
+}
+
+// the clock and the status, once a minute on the minute, read on a thread of its own because it
+// runs child processes. the clock goes first: asking the status sources takes a moment, and the
+// time on the bar should turn with the minute
+fn ticker() -> Subscription<Message> {
+    Subscription::run(|| {
+        let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            loop {
+                if sender.unbounded_send(Message::Tick(clock::now())).is_err() {
+                    return;
+                }
+                if sender
+                    .unbounded_send(Message::Status(Status::read()))
+                    .is_err()
+                {
+                    return;
+                }
+                std::thread::sleep(clock::until_next_minute());
             }
         });
         receiver
@@ -204,177 +272,248 @@ fn terminal() -> Subscription<Message> {
 
 fn update(state: &mut Lens, message: Message) -> Task<Message> {
     let task = match message {
+        Message::Tick(now) => {
+            state.clock = now;
+            Task::none()
+        }
+        Message::Status(status) => {
+            state.status = status;
+            Task::none()
+        }
+        Message::ToggleMenu => toggle(state),
         Message::Input(value) => {
-            typed(state, value);
+            let Lens { apps, menu, .. } = state;
+            if let Some(menu) = menu.as_mut() {
+                menu.typed(apps, value);
+            }
             Task::none()
         }
         Message::Submit => submit(state),
         Message::Move(step) => {
-            step_selection(state, step);
+            if let Some(menu) = state.menu.as_mut() {
+                menu.step(step);
+            }
             Task::none()
         }
-        Message::Escape => {
-            clear(state);
-            // the field drops its own focus on Escape, so take it back
-            iced::widget::operation::focus(FIELD_ID)
-        }
+        Message::Escape => escape(state),
+        Message::Dismiss => close(state),
         Message::Done(result) => {
-            finish(state, result);
+            if let Some(menu) = state.menu.as_mut() {
+                finish(menu, result);
+            }
             Task::none()
         }
-        Message::Answered(result) => answered(state, result),
-        Message::Typed(command) => match command {
-            Command::Type(words) => {
-                typed(state, words);
-                Task::none()
-            }
-            Command::Enter(words) => {
-                if !words.is_empty() {
-                    typed(state, words);
-                }
-                submit(state)
-            }
-            Command::Escape => {
-                clear(state);
-                Task::none()
-            }
-        },
-        // the runtime takes this one before update ever sees it
-        Message::Resize(_) => Task::none(),
+        Message::Answered(result) => state
+            .menu
+            .as_mut()
+            .map_or_else(Task::none, |menu| answered(menu, result)),
+        Message::Typed(command) => typed(state, command),
+        Message::Focus(id, has) => focused(state, id, has),
+        // the runtime takes these before update ever sees them
+        Message::Open(..) | Message::Resize(..) | Message::Close(..) => Task::none(),
     };
-    Task::batch([task, resize(state)])
+    let grow = resize(state);
+    remember(state);
+    Task::batch([task, grow])
 }
 
-/// The panel is the field's row, plus the list, plus the error line.
-fn wanted_height(state: &Lens) -> u32 {
-    let rows = u32::try_from(state.results.len()).unwrap_or(0) * ROW_HEIGHT;
-    let error = if state.error.is_some() {
-        ERROR_HEIGHT
+/// Open the menu when it is closed, close it when it is open.
+fn toggle(state: &mut Lens) -> Task<Message> {
+    if state.menu.is_some() {
+        Task::done(Message::Dismiss)
     } else {
-        0
-    };
-    let under = rows + error;
-    if under == 0 {
-        PANEL_HEIGHT
-    } else {
-        PANEL_HEIGHT + under + BOTTOM_PAD
+        open(state)
     }
 }
 
-/// Ask the compositor for a taller or shorter surface when the panel changed shape.
-fn resize(state: &mut Lens) -> Task<Message> {
-    let wanted = wanted_height(state);
-    if wanted == state.height {
+fn open(state: &mut Lens) -> Task<Message> {
+    if state.menu.is_some() {
         return Task::none();
     }
-    state.height = wanted;
-    Task::done(Message::Resize(wanted))
+    let id = window::Id::unique();
+    let menu = Menu::new(id);
+    let height = menu.height;
+    state.menu = Some(menu);
+    Task::done(Message::Open(id, height))
 }
 
-/// New words in the field: what they match goes in the list, and anything the last line left
-/// behind goes away.
-fn typed(state: &mut Lens, value: String) {
-    state.pending = None;
-    state.notice = None;
-    state.error = None;
-    state.input = value;
-    state.selected = 0;
-    // only an app shows a list while typing. a command or a pipeline has nothing to show until
-    // it has run, and a list that does not agree with what Enter does is a trap
-    state.results = match route::route(&state.input, &state.apps) {
-        Interpretation::Launch(_) => {
-            let mut found = route::matches(&state.input, &state.apps);
-            found.truncate(ROWS);
-            Results::Matches(found.into_iter().cloned().collect())
+fn close(state: &mut Lens) -> Task<Message> {
+    state
+        .menu
+        .take()
+        .map_or_else(Task::none, |menu| Task::done(Message::Close(menu.id)))
+}
+
+/// Escape clears the field first, the way a search entry does, and closes the menu when there is
+/// nothing left to clear.
+fn escape(state: &mut Lens) -> Task<Message> {
+    match state.menu.as_mut() {
+        None => Task::none(),
+        Some(menu) if menu.has_anything() => {
+            menu.clear();
+            menu::focus_field()
         }
-        _ => Results::None,
-    };
+        Some(_) => Task::done(Message::Dismiss),
+    }
 }
 
-/// Empty field, empty list, nothing pending.
-fn clear(state: &mut Lens) {
-    state.input.clear();
-    state.results = Results::None;
-    state.selected = 0;
-    state.error = None;
-    state.notice = None;
-    state.pending = None;
-}
-
-/// Up and down walk the matches. Output rows are not a menu, nothing to select there.
-fn step_selection(state: &mut Lens, step: isize) {
-    let Results::Matches(apps) = &state.results else {
-        return;
-    };
-    let last = apps.len().saturating_sub(1);
-    if step > 0 {
-        state.selected = if state.selected >= last {
-            0
-        } else {
-            state.selected + 1
-        };
+/// A surface took or lost the keyboard. The menu closes when it loses it, which is what happens
+/// when anything outside it is clicked; when it takes it, the cursor goes in the field.
+fn focused(state: &mut Lens, id: window::Id, has: bool) -> Task<Message> {
+    if state.menu.as_ref().is_none_or(|menu| menu.id != id) {
+        return Task::none();
+    }
+    if has {
+        menu::focus_field()
     } else {
-        state.selected = if state.selected == 0 {
-            last
-        } else {
-            state.selected - 1
-        };
+        Task::done(Message::Dismiss)
+    }
+}
+
+/// A line from the socket. Typing into the field opens the menu when it is closed, because the
+/// boot test and Quasar's step reach the field that way.
+fn typed(state: &mut Lens, command: Command) -> Task<Message> {
+    match command {
+        Command::Type(words) => {
+            let opening = open(state);
+            write(state, words);
+            opening
+        }
+        Command::Enter(words) => {
+            let opening = open(state);
+            if !words.is_empty() {
+                write(state, words);
+            }
+            Task::batch([opening, submit(state)])
+        }
+        Command::Escape => escape(state),
+        Command::Menu => toggle(state),
+        // answered on the socket's own thread, from the lines remember() keeps
+        Command::State => Task::none(),
+    }
+}
+
+fn write(state: &mut Lens, words: String) {
+    let Lens { apps, menu, .. } = state;
+    if let Some(menu) = menu.as_mut() {
+        menu.typed(apps, words);
+    }
+}
+
+/// Ask the compositor for a taller or shorter menu when it changed shape.
+fn resize(state: &mut Lens) -> Task<Message> {
+    let Some(menu) = state.menu.as_mut() else {
+        return Task::none();
+    };
+    let wanted = menu.wanted_height();
+    if wanted == menu.height {
+        return Task::none();
+    }
+    menu.height = wanted;
+    Task::done(Message::Resize(menu.id, wanted))
+}
+
+/// What `lens --state` prints: one line per thing the bar shows.
+fn remember(state: &Lens) {
+    let mut lines = String::new();
+    let mut line = |key: &str, value: &str| {
+        lines.push_str(key);
+        lines.push(' ');
+        lines.push_str(value);
+        lines.push('\n');
+    };
+    line("clock", &state.clock);
+    line("network", &state.status.network.word());
+    line(
+        "volume",
+        &state
+            .status
+            .volume
+            .map_or_else(|| "none".to_string(), Volume::word),
+    );
+    line(
+        "battery",
+        &state
+            .status
+            .battery
+            .map_or_else(|| "none".to_string(), Battery::word),
+    );
+    match &state.menu {
+        None => line("menu", "closed"),
+        Some(menu) => {
+            line("menu", "open");
+            line("field", &menu.input);
+            line("rows", &menu.results.len().to_string());
+            if let Some((text, wrong)) = menu.line() {
+                line(if wrong { "error" } else { "notice" }, text);
+            }
+        }
+    }
+    if let Ok(mut kept) = kept().lock() {
+        *kept = lines;
     }
 }
 
 fn submit(state: &mut Lens) -> Task<Message> {
-    if let Some(action) = state.pending.take() {
-        state.input.clear();
-        state.notice = None;
+    let Lens { apps, menu, .. } = state;
+    let Some(menu) = menu.as_mut() else {
+        return Task::none();
+    };
+    if let Some(action) = menu.pending.take() {
+        menu.input.clear();
+        menu.notice = None;
         return start(action);
     }
     // the list is a menu: Enter takes the row that is selected, not always the first
-    if let Results::Matches(apps) = &state.results {
-        if let Some(app) = apps.get(state.selected).cloned() {
-            launch(state, &app);
-            return Task::none();
+    if let Results::Matches(matched) = &menu.results {
+        if let Some(app) = matched.get(menu.selected).cloned() {
+            launch(menu, &app);
+            return Task::done(Message::Dismiss);
         }
     }
-    let reading = route::route(&state.input, &state.apps);
-    eprintln!("lens: {:?} -> {reading:?}", state.input);
+    let reading = route::route(&menu.input, apps);
+    eprintln!("lens: {:?} -> {reading:?}", menu.input);
     match reading {
         Interpretation::Nothing => {}
-        Interpretation::Launch(app) => launch(state, &app),
-        Interpretation::Os(action) => return propose(state, action),
+        Interpretation::Launch(app) => {
+            launch(menu, &app);
+            return Task::done(Message::Dismiss);
+        }
+        Interpretation::Os(action) => return propose(menu, action),
         Interpretation::Usage(usage) => {
-            state.results = Results::None;
-            state.error = Some(usage.to_string());
+            menu.results = Results::None;
+            menu.error = Some(usage.to_string());
         }
         Interpretation::Shell(line) => {
-            state.input.clear();
-            state.results = Results::None;
-            state.error = None;
+            menu.input.clear();
+            menu.results = Results::None;
+            menu.error = None;
             return Task::perform(async move { nu::run(&line) }, Message::Done);
         }
         Interpretation::Ask(question) => {
-            state.input.clear();
-            state.results = Results::None;
-            state.error = None;
-            state.notice = Some("Asking Quasar".into());
+            menu.input.clear();
+            menu.results = Results::None;
+            menu.error = None;
+            menu.notice = Some("Asking Quasar".to_string());
             return ask(question);
         }
     }
     Task::none()
 }
 
-/// An OS command, typed or proposed by Quasar. One that changes something waits for a second Enter,
-/// the rest runs at once.
-fn propose(state: &mut Lens, action: Action) -> Task<Message> {
+/// An OS command, typed or proposed by Quasar. One that changes something waits for a second
+/// Enter, the rest runs at once.
+fn propose(menu: &mut Menu, action: Action) -> Task<Message> {
     if action.mutating {
-        state.notice = Some(format!(
+        menu.notice = Some(format!(
             "{}? Press Enter to confirm or Escape to cancel.",
             action.summary
         ));
-        state.pending = Some(action);
+        menu.pending = Some(action);
         return Task::none();
     }
-    state.input.clear();
-    state.notice = None;
+    menu.input.clear();
+    menu.notice = None;
     start(action)
 }
 
@@ -389,47 +528,47 @@ fn ask(question: String) -> Task<Message> {
             });
             receiver
                 .await
-                .unwrap_or_else(|_| Err("Quasar stopped before it answered.".into()))
+                .unwrap_or_else(|_| Err("Quasar stopped before it answered.".to_string()))
         },
         Message::Answered,
     )
 }
 
 /// Quasar's reply: an answer goes in the list, a command is handled like a typed one, anything
-/// else goes on the error line.
-fn answered(state: &mut Lens, result: Result<(String, String), String>) -> Task<Message> {
+/// else goes on the line under it.
+fn answered(menu: &mut Menu, result: Result<(String, String), String>) -> Task<Message> {
     let reply = match result {
         Ok((kind, text)) => quasar::read(&kind, &text),
         Err(why) => quasar::Reply::Refused(why),
     };
     eprintln!("lens: quasar -> {reply:?}");
-    state.notice = None;
-    state.error = None;
-    state.results = Results::None;
+    menu.notice = None;
+    menu.error = None;
+    menu.results = Results::None;
     match reply {
         quasar::Reply::Answer(answer) => {
-            state.results = Results::Answer(answer::rows(&answer, ROWS));
+            menu.results = Results::Answer(answer::rows(&answer, menu::ROWS));
             Task::none()
         }
-        quasar::Reply::Action(action) => propose(state, action),
+        quasar::Reply::Action(action) => propose(menu, action),
         quasar::Reply::Refused(why) => {
-            state.error = Some(why);
+            menu.error = Some(why);
             Task::none()
         }
     }
 }
 
-fn launch(state: &mut Lens, app: &App) {
+fn launch(menu: &mut Menu, app: &App) {
     match launcher::launch(app) {
         Ok(()) => {
-            state.notice = Some(format!("Starting {}", app.name));
-            state.error = None;
+            menu.notice = Some(format!("Starting {}", app.name));
+            menu.error = None;
         }
-        Err(why) => state.error = Some(why),
+        Err(why) => menu.error = Some(why),
     }
-    state.input.clear();
-    state.results = Results::None;
-    state.selected = 0;
+    menu.input.clear();
+    menu.results = Results::None;
+    menu.selected = 0;
 }
 
 fn start(action: Action) -> Task<Message> {
@@ -438,142 +577,39 @@ fn start(action: Action) -> Task<Message> {
 }
 
 /// What a command or a pipeline printed goes in the list, what it complained about goes on the
-/// error line.
-fn finish(state: &mut Lens, result: Result<String, String>) {
+/// line under it.
+fn finish(menu: &mut Menu, result: Result<String, String>) {
     match result {
         Ok(output) => {
-            let rows = nu::rows(&output, ROWS);
-            state.error = None;
-            state.results = if rows.is_empty() {
-                state.notice = Some("Done".into());
+            let rows = nu::rows(&output, menu::ROWS);
+            menu.error = None;
+            menu.results = if rows.is_empty() {
+                menu.notice = Some("Done".to_string());
                 Results::None
             } else {
-                state.notice = None;
+                menu.notice = None;
                 Results::Output(rows)
             };
         }
         Err(why) => {
-            state.notice = None;
-            state.results = Results::None;
-            state.error = Some(why);
+            menu.notice = None;
+            menu.results = Results::None;
+            menu.error = Some(why);
         }
     }
 }
 
-fn view(state: &Lens) -> Element<'_, Message> {
-    let field = text_input("Type an app, a command or a question", &state.input)
-        .id(FIELD_ID)
-        .on_input(Message::Input)
-        .on_submit(Message::Submit)
-        .width(FIELD_WIDTH)
-        .size(TEXT_SIZE)
-        .padding([3, 8])
-        .style(field_style);
-    let mut line = row![field].spacing(12).align_y(iced::Center);
-    if let Some(notice) = &state.notice {
-        line = line.push(text(notice).size(TEXT_SIZE).color(DIM));
-    }
-    let top = container(line)
-        .width(Length::Fill)
-        .height(PANEL_HEIGHT)
-        .padding([0, 12])
-        .align_y(iced::Center);
-
-    let mut panel = column![top];
-    if !state.results.is_empty() {
-        panel = panel.push(container(list(state)).padding([0, 12]));
-    }
-    if let Some(why) = &state.error {
-        panel = panel.push(
-            container(text(why).size(TEXT_SIZE).color(ERROR))
-                .height(ERROR_HEIGHT)
-                .padding([0, 12])
-                .align_y(iced::Center),
-        );
-    }
-    container(panel)
+fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
+    match &state.menu {
+        Some(menu) if menu.id == id => menu::view(state.look, menu),
+        _ => container(bar::view(
+            state.look,
+            &state.clock,
+            &state.status,
+            state.menu.is_some(),
+        ))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(PANEL.into()),
-            text_color: Some(TEXT),
-            ..container::Style::default()
-        })
-        .into()
-}
-
-/// The rows under the field: the apps the words match, what the last line printed, or Quasar's
-/// answer.
-fn list(state: &Lens) -> Element<'_, Message> {
-    let mut rows = column![];
-    match &state.results {
-        Results::None => {}
-        Results::Matches(apps) => {
-            for (index, app) in apps.iter().enumerate() {
-                rows = rows.push(entry(&app.name, FONT, index == state.selected));
-            }
-        }
-        Results::Output(lines) => {
-            for output in lines {
-                rows = rows.push(entry(output, MONO, false));
-            }
-        }
-        Results::Answer(lines) => {
-            for answer in lines {
-                rows = rows.push(entry(answer, FONT, false));
-            }
-        }
-    }
-    container(rows)
-        .width(FIELD_WIDTH)
-        .clip(true)
-        .style(|_| container::Style {
-            background: Some(FIELD.into()),
-            border: Border {
-                color: EDGE,
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .into()
-}
-
-fn entry(label: &str, font: Font, selected: bool) -> Element<'_, Message> {
-    let colour = if selected { PANEL } else { TEXT };
-    let body = text(label)
-        .size(TEXT_SIZE)
-        .font(font)
-        .color(colour)
-        .wrapping(text::Wrapping::None);
-    container(body)
-        .width(Length::Fill)
-        .height(ROW_HEIGHT)
-        .padding([0, 8])
-        .align_y(iced::Center)
-        .clip(true)
-        .style(move |_| container::Style {
-            background: selected.then(|| ACCENT.into()),
-            ..container::Style::default()
-        })
-        .into()
-}
-
-fn field_style(_: &Theme, status: text_input::Status) -> text_input::Style {
-    let edge = match status {
-        text_input::Status::Focused { .. } => ACCENT,
-        _ => EDGE,
-    };
-    text_input::Style {
-        background: FIELD.into(),
-        border: Border {
-            color: edge,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        icon: TEXT,
-        placeholder: DIM,
-        value: TEXT,
-        selection: Color { a: 0.4, ..ACCENT },
+        .into(),
     }
 }

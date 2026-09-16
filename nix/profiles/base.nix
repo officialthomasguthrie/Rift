@@ -29,6 +29,9 @@ in
   };
   security.rtkit.enable = true;
   hardware.bluetooth.enable = true;
+  # the battery and the charger: the bar's battery icon asks upower, and the system menu will ask
+  # it how long is left
+  services.upower.enable = true;
 
   # its greeting is in identity.nix
   programs.fish.enable = true;

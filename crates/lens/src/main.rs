@@ -1,17 +1,30 @@
-//! lens: the shell. One field on the desktop and four interpreters behind it: the app
-//! launcher, the OS commands, nushell and Quasar.
+//! lens: the shell. The top bar along the top of the screen, the Applications menu under it,
+//! and four interpreters behind its field: the app launcher, the OS commands, nushell and Quasar.
 //!
-//! `lens` draws the field as a layer-shell panel on the running session. `lens --route
-//! <words>` prints what the field would do with those words and runs nothing. `lens --do
+//! `lens` draws the bar and the menu as layer-shell surfaces on the running session. `lens
+//! --route <words>` prints what the field would do with those words and runs nothing. `lens --do
 //! [--yes] <words>` does it from a terminal instead, with `--yes` standing in for the
 //! confirmation the field asks for. `lens --type <words>`, `lens --enter [<words>]` and
-//! `lens --escape` type into the field of the panel that is already running.
+//! `lens --escape` type into the field of the shell that is already running, `lens --menu` opens
+//! and closes the Applications menu, and `lens --state` prints what the bar shows.
 
 mod answer;
+#[cfg(target_os = "linux")]
+mod bar;
+#[cfg(target_os = "linux")]
+mod clock;
 mod control;
+#[cfg(target_os = "linux")]
+mod icons;
 mod launcher;
+#[cfg(target_os = "linux")]
+mod menu;
 mod nu;
 mod route;
+#[cfg(target_os = "linux")]
+mod status;
+#[cfg(target_os = "linux")]
+mod theme;
 #[cfg(target_os = "linux")]
 mod ui;
 
@@ -40,17 +53,33 @@ fn main() -> ExitCode {
         Some("--type") => tell(&control::Command::Type(args[1..].join(" "))),
         Some("--enter") => tell(&control::Command::Enter(args[1..].join(" "))),
         Some("--escape") => tell(&control::Command::Escape),
+        Some("--menu") => tell(&control::Command::Menu),
+        Some("--state") => show(),
         Some(other) => {
             eprintln!(
-                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape]"
+                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --state]"
             );
             ExitCode::from(2)
         }
-        None => panel(),
+        None => shell(),
     }
 }
 
-/// Type into the field of the panel that is running.
+/// What the bar of the shell that is running shows, one line per part.
+fn show() -> ExitCode {
+    match control::ask(&control::Command::State) {
+        Ok(lines) => {
+            print!("{lines}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Type into the field of the shell that is running.
 fn tell(command: &control::Command) -> ExitCode {
     match control::send(command) {
         Ok(()) => ExitCode::SUCCESS,
@@ -106,10 +135,10 @@ fn command(action: &os::Action, yes: bool) -> Result<String, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn panel() -> ExitCode {
+fn shell() -> ExitCode {
     let apps = launcher::load();
     eprintln!(
-        "lens {}: {} apps, opening the panel",
+        "lens {}: {} apps, opening the bar",
         librift::VERSION,
         apps.len()
     );
@@ -123,7 +152,7 @@ fn panel() -> ExitCode {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn panel() -> ExitCode {
-    eprintln!("lens: the panel needs a Wayland session on Linux");
+fn shell() -> ExitCode {
+    eprintln!("lens: the shell needs a Wayland session on Linux");
     ExitCode::FAILURE
 }

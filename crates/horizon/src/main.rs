@@ -279,11 +279,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn import_environment() {
+    // PATH and XDG_DATA_DIRS go in as well: the user manager is started by logind and never sees
+    // what pam set for the session, so a user unit of the session (lens, the portals) would run
+    // with no path to the system profile and find no desktop entries.
     let variables = [
         "WAYLAND_DISPLAY",
         "DISPLAY",
         "XDG_CURRENT_DESKTOP",
         "XDG_SESSION_TYPE",
+        "XDG_DATA_DIRS",
+        "PATH",
         SOCKET_PATH_ENV,
     ]
     .join(" ");
