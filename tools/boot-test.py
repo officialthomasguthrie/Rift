@@ -101,7 +101,13 @@ the menu. After the lock screen's own checks a pointer click on the status icons
 menu at the right of the bar: `lens --state` says the cable is connected and that the vm has no
 wireless card, Bluetooth adapter, backlight or battery, a click on the volume slider changes what
 `wpctl get-volume` reads, a second click on the icons closes the menu, Restart asks first and escape
-says no, and Lock starts the lock screen, which the owner's password unlocks. Killing the shell
+says no, and Lock starts the lock screen, which the owner's password unlocks. Then notifications:
+lens owns org.freedesktop.Notifications on the session bus, a critical one from notify-send stands
+under the bar at the right in the screendump and stays until its close button closes it, a click on a
+notification's button makes notify-send print the action's key, and one that is not critical goes
+after five seconds and stays in the list. A click on the clock opens the clock menu, which lists it,
+its Do not disturb switch keeps the next one off the screen, and a second click closes the menu. The
+volume key sent over qmp turns the sink up and shows the key popup over the dock. Killing the shell
 brings it back, since it is a user unit that restarts. With --models as
 well, a question goes through `lens --do`, which prints quasar's answer, and then into the field,
 where the answer shows up as rows under it.
@@ -288,6 +294,26 @@ SYSTEM_GAP = 8
 SYSTEM_INSET = 8
 # the rows at the bottom of the system menu, in their order
 SESSION_ROWS = ["Lock", "Log out", "Restart", "Shut down"]
+# lens's notifications, clock menu and key popup, from crates/lens/src/{notice,banner,datemenu,popup}.rs:
+# the gap under the bar and from the right edge, a notification's width, padding, icon, close button and
+# action buttons, the clock menu's width, padding and row, and the popup's size and its height over the
+# dock, all in logical pixels
+NOTIFY_GAP = 8
+NOTIFY_WIDTH = 380
+NOTIFY_PAD = 12
+NOTIFY_ICON = 24
+NOTIFY_ICON_GAP = 12
+NOTIFY_CLOSE = 24
+NOTIFY_BUTTON = 28
+CLOCK_WIDTH = 340
+CLOCK_PAD = 8
+CLOCK_ROW = 32
+CLOCK_INSET = 8
+SWITCH = 20
+POPUP_SIZE = (220, 56)
+POPUP_ABOVE = 96
+# what the test's notifications say
+NOTIFY_SUMMARY = "Rift boot test"
 # the app the menu starts, its name in the list and the app id its window has
 MENU_APP = "Ghostty"
 MENU_APP_ID = "com.mitchellh.ghostty"
@@ -301,7 +327,8 @@ WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
 # the words lens --state prints, and how the bar writes the time
 STATE_KEYS = ("clock", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
-              "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog")
+              "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
+              "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -434,13 +461,17 @@ def ink_in(width, rgb, top, bottom):
     return found
 
 
-def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False, system=None):
+def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False, system=None,
+                  notification=None, clock=None, popup=None):
     """Count the desktop gray and the console's black in a screendump, and with lens the bar along
     the top with something drawn at its left, in its middle and at its right, the dock along the
     bottom with the apps in it, and with menu the Applications menu under the bar with the field in
     it. rows is a count, or (fewest, most) when the test cannot know how many rows there are: then
     any count in that range that fits passes. system is the (width, height) lens says the system
-    menu has, which then hangs under the bar at the right. Returns (ok, lines to print)."""
+    menu has, which then hangs under the bar at the right. notification, clock and popup are the
+    sizes lens says a notification, the clock menu and the key popup have: the first stands under
+    the bar at the right, the second hangs under the clock in the middle, and the third stands over
+    the dock in the middle. Returns (ok, lines to print)."""
     gray = black = menu_gray = 0
     bar_like = [0] * height
     # the rows that are part of the menu, and where its gray starts and ends in each
@@ -504,6 +535,29 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
     top = run[0][0] if run else -1
     left, right = (run[0][1], run[0][2]) if run else (-1, -1)
     box = (right - left + 1, len(run)) if run else (0, 0)
+    shown = notification or clock or popup
+    if shown:
+        # the gray starts inside the one pixel border
+        if notification:
+            name, where = "the notification", "under the bar at the right"
+            wanted = (width - (NOTIFY_GAP + shown[0]) * scale + 1, bar_rows + NOTIFY_GAP * scale + 1)
+        elif clock:
+            name, where = "the clock menu", "under the clock"
+            wanted = ((width - shown[0] * scale) / 2 + 1, bar_rows + 1)
+        else:
+            name, where = "the key popup", "over the dock in the middle"
+            wanted = ((width - shown[0] * scale) / 2 + 1, height - dock_rows - (POPUP_ABOVE + shown[1]) * scale + 1)
+        inside = ((shown[0] - 2) * scale, (shown[1] - 2) * scale)
+        below = total - (bar_rows + dock_rows) * width - inside[0] * inside[1]
+        checks += [
+            (f"{name} is {where}", abs(left - wanted[0]) <= 2 * scale and abs(top - wanted[1]) <= 2 * scale,
+             f"its gray starts at {left},{top}, expected {wanted[0]:.0f},{wanted[1]:.0f}"),
+            (f"{name} is as wide and as tall as lens says",
+             abs(box[0] - inside[0]) <= 4 * scale and abs(box[1] - inside[1]) <= 4 * scale,
+             f"{box[0]}x{box[1]}, expected about {inside[0]:.0f}x{inside[1]:.0f}"),
+            ("the desktop background covers the rest", gray >= 0.9 * below, f"{gray} of {below:.0f}"),
+        ]
+        return report("desktop", [f"desktop: {width}x{height}"], checks)
     if system:
         # the menu's gray starts inside its one pixel border, and its right edge is its margin from
         # the edge of the screen
@@ -2364,6 +2418,176 @@ def main():
             if bar_state("the state after the lock").get("system") != "closed":
                 fail("the system menu is still open after the lock")
             ok("Lock in the system menu locked the session and the owner's password unlocked it")
+
+            # 5e3. notifications, the clock menu and the key popup. lens serves notifications on the
+            # session bus, and notify-send, from libnotify, sends them from the serial shell
+            state = bar_state("the state before any notification")
+            quiet = {key: state.get(key) for key in ("notifications", "banners", "clock-menu", "popup", "do-not-disturb")}
+            if quiet != {"notifications": "0 0", "banners": "none", "clock-menu": "closed", "popup": "closed",
+                         "do-not-disturb": "off"}:
+                fail(f"lens --state says {quiet} before anything was sent")
+            _, output = run("busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications "
+                            "org.freedesktop.Notifications GetServerInformation", "who serves notifications")
+            if '"Lens"' not in without_console(output):
+                fail(f"the session bus has no notification server from lens: {without_console(output).strip()!r}")
+            ok("lens serves org.freedesktop.Notifications")
+
+            def notices(what):
+                """(on screen, kept) from lens --state."""
+                counted = (bar_state(what).get("notifications") or "").split()
+                return tuple(int(number) for number in counted) if len(counted) == 2 else None
+
+            def banner_sizes(what):
+                """The sizes of the notifications on screen, top to bottom."""
+                printed = bar_state(what).get("banners") or "none"
+                return [] if printed == "none" else [tuple(int(n) for n in size.split("x")) for size in printed.split()]
+
+            width, height, rgb = screendump(args.qmp, work, "notify")
+            size = (width, height)
+            bar_rows, dock_rows = bar_and_dock(width, height, bar_gray_rows(width, height, rgb))
+            scale = bar_rows / BAR_HEIGHT
+            away = (round(width / 3), round(height / 2))
+            point(args.qmp, size, away)
+
+            # a critical notification stays until it is closed
+            status, output = run(f'notify-send --urgency=critical --icon=dialog-information "{NOTIFY_SUMMARY}" '
+                                 '"A critical notification stays on screen until it is closed."',
+                                 "a critical notification")
+            if status != 0:
+                fail(f"notify-send exited with {status}: {without_console(output).strip()!r}")
+            if wait_for(20, lambda: notices("the state after notify-send") == (1, 1)) is not True:
+                fail(f"lens shows {notices('the notifications')} (on screen, kept) after notify-send, expected (1, 1)")
+            sizes = banner_sizes("the notification's size")
+            if len(sizes) != 1 or sizes[0][0] != NOTIFY_WIDTH:
+                fail(f"lens says the notification on screen is {sizes}")
+            look("the notification", f"{stem}-notification{extension}", 20, notification=sizes[0], journals=("lens",))
+            if bar_state("the newest notification").get("latest") != NOTIFY_SUMMARY:
+                fail(f"lens keeps {bar_state('the newest').get('latest')!r}, expected {NOTIFY_SUMMARY!r}")
+            time.sleep(7)
+            if notices("the critical notification a while later") != (1, 1):
+                fail("the critical notification did not stay on screen")
+            ok(f"notify-send put a critical notification under the bar at the right, {sizes[0][0]}x{sizes[0][1]}, "
+               "and it stayed")
+
+            # its close button closes it, and a notification the owner closed leaves the list too
+            banner_top = bar_rows + NOTIFY_GAP * scale
+            banner_right = width - NOTIFY_GAP * scale
+            click(args.qmp, size, (round(banner_right - (NOTIFY_PAD + NOTIFY_CLOSE / 2) * scale),
+                                   round(banner_top + (NOTIFY_PAD + NOTIFY_CLOSE / 2) * scale)))
+            point(args.qmp, size, away)
+            if wait_for(20, lambda: notices("the state after the close button") == (0, 0)) is not True:
+                fail(f"the close button left {notices('the notifications')} (on screen, kept)")
+            ok("the close button closed the critical notification")
+
+            # a button for an action: notify-send waits for it and prints the action's key
+            run('notify-send --action=open=Open --icon=dialog-information "Rift boot test" "A notification with a button." '
+                '< /dev/null > /tmp/rift-action.txt 2>&1 &; disown', "a notification with a button")
+            if wait_for(20, lambda: notices("the state with the button") == (1, 1)) is not True:
+                fail(f"lens shows {notices('the notifications')} (on screen, kept) after a notification with a button")
+            sizes = banner_sizes("the size with a button")
+            words_left = width - (NOTIFY_GAP + NOTIFY_WIDTH - NOTIFY_PAD - NOTIFY_ICON - NOTIFY_ICON_GAP) * scale
+            click(args.qmp, size, (round(words_left + 40 * scale),
+                                   round(banner_top + (sizes[0][1] - NOTIFY_PAD - NOTIFY_BUTTON / 2) * scale)))
+            point(args.qmp, size, away)
+            if wait_for(20, lambda: "open" in without_console(run("cat /tmp/rift-action.txt", "what notify-send printed")[1]).split()) is not True:
+                fail(f"notify-send printed {without_console(run('cat /tmp/rift-action.txt', 'notify-send')[1]).strip()!r} "
+                     "after a click on the button, expected the action's key")
+            if wait_for(20, lambda: notices("the state after the button") == (0, 0)) is not True:
+                fail(f"the button left {notices('the notifications')} (on screen, kept)")
+            ok("a click on the notification's button told notify-send, and the notification closed")
+
+            # a notification that is not critical goes after five seconds and stays in the list
+            run(f'notify-send "{NOTIFY_SUMMARY}" "This one closes by itself."', "a notification that closes by itself")
+            if wait_for(10, lambda: notices("the state with the notification") == (1, 1)) is not True:
+                fail(f"lens shows {notices('the notifications')} (on screen, kept) after notify-send")
+            if wait_for(20, lambda: notices("the state a while later") == (0, 1)) is not True:
+                fail(f"the notification is still up after its five seconds: {notices('the notifications')}")
+            ok("a notification went after five seconds and stayed in the list")
+
+            # a click on the clock opens the clock menu, which lists it
+            clock_point = (round(width / 2), round(bar_rows / 2))
+            click(args.qmp, size, clock_point)
+
+            def clock_open(what):
+                """The size lens says the clock menu has, when it is open."""
+                shown = bar_state(what).get("clock-menu") or ""
+                return tuple(int(number) for number in shown.split()[1].split("x")) if shown.startswith("open ") else None
+
+            menu_size = wait_for(20, lambda: clock_open("the state after a click on the clock"))
+            if not menu_size:
+                fail("a click on the clock opened no clock menu")
+            point(args.qmp, size, away)
+            look("the clock menu", f"{stem}-clock{extension}", 20, clock=menu_size, journals=("lens",))
+            if bar_state("what the clock menu lists").get("latest") != NOTIFY_SUMMARY:
+                fail(f"the clock menu lists {bar_state('the list').get('latest')!r}, expected {NOTIFY_SUMMARY!r}")
+            ok(f"a click on the clock opened the clock menu, {menu_size[0]}x{menu_size[1]}, with the notification in it")
+
+            # Do not disturb keeps a notification off the screen and in the list. the switch is at the
+            # right of the last row, and the menu grows by a row when the list does
+
+            def switch_point(menu_size):
+                menu_left = (width - CLOCK_WIDTH * scale) / 2
+                return (round(menu_left + (CLOCK_WIDTH - CLOCK_PAD - CLOCK_INSET - SWITCH) * scale),
+                        round(bar_rows + (menu_size[1] - CLOCK_PAD - CLOCK_ROW / 2) * scale))
+
+            click(args.qmp, size, switch_point(menu_size))
+            if wait_for(20, lambda: bar_state("the state after the switch").get("do-not-disturb") == "on") is not True:
+                fail("the Do not disturb switch did not turn it on")
+            run(f'notify-send "{NOTIFY_SUMMARY}" "Do not disturb keeps this one quiet."', "a notification while it is on")
+            if wait_for(20, lambda: notices("the state with Do not disturb") == (0, 2)) is not True:
+                fail(f"lens shows {notices('the notifications')} (on screen, kept) with Do not disturb on, expected (0, 2)")
+            grown = wait_for(20, lambda: (clock_open("the clock menu with two") or (0, 0))[1] > menu_size[1]
+                             and clock_open("the clock menu with two"))
+            if not grown:
+                fail(f"the clock menu is {clock_open('the clock menu')} with two notifications, it was {menu_size}")
+            point(args.qmp, size, away)
+            shot(f"{stem}-clock-quiet{extension}", "clock-quiet")
+            click(args.qmp, size, switch_point(grown))
+            if wait_for(20, lambda: bar_state("the state after the switch again").get("do-not-disturb") == "off") is not True:
+                fail("the Do not disturb switch did not turn it off again")
+            ok("with Do not disturb on a notification went into the list without showing")
+
+            # a second click on the clock closes the menu, and it stays closed
+            click(args.qmp, size, clock_point)
+            if wait_for(20, lambda: bar_state("the state after a second click on the clock").get("clock-menu") == "closed") is not True:
+                fail("a second click on the clock left the clock menu open")
+            time.sleep(2)
+            if bar_state("the clock menu a moment later").get("clock-menu") != "closed":
+                fail("the clock menu opened again after the click that closed it")
+            point(args.qmp, size, away)
+            ok("a second click on the clock closed the clock menu")
+
+            # the volume key shows the popup for a second. the screendumps follow the key at once,
+            # without a command on the serial line in between
+            before = volume_now()
+            found = None
+            for _ in range(3):
+                press(["volumeup"], what="the volume key")
+                until = time.monotonic() + 3
+                while time.monotonic() < until:
+                    width, height, rgb = screendump(args.qmp, work, "popup")
+                    good, lines = check_desktop(width, height, rgb, lens=True, popup=POPUP_SIZE)
+                    if good:
+                        found = (width, height, rgb, lines)
+                        break
+                if found:
+                    break
+            if not found:
+                write_png(f"{stem}-popup{extension}", width, height, rgb)
+                print("\nboot-test: " + "\nboot-test: ".join(lines), flush=True)
+                _, output = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
+                fail(f"the volume key showed no popup, see {stem}-popup{extension}: {without_console(output).strip()[-400:]!r}")
+            write_png(f"{stem}-popup{extension}", found[0], found[1], found[2])
+            print("\nboot-test: " + "\nboot-test: ".join(found[3]), flush=True)
+            after = volume_now()
+            if before is None or after is None or after <= before:
+                fail(f"the volume key left the sink at {after}, it was {before}")
+            shown = wait_for(20, lambda: bar_state("the bar's volume after the key").get("volume") == str(round(after * 100)))
+            if not shown:
+                fail(f"wpctl says {after} and the bar says volume {bar_state('the bar volume').get('volume')!r}")
+            if wait_for(10, lambda: bar_state("the popup a moment later").get("popup") == "closed") is not True:
+                fail("the key popup did not go away")
+            ok(f"the volume key turned the sink up from {before:.2f} to {after:.2f} and showed the popup")
 
             # 5f. a text console. ctrl+alt+f2 moves to the second one, where logind starts a getty that
             # shows /etc/issue: the name line without the logo, and a login that asks for a name, since

@@ -1,7 +1,7 @@
-//! The shell: the top bar along the top of the screen, the dock along the bottom, and the menus
-//! that come and go over them. One process with a layer surface per part, drawn with iced on the
-//! software renderer and placed by the layer-shell protocol, so it works on any machine the drive
-//! meets.
+//! The shell: the top bar along the top of the screen, the dock along the bottom, and the menus,
+//! notifications and the key popup that come and go over them. One process with a layer surface per
+//! part, drawn with iced on the software renderer and placed by the layer-shell protocol, so it
+//! works on any machine the drive meets.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -20,15 +20,20 @@ use librift::os::{self, Action};
 use librift::{bluetooth, network, quasar, session};
 
 use crate::answer;
+use crate::banner;
 use crate::bar;
+use crate::calendar::{Day, Month, Weekday};
 use crate::clock;
-use crate::control::{self, Command};
+use crate::control::{self, Command, Level};
+use crate::datemenu;
 use crate::dialog::{self, Ask, Dialog};
 use crate::dock::{self, Dock};
 use crate::horizon::{self, Open};
 use crate::launcher::{self, App};
 use crate::menu::{self, Menu, Results};
+use crate::notice::{self, Effect, Fitted, Notices, Notification, Outbox};
 use crate::nu;
+use crate::popup::{self, Popup};
 use crate::route::{self, Interpretation};
 use crate::status::{self, Status, Volume};
 use crate::system;
@@ -66,17 +71,31 @@ const REOPEN: Duration = Duration::from_millis(400);
 /// How long a network may take to come up after it was picked.
 const JOIN_WAIT: Duration = Duration::from_secs(45);
 
-/// The shell's state. The bar and the dock are always there; a menu or a dialog comes and goes with
-/// its surface.
+/// The shell's state. The bar and the dock are always there; a menu, a dialog, a notification or the
+/// key popup comes and goes with its surface.
 struct Lens {
     look: Palette,
     apps: Vec<App>,
     clock: String,
+    /// Today, for the calendar.
+    today: Option<Day>,
+    /// The day the locale starts its weeks on.
+    first: Weekday,
     status: Status,
     menu: Option<Menu>,
     system: Option<system::Menu>,
+    /// The clock menu.
+    datemenu: Option<datemenu::Menu>,
     dialog: Option<Dialog>,
     dock: Dock,
+    /// The notifications on screen and the ones kept.
+    notices: Notices,
+    /// Where the signals about them go out on the bus, once the server has the name.
+    outbox: Option<Outbox>,
+    /// The key popup, while it is up.
+    popup: Option<Popup>,
+    /// Counts the keys the popup showed, so only the last one's second closes it.
+    keys: u64,
     /// The menu the compositor closed by taking the keyboard away, and when.
     dismissed: Option<(Closed, Instant)>,
     /// Sets the volume the slider asks for, on a thread of its own.
@@ -89,14 +108,15 @@ struct Lens {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Closed {
     Applications,
+    Clock,
     System,
 }
 
 /// What happens to the shell.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// The minute turned, and this is the clock's line now.
-    Tick(String),
+    /// The minute turned, and this is what the clock says now.
+    Tick(clock::Now),
     /// What `NetworkManager` says now, or why it did not answer.
     Network(Result<network::Picture, String>),
     /// What `UPower` says about the battery now.
@@ -109,6 +129,22 @@ pub enum Message {
     Brightness(Option<u8>),
     /// The Applications button, or Mod+Space.
     ToggleMenu,
+    /// The clock in the bar.
+    ToggleClock,
+    /// A button or the switch of the clock menu.
+    Clock(datemenu::Event),
+    /// An app sent a notification.
+    Notified(Notification),
+    /// An app closed the notification it sent.
+    Recalled(u32),
+    /// The notification server has the name, and takes the signals the shell sends through this.
+    Outbox(Outbox),
+    /// A notification on screen was pressed, closed, or the pointer came or went.
+    Banner(banner::Event),
+    /// A notification's time on screen ran out, for this run of it.
+    Expire(u32, u64),
+    /// The key popup's second is over, for this key.
+    PopupDone(u64),
     /// The status icons in the bar.
     ToggleSystem,
     /// A row, a switch or a slider of the system menu.
@@ -161,6 +197,14 @@ pub enum Message {
     OpenSystem(window::Id, u32),
     /// Open a dialog's surface, this tall.
     OpenDialog(window::Id, u32),
+    /// Open the clock menu's surface, this tall.
+    OpenClock(window::Id, u32),
+    /// Open a notification's surface, this tall and this far under the bar.
+    OpenBanner(window::Id, u32, u32),
+    /// Open the key popup's surface.
+    OpenPopup(window::Id),
+    /// Put a notification's surface this far under the bar.
+    Place(window::Id, u32),
     /// A menu's surface has to grow or shrink to this width and height.
     Resize(window::Id, u32, u32),
     /// Close a surface.
@@ -212,6 +256,31 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
                     settings: dialog_surface(height),
                     id,
                 },
+            )),
+            Message::OpenClock(id, height) => Ok(Self::new(
+                None,
+                LayerShellCustomAction::NewLayerShell {
+                    settings: clock_surface(height),
+                    id,
+                },
+            )),
+            Message::OpenBanner(id, height, top) => Ok(Self::new(
+                None,
+                LayerShellCustomAction::NewLayerShell {
+                    settings: banner_surface(height, top),
+                    id,
+                },
+            )),
+            Message::OpenPopup(id) => Ok(Self::new(
+                None,
+                LayerShellCustomAction::NewLayerShell {
+                    settings: popup_surface(),
+                    id,
+                },
+            )),
+            Message::Place(id, top) => Ok(Self::new(
+                Some(id),
+                LayerShellCustomAction::MarginChange(banner_margin(top)),
             )),
             Message::Resize(id, width, height) => Ok(Self::new(
                 Some(id),
@@ -308,6 +377,65 @@ fn dialog_surface(height: u32) -> NewLayerShellSettings {
     }
 }
 
+/// The clock menu's surface: on the overlay layer, hanging under the bar inside the working area and
+/// anchored to no side, so it is in the middle of the screen under the clock. It takes the keyboard
+/// the way the other menus do, so a click anywhere else closes it.
+fn clock_surface(height: u32) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((datemenu::WIDTH, height)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top,
+        exclusive_zone: Some(0),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::Active,
+        events_transparent: false,
+        namespace: Some("lens-menu".to_string()),
+    }
+}
+
+/// A notification's surface: on the overlay layer at the top right of the working area, this far
+/// under the bar. It never takes the keyboard, so it does not take it away from a window.
+fn banner_surface(height: u32, top: u32) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((banner::WIDTH, height)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top | Anchor::Right,
+        exclusive_zone: Some(0),
+        margin: Some(banner_margin(top)),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::Active,
+        events_transparent: false,
+        namespace: Some("lens-notify".to_string()),
+    }
+}
+
+/// The margins of a notification this far under the bar: top, right, bottom and left.
+fn banner_margin(top: u32) -> (i32, i32, i32, i32) {
+    (
+        i32::try_from(top).unwrap_or(0),
+        i32::try_from(notice::GAP).unwrap_or(0),
+        0,
+        0,
+    )
+}
+
+/// The key popup's surface: on the overlay layer, anchored to the bottom alone so it is in the
+/// middle, standing above the dock. Clicks go through it to whatever is under it.
+fn popup_surface() -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((popup::WIDTH, popup::HEIGHT)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Bottom,
+        exclusive_zone: Some(0),
+        margin: Some((0, 0, i32::try_from(popup::ABOVE).unwrap_or(0), 0)),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::Active,
+        events_transparent: true,
+        namespace: Some("lens-popup".to_string()),
+    }
+}
+
 /// Open the shell on the session's Wayland display and run until it is closed.
 ///
 /// # Errors
@@ -358,15 +486,23 @@ fn boot(look: Palette, apps: Vec<App>) -> (Lens, Task<Message>) {
     // and it takes its own height from the screen before the first window is placed
     let dock = Dock::new(window::Id::unique(), &apps);
     let opening = Task::done(Message::OpenDock(dock.id));
+    let now = clock::now();
     let state = Lens {
         look,
         apps,
-        clock: clock::now(),
+        clock: now.line,
+        today: now.today,
+        first: clock::first_weekday(),
         status: Status::default(),
         menu: None,
         system: None,
+        datemenu: None,
         dialog: None,
         dock,
+        notices: Notices::new(notice::quiet()),
+        outbox: None,
+        popup: None,
+        keys: 0,
         dismissed: None,
         volume: Latest::new(|level| report(status::set_volume(level))),
         brightness: Latest::new(|level| report(status::set_brightness(level))),
@@ -386,6 +522,7 @@ fn subscription(_: &Lens) -> Subscription<Message> {
         watch::battery(),
         watch::bluetooth(),
         watch::sound(),
+        notice::serve(),
     ])
 }
 
@@ -484,34 +621,24 @@ fn windows() -> Subscription<Message> {
 
 fn update(state: &mut Lens, message: Message) -> Task<Message> {
     let task = match message {
-        Message::Tick(now) => {
-            state.clock = now;
-            Task::none()
-        }
-        Message::Network(picture) => {
-            if let Err(why) = &picture {
-                eprintln!("lens: {why}");
-            }
-            state.status.network = picture.ok();
-            Task::none()
-        }
-        Message::Battery(battery) => {
-            state.status.battery = battery;
-            Task::none()
-        }
-        Message::Bluetooth(bluetooth) => {
-            state.status.bluetooth = bluetooth;
-            Task::none()
-        }
-        Message::Sound(volume) => {
-            state.status.volume = volume;
-            Task::none()
-        }
-        Message::Brightness(brightness) => {
-            state.status.brightness = brightness;
+        Message::Tick(_)
+        | Message::Network(_)
+        | Message::Battery(_)
+        | Message::Bluetooth(_)
+        | Message::Sound(_)
+        | Message::Brightness(_) => {
+            heard(state, message);
             Task::none()
         }
         Message::ToggleMenu => toggle(state),
+        Message::ToggleClock
+        | Message::Clock(_)
+        | Message::Notified(_)
+        | Message::Recalled(_)
+        | Message::Outbox(_)
+        | Message::Banner(_)
+        | Message::Expire(..)
+        | Message::PopupDone(_) => notices(state, message),
         Message::ToggleSystem => toggle_system(state),
         Message::System(event) => system_event(state, event),
         Message::Acted(result) => {
@@ -577,12 +704,69 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
         | Message::OpenItemMenu(..)
         | Message::OpenSystem(..)
         | Message::OpenDialog(..)
+        | Message::OpenClock(..)
+        | Message::OpenBanner(..)
+        | Message::OpenPopup(_)
+        | Message::Place(..)
         | Message::Resize(..)
         | Message::Close(..) => Task::none(),
     };
     let grow = resize(state);
     remember(state);
     Task::batch([task, grow])
+}
+
+/// What the clock and the status sources said: the bar and the menus draw from it.
+fn heard(state: &mut Lens, message: Message) {
+    match message {
+        Message::Tick(now) => {
+            state.clock = now.line;
+            if now.today.is_some() {
+                state.today = now.today;
+            }
+        }
+        Message::Network(picture) => {
+            if let Err(why) = &picture {
+                eprintln!("lens: {why}");
+            }
+            state.status.network = picture.ok();
+        }
+        Message::Battery(battery) => state.status.battery = battery,
+        Message::Bluetooth(bluetooth) => state.status.bluetooth = bluetooth,
+        Message::Sound(volume) => state.status.volume = volume,
+        Message::Brightness(brightness) => state.status.brightness = brightness,
+        _ => {}
+    }
+}
+
+/// The clock menu, notifications and the key popup.
+fn notices(state: &mut Lens, message: Message) -> Task<Message> {
+    match message {
+        Message::ToggleClock => toggle_clock(state),
+        Message::Clock(event) => clock_event(state, event),
+        Message::Notified(notification) => notified(state, notification),
+        Message::Recalled(id) => {
+            let effects = state.notices.recall(id);
+            apply(state, effects)
+        }
+        Message::Outbox(outbox) => {
+            state.outbox = Some(outbox);
+            Task::none()
+        }
+        Message::Banner(event) => banner_event(state, event),
+        Message::Expire(id, epoch) => {
+            let effects = state.notices.expire(id, epoch);
+            apply(state, effects)
+        }
+        Message::PopupDone(key) => match state.popup {
+            Some(shown) if shown.epoch == key => {
+                state.popup = None;
+                Task::done(Message::Close(shown.id))
+            }
+            _ => Task::none(),
+        },
+        _ => Task::none(),
+    }
 }
 
 /// Open the menu when it is closed, close it when it is open.
@@ -594,6 +778,162 @@ fn toggle(state: &mut Lens) -> Task<Message> {
     } else {
         open(state)
     }
+}
+
+/// Open the clock menu when it is closed, close it when it is open. It opens on the month today is
+/// in.
+fn toggle_clock(state: &mut Lens) -> Task<Message> {
+    if state.datemenu.is_some() {
+        return close_clock(state);
+    }
+    if state.dialog.is_some() || recently(state, Closed::Clock) {
+        return Task::none();
+    }
+    let id = window::Id::unique();
+    let height = datemenu::height(state.notices.kept.len());
+    let month = state.today.map_or(
+        Month {
+            year: 1970,
+            month: 1,
+        },
+        Month::of,
+    );
+    state.datemenu = Some(datemenu::Menu { id, height, month });
+    Task::done(Message::OpenClock(id, height))
+}
+
+fn close_clock(state: &mut Lens) -> Task<Message> {
+    state
+        .datemenu
+        .take()
+        .map_or_else(Task::none, |menu| Task::done(Message::Close(menu.id)))
+}
+
+/// A button or the switch of the clock menu.
+fn clock_event(state: &mut Lens, event: datemenu::Event) -> Task<Message> {
+    match event {
+        datemenu::Event::Previous | datemenu::Event::Next => {
+            if let Some(menu) = state.datemenu.as_mut() {
+                menu.month = if event == datemenu::Event::Next {
+                    menu.month.next()
+                } else {
+                    menu.month.previous()
+                };
+            }
+            Task::none()
+        }
+        datemenu::Event::Clear => {
+            let effects = state.notices.clear();
+            apply(state, effects)
+        }
+        datemenu::Event::Quiet(on) => {
+            state.notices.quiet = on;
+            report(notice::keep_quiet(on));
+            Task::none()
+        }
+    }
+}
+
+/// A notification came in: its icon is found and its words are cut to fit here, once, and then it
+/// shows under the bar and goes in the list.
+fn notified(state: &mut Lens, notification: Notification) -> Task<Message> {
+    let icon = banner::icon(&state.apps, &notification);
+    let (summary, body, lines) = banner::texts(&notification, icon.is_some());
+    let (row_summary, row_body) = datemenu::texts(&notification, icon.is_some());
+    let height = banner::height(lines, notification.actions.len());
+    let fitted = Fitted {
+        icon,
+        summary,
+        body,
+        lines,
+        row_summary,
+        row_body,
+    };
+    let time = clock::minute(&state.clock).to_string();
+    let effects = state.notices.arrive(notification, fitted, height, &time);
+    apply(state, effects)
+}
+
+/// A press, a button or the pointer on a notification on screen.
+fn banner_event(state: &mut Lens, event: banner::Event) -> Task<Message> {
+    let effects = match event {
+        banner::Event::Press(id) => state.notices.act(id, None),
+        banner::Event::Close(id) => state.notices.dismiss(id),
+        banner::Event::Action(id, key) => state.notices.act(id, Some(&key)),
+        banner::Event::Hover(id, over) => state.notices.hover(id, over),
+    };
+    apply(state, effects)
+}
+
+/// Do what the notifications changing asks for: surfaces to open, move, resize or close, signals
+/// for the bus, and the time a notification stays.
+fn apply(state: &Lens, effects: Vec<Effect>) -> Task<Message> {
+    let mut tasks = Vec::new();
+    for effect in effects {
+        match effect {
+            Effect::Open(id, height, top) => {
+                tasks.push(Task::done(Message::OpenBanner(id, height, top)));
+            }
+            Effect::Move(id, top) => tasks.push(Task::done(Message::Place(id, top))),
+            Effect::Resize(id, height) => {
+                tasks.push(Task::done(Message::Resize(id, banner::WIDTH, height)));
+            }
+            Effect::Close(id) => tasks.push(Task::done(Message::Close(id))),
+            Effect::Signal(signal) => {
+                if let Some(outbox) = &state.outbox {
+                    outbox.send(signal);
+                }
+            }
+            Effect::Time(id, epoch) => {
+                tasks.push(later(notice::SHOWN, Message::Expire(id, epoch)));
+            }
+        }
+    }
+    Task::batch(tasks)
+}
+
+/// A message after a while, from a thread that sleeps: the executor has no timer of its own.
+fn later(delay: Duration, message: Message) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let _ = sender.send(());
+            });
+            let _ = receiver.await;
+        },
+        move |()| message,
+    )
+}
+
+/// A volume or a brightness key was pressed: the popup shows the level for a second, or for a
+/// second more when it is already up, and the bar follows at once.
+fn show_popup(state: &mut Lens, level: Level) -> Task<Message> {
+    match level {
+        Level::Volume { level, muted } => {
+            state.status.volume = Some(Volume {
+                level: u16::from(level),
+                muted,
+            });
+        }
+        Level::Brightness(level) => state.status.brightness = Some(level),
+    }
+    state.keys += 1;
+    let key = state.keys;
+    let timer = later(popup::SHOWN, Message::PopupDone(key));
+    if let Some(shown) = state.popup.as_mut() {
+        shown.level = level;
+        shown.epoch = key;
+        return timer;
+    }
+    let id = window::Id::unique();
+    state.popup = Some(Popup {
+        id,
+        level,
+        epoch: key,
+    });
+    Task::batch([Task::done(Message::OpenPopup(id)), timer])
 }
 
 /// Whether the compositor closed this menu a moment ago. The press that took the keyboard away
@@ -909,6 +1249,9 @@ fn escape(state: &mut Lens) -> Task<Message> {
     if state.system.is_some() {
         return close_system(state);
     }
+    if state.datemenu.is_some() {
+        return close_clock(state);
+    }
     let Lens { apps, menu, .. } = state;
     match menu.as_mut() {
         None => Task::none(),
@@ -1030,6 +1373,13 @@ fn focused(state: &mut Lens, id: window::Id, has: bool) -> Task<Message> {
         state.dismissed = Some((Closed::System, Instant::now()));
         return close_system(state);
     }
+    if state.datemenu.as_ref().is_some_and(|menu| menu.id == id) {
+        if has {
+            return Task::none();
+        }
+        state.dismissed = Some((Closed::Clock, Instant::now()));
+        return close_clock(state);
+    }
     if state.dock.menu.as_ref().is_some_and(|menu| menu.id == id) {
         return if has {
             Task::none()
@@ -1067,6 +1417,7 @@ fn typed(state: &mut Lens, command: Command) -> Task<Message> {
         }
         Command::Escape => escape(state),
         Command::Menu => toggle(state),
+        Command::Popup(level) => show_popup(state, level),
         // answered on the socket's own thread, from the lines remember() keeps
         Command::State => Task::none(),
     }
@@ -1083,7 +1434,8 @@ fn write(state: &mut Lens, words: String) -> Task<Message> {
 }
 
 /// Ask the compositor for a taller or shorter menu when one changed shape: the Applications menu as
-/// its list grows, the system menu as networks and devices come and go.
+/// its list grows, the system menu as networks and devices come and go, the clock menu as
+/// notifications come in and are cleared.
 fn resize(state: &mut Lens) -> Task<Message> {
     let mut tasks = Vec::new();
     if let Some(menu) = state.menu.as_mut() {
@@ -1098,6 +1450,17 @@ fn resize(state: &mut Lens) -> Task<Message> {
         if wanted != menu.height {
             menu.height = wanted;
             tasks.push(Task::done(Message::Resize(menu.id, system::WIDTH, wanted)));
+        }
+    }
+    if let Some(menu) = state.datemenu.as_mut() {
+        let wanted = datemenu::height(state.notices.kept.len());
+        if wanted != menu.height {
+            menu.height = wanted;
+            tasks.push(Task::done(Message::Resize(
+                menu.id,
+                datemenu::WIDTH,
+                wanted,
+            )));
         }
     }
     Task::batch(tasks)
@@ -1148,6 +1511,18 @@ fn remember(state: &Lens) {
         None => line("dialog", "closed"),
         Some(found) => line("dialog", &found.title()),
     }
+    notices_lines(state, &mut line);
+    match &state.datemenu {
+        None => line("clock-menu", "closed"),
+        Some(menu) => line(
+            "clock-menu",
+            &format!("open {}x{}", datemenu::WIDTH, menu.height),
+        ),
+    }
+    match &state.popup {
+        None => line("popup", "closed"),
+        Some(shown) => line("popup", &shown.level.words()),
+    }
     match &state.menu {
         None => line("menu", "closed"),
         Some(menu) => {
@@ -1167,6 +1542,37 @@ fn remember(state: &Lens) {
     if let Ok(mut kept) = kept().lock() {
         *kept = lines;
     }
+}
+
+/// The lines about notifications: how many are on screen and how many are kept, the size of each
+/// on screen from the top, the summary of the newest kept, and Do not disturb.
+fn notices_lines(state: &Lens, line: &mut impl FnMut(&str, &str)) {
+    let notices = &state.notices;
+    line(
+        "notifications",
+        &format!("{} {}", notices.banners.len(), notices.kept.len()),
+    );
+    let sizes: Vec<String> = notices
+        .banners
+        .iter()
+        .map(|shown| format!("{}x{}", banner::WIDTH, shown.height))
+        .collect();
+    line(
+        "banners",
+        &if sizes.is_empty() {
+            "none".to_string()
+        } else {
+            sizes.join(" ")
+        },
+    );
+    line(
+        "latest",
+        notices
+            .kept
+            .first()
+            .map_or("none", |kept| kept.notification.summary.as_str()),
+    );
+    line("do-not-disturb", if notices.quiet { "on" } else { "off" });
 }
 
 fn submit(state: &mut Lens) -> Task<Message> {
@@ -1319,6 +1725,15 @@ fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
     if let Some(menu) = state.system.as_ref().filter(|menu| menu.id == id) {
         return system::view(state.look, &state.status, menu);
     }
+    if let Some(menu) = state.datemenu.as_ref().filter(|menu| menu.id == id) {
+        return datemenu::view(state.look, menu, state.today, state.first, &state.notices);
+    }
+    if let Some(shown) = state.notices.banners.iter().find(|shown| shown.id == id) {
+        return banner::view(state.look, shown);
+    }
+    if let Some(shown) = state.popup.as_ref().filter(|shown| shown.id == id) {
+        return popup::view(state.look, shown);
+    }
     if let Some(menu) = state.menu.as_ref().filter(|menu| menu.id == id) {
         return menu::view(state.look, menu);
     }
@@ -1332,8 +1747,12 @@ fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
         state.look,
         &state.clock,
         &state.status,
-        state.menu.is_some(),
-        state.system.is_some(),
+        bar::Open {
+            applications: state.menu.is_some(),
+            clock: state.datemenu.is_some(),
+            system: state.system.is_some(),
+        },
+        state.notices.quiet,
     ))
     .width(Length::Fill)
     .height(Length::Fill)

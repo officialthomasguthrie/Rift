@@ -583,7 +583,7 @@ fn session_row(look: Palette, icon: &str, label: &str, event: Event) -> Element<
 }
 
 /// The line between two sections.
-fn separator(look: Palette) -> Element<'static, Message> {
+pub fn separator(look: Palette) -> Element<'static, Message> {
     let rule =
         container(space().width(Length::Fill).height(1)).style(move |_: &Theme| container::Style {
             background: Some(look.edge.into()),
@@ -598,7 +598,7 @@ fn separator(look: Palette) -> Element<'static, Message> {
 
 /// An on and off switch: the accent when it is on, the track gray when it is off, and the text
 /// colour for the knob.
-fn switch<'a, F>(look: Palette, on: bool, toggle: Option<F>) -> Element<'a, Message>
+pub fn switch<'a, F>(look: Palette, on: bool, toggle: Option<F>) -> Element<'a, Message>
 where
     F: Fn(bool) -> Message + 'a,
 {
@@ -652,7 +652,7 @@ fn slider_style(look: Palette, _state: slider::Status) -> slider::Style {
 
 /// The fill under a row or a button: the hover gray under the pointer, the pressed one while it is
 /// held.
-fn fill(look: Palette, state: button::Status) -> button::Style {
+pub fn fill(look: Palette, state: button::Status) -> button::Style {
     let background = match state {
         button::Status::Hovered => Some(look.hover),
         button::Status::Pressed => Some(look.press),

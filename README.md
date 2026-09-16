@@ -64,7 +64,8 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 ### Desktop
 
 - Horizon, a Wayland compositor derived from niri, arranges windows as columns on a horizontally scrolling strip for each display.
-- Lens, the desktop shell, draws a top bar with the clock and a system menu for sound, brightness, wired and Wi-Fi networks, Bluetooth, the battery and the session; an applications menu that lists installed applications by category, with a search field that also runs system commands, evaluates Nushell pipelines and passes requests written in plain language to the local assistant; and a dock that holds pinned and running applications and the workspaces.
+- Lens, the desktop shell, draws a top bar with a clock menu that holds a calendar, the notifications received so far and a Do not disturb switch, and a system menu for sound, brightness, wired and Wi-Fi networks, Bluetooth, the battery and the session; an applications menu that lists installed applications by category, with a search field that also runs system commands, evaluates Nushell pipelines and passes requests written in plain language to the local assistant; and a dock that holds pinned and running applications and the workspaces.
+- Lens is the notification server of the session, following the freedesktop.org notification specification, and shows the level when a volume or brightness key is pressed.
 - A drop-down terminal and a lock screen are built into the compositor.
 - Firefox, Ghostty, Zed, Helix, zellij, fish and Podman are included in the image.
 - Flatpak is integrated with xdg-desktop-portal for applications installed from Flathub.
@@ -99,7 +100,7 @@ Rift contains no telemetry, requires no account, and depends on no online servic
 |---|---|
 | Liftoff | System image, boot process and updates |
 | Horizon | Wayland compositor |
-| Lens | Desktop shell: top bar, menus and dock |
+| Lens | Desktop shell: top bar, menus, dock and notifications |
 | Quasar | Local AI service and API |
 | Orbit | Host detection and per-machine profiles |
 | Airlock | Application sandboxing and network control |
@@ -177,7 +178,7 @@ Rift is in active development ahead of its first public release.
 | rift-flash for Windows, macOS and Linux | Working |
 | Sandboxing, network switch and Flatpak with portals | Working |
 | Distribution branding and text boot | In progress |
-| Top bar, application menu, dock, system menu and notifications | In progress |
+| Top bar, application menu, dock, system menu and notifications | Working |
 | Settings, first-run setup, file manager and software center | Planned |
 | Voice input and speech output | Planned |
 | FIDO2 unlock, TPM2 unlock on owned machines, and a mode that boots without personal data | Planned |

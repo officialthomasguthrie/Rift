@@ -490,7 +490,7 @@ fn printed(look: Palette, label: &str, font: Font) -> Element<'static, Message> 
 }
 
 /// The scrollbar: no rail, and a thin scroller in the menu's border gray.
-fn rail(look: Palette) -> scrollable::Rail {
+pub fn rail(look: Palette) -> scrollable::Rail {
     scrollable::Rail {
         background: None,
         border: Border::default(),

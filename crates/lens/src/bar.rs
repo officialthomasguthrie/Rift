@@ -1,6 +1,7 @@
 //! The top bar, laid out like Tails: the Applications button at the left, the clock in the middle
-//! of the screen and the status icons at the right, which are one button that opens the system
-//! menu. The sizes and the colours below are the ones the boot test counts.
+//! of the screen, which opens the clock menu, and the status icons at the right, which are one
+//! button that opens the system menu. The sizes and the colours below are the ones the boot test
+//! counts.
 
 use iced::widget::{button, column, container, row, space, stack, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
@@ -31,25 +32,36 @@ const ICON_GAP: f32 = 8.0;
 /// The button at the left, and the menu it opens.
 pub const APPLICATIONS: &str = "Applications";
 
-/// The bar. `open` is whether the Applications menu is showing and `system` whether the system
-/// menu is, which marks their buttons.
+/// Which of the bar's menus are showing, which marks their buttons.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Open {
+    /// The Applications menu.
+    pub applications: bool,
+    /// The clock menu.
+    pub clock: bool,
+    /// The system menu.
+    pub system: bool,
+}
+
+/// The bar. With Do not disturb on, its icon is at the left of the clock.
 pub fn view<'a>(
     look: Palette,
     clock: &'a str,
     status: &Status,
-    open: bool,
-    system: bool,
+    open: Open,
+    quiet: bool,
 ) -> Element<'a, Message> {
     let items = row![
-        applications(look, open),
+        applications(look, open.applications),
         space().width(Length::Fill),
-        status_button(look, status, system),
+        status_button(look, status, open.system),
     ]
     .align_y(iced::Center)
     .height(Length::Fill);
     // the clock sits in the middle of the screen, not of what is left over, so it is a layer of
-    // its own under the buttons. neither its text nor the space beside them takes a click
-    let middle = container(text(clock).size(TEXT_SIZE).color(look.text)).center(Length::Fill);
+    // its own under the buttons. the space between them takes no click, so a click there reaches
+    // the clock
+    let middle = container(clock_button(look, clock, open.clock, quiet)).center(Length::Fill);
     let content = container(stack![middle, items])
         .width(Length::Fill)
         .height(TALL - LINE)
@@ -75,6 +87,25 @@ fn applications(look: Palette, open: bool) -> Element<'static, Message> {
         .height(ITEM)
         .padding([0, PAD])
         .on_press(Message::ToggleMenu)
+        .style(move |_: &Theme, state| fill(look, open, state))
+        .into()
+}
+
+/// The clock, a button that opens the clock menu and is marked while it is open.
+fn clock_button(look: Palette, clock: &str, open: bool, quiet: bool) -> Element<'_, Message> {
+    let mut line = row![].spacing(ICON_GAP).align_y(iced::Center);
+    if quiet {
+        line = line.push(icons::symbolic(
+            look.text,
+            "notifications-disabled-symbolic",
+            ICON,
+        ));
+    }
+    line = line.push(text(clock).size(TEXT_SIZE).color(look.text));
+    button(container(line).center_y(Length::Fill))
+        .height(ITEM)
+        .padding([0, PAD])
+        .on_press(Message::ToggleClock)
         .style(move |_: &Theme, state| fill(look, open, state))
         .into()
 }

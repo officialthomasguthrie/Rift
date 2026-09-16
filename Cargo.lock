@@ -2559,6 +2559,7 @@ dependencies = [
  "image",
  "librift",
  "niri-ipc",
+ "zbus",
 ]
 
 [[package]]

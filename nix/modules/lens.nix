@@ -1,6 +1,7 @@
-# lens: the shell. the top bar along the top of the screen and the applications menu under it,
-# with four interpreters behind its field (launcher, os commands, nushell, quasar). one process
-# with a layer surface per part, started with the session and restarted if it crashes.
+# lens: the shell. the top bar along the top of the screen, the menus under it, the dock, and the
+# notifications, with four interpreters behind the applications menu's field (launcher, os commands,
+# nushell, quasar). one process with a layer surface per part, started with the session and
+# restarted if it crashes.
 {
   config,
   lib,
@@ -12,9 +13,10 @@ let
   cfg = config.rift.lens;
   lens = "${self.packages.${pkgs.stdenv.hostPlatform.system}.workspace}/bin/lens";
   systemctl = "${config.systemd.package}/bin/systemctl --user";
-  # the shell asks date, wpctl, pw-mon and brightnessctl what to show, reads networkmanager, upower,
-  # bluez and logind over the system bus, and starts apps from their desktop entries. the user
-  # manager does not inherit the session's path, so the unit names it
+  # the shell asks date, locale, wpctl, pw-mon and brightnessctl what to show, reads networkmanager,
+  # upower, bluez and logind over the system bus, serves notifications on the session bus, and starts
+  # apps from their desktop entries. the user manager does not inherit the session's path, so the
+  # unit names it
   path = lib.concatStringsSep ":" [
     "/run/wrappers/bin"
     "/etc/profiles/per-user/${config.rift.horizon.user}/bin"
@@ -53,7 +55,11 @@ in
     # what the os commands and the system menu run is already there: nmcli with networkmanager,
     # wpctl and pw-mon with pipewire, brightnessctl and horizon with horizon, systemctl always.
     # nushell is the third interpreter: lens runs this binary with an argument vector, and it is the
-    # interactive nushell as well
-    environment.systemPackages = [ pkgs.nushell ];
+    # interactive nushell as well. libnotify is notify-send, which sends the shell a notification
+    # from a script or a terminal
+    environment.systemPackages = [
+      pkgs.nushell
+      pkgs.libnotify
+    ];
   };
 }

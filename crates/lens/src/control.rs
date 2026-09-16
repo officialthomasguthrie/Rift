@@ -1,7 +1,9 @@
 //! The shell, driven from a terminal. Lens listens on a socket in the session's runtime
 //! directory; `lens --type`, `lens --enter`, `lens --escape`, `lens --menu` and `lens --state`
-//! write one line to it, and `--state` reads the answer back. The runtime directory belongs to
-//! one person, so only that person can type into their field.
+//! write one line to it, and `--state` reads the answer back. `lens --volume` and
+//! `lens --brightness`, which the keys for them run, write the level they left behind, and the
+//! shell shows it in the key popup. The runtime directory belongs to one person, so only that
+//! person can type into their field.
 
 // only the shell listens on the socket, and the shell is linux only
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -26,6 +28,56 @@ pub enum Command {
     Menu,
     /// Print what the bar shows.
     State,
+    /// Show the key popup with this level: a volume or a brightness key was pressed.
+    Popup(Level),
+}
+
+/// What a volume or a brightness key left behind, for the popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    /// The default sink's volume in percent, and whether it is muted.
+    Volume {
+        /// Percent of full.
+        level: u8,
+        /// Muted, whatever the level is.
+        muted: bool,
+    },
+    /// The backlight in percent.
+    Brightness(u8),
+}
+
+impl Level {
+    /// The words after `popup` on the socket: `volume 45`, `volume 45 muted`, `brightness 80`.
+    #[must_use]
+    pub fn words(self) -> String {
+        match self {
+            Self::Volume {
+                level,
+                muted: false,
+            } => format!("volume {level}"),
+            Self::Volume { level, muted: true } => format!("volume {level} muted"),
+            Self::Brightness(level) => format!("brightness {level}"),
+        }
+    }
+
+    /// Read those words back. A level past a hundred is a hundred.
+    #[must_use]
+    pub fn read(words: &str) -> Option<Self> {
+        let mut words = words.split_whitespace();
+        let kind = words.next()?;
+        let level = words.next()?.parse::<u16>().ok()?.min(100);
+        let level = u8::try_from(level).ok()?;
+        let rest: Vec<&str> = words.collect();
+        match (kind, rest.as_slice()) {
+            ("volume", []) => Some(Self::Volume {
+                level,
+                muted: false,
+            }),
+            ("volume", ["muted"]) => Some(Self::Volume { level, muted: true }),
+            ("brightness", []) => Some(Self::Brightness(level)),
+            _ => None,
+        }
+    }
 }
 
 impl Command {
@@ -38,11 +90,12 @@ impl Command {
             Self::Escape => "escape".to_string(),
             Self::Menu => "menu".to_string(),
             Self::State => "state".to_string(),
+            Self::Popup(level) => format!("popup {}", level.words()),
         }
     }
 }
 
-/// Read one line of the protocol. `None` when it is not one of the five.
+/// Read one line of the protocol. `None` when it is not one of the six.
 #[must_use]
 pub fn parse(line: &str) -> Option<Command> {
     let line = line.trim_end_matches(['\r', '\n']);
@@ -53,6 +106,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "escape" => Some(Command::Escape),
         "menu" => Some(Command::Menu),
         "state" => Some(Command::State),
+        "popup" => Level::read(rest).map(Command::Popup),
         _ => None,
     }
 }
@@ -145,6 +199,33 @@ mod tests {
         assert_eq!(parse(""), None);
         assert_eq!(parse("quit"), None);
         assert_eq!(parse("Type wifi"), None);
+        assert_eq!(parse("popup"), None);
+        assert_eq!(parse("popup volume"), None);
+        assert_eq!(parse("popup volume loud"), None);
+        assert_eq!(parse("popup brightness 40 muted"), None);
+        assert_eq!(parse("popup battery 40"), None);
+    }
+
+    #[test]
+    fn a_popup_carries_its_level() {
+        assert_eq!(
+            parse("popup volume 45\n"),
+            Some(Command::Popup(Level::Volume {
+                level: 45,
+                muted: false
+            }))
+        );
+        assert_eq!(
+            parse("popup volume 0 muted"),
+            Some(Command::Popup(Level::Volume {
+                level: 0,
+                muted: true
+            }))
+        );
+        assert_eq!(
+            parse("popup brightness 150"),
+            Some(Command::Popup(Level::Brightness(100)))
+        );
     }
 
     #[test]
@@ -155,6 +236,11 @@ mod tests {
             Command::Escape,
             Command::Menu,
             Command::State,
+            Command::Popup(Level::Volume {
+                level: 100,
+                muted: true,
+            }),
+            Command::Popup(Level::Brightness(5)),
         ] {
             assert_eq!(parse(&command.line()), Some(command));
         }
