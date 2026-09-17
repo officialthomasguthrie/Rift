@@ -423,7 +423,14 @@
             fmt = craneLib.cargoFmt { inherit src; };
             tests = craneLib.cargoTest (common // { inherit cargoArtifacts; });
           }
-          // lib.optionalAttrs pkgs.stdenv.isLinux { inherit horizon; };
+          // lib.optionalAttrs pkgs.stdenv.isLinux { inherit horizon; }
+          // lib.optionalAttrs isImageHost {
+            # the config the image gives horizon parses, before a boot finds out it does not
+            horizon-config = pkgs.runCommand "horizon-config" { } ''
+              ${horizon}/bin/horizon validate --config ${os.environment.etc."niri/config.kdl".source}
+              touch $out
+            '';
+          };
 
           devShells.default = craneLib.devShell {
             checks = self'.checks;

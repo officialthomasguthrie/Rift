@@ -4,7 +4,7 @@
 use std::fs;
 use std::thread;
 
-use horizon_lock::draw::{self, Canvas, Fonts, View};
+use horizon_lock::draw::{self, Canvas, Fonts, Palette, View};
 use horizon_lock::entry::{Entry, Key, Verdict};
 use horizon_lock::owner::{self, Owner};
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
@@ -86,6 +86,8 @@ pub fn run() -> Result<(), String> {
         ctrl: false,
         owner,
         fonts: Fonts::load(),
+        // read when the lock starts, so a theme picked in the session is the one it locks in
+        colors: draw::palette(librift::appearance::Theme::read()),
         entry: Entry::default(),
         verdicts,
         done: None,
@@ -137,6 +139,7 @@ struct LockScreen {
     ctrl: bool,
     owner: Owner,
     fonts: Fonts,
+    colors: Palette,
     entry: Entry,
     verdicts: Sender<Verdict>,
     done: Option<Result<(), String>>,
@@ -195,6 +198,7 @@ impl LockScreen {
             name: &self.owner.name,
             typed: self.entry.len(),
             status: self.entry.status(),
+            colors: self.colors,
         };
         draw::paint(
             &mut Canvas::new(pixels, width, height),

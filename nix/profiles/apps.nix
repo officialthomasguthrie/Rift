@@ -78,6 +78,8 @@ in
       # both ask detectportal.firefox.com every so often
       "network.captive-portal-service.enabled" = false;
       "network.connectivity-service.enabled" = false;
+      # the bar that suggests restoring the last session, the second time firefox starts
+      "browser.startup.couldRestoreSession.count" = -1;
     };
   };
 

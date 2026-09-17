@@ -108,12 +108,17 @@ notification's button makes notify-send print the action's key, and one that is 
 after five seconds and stays in the list. A click on the clock opens the clock menu, which lists it,
 its Do not disturb switch keeps the next one off the screen, and a second click closes the menu. The
 volume key sent over qmp turns the sink up and shows the key popup over the dock. Killing the shell
-brings it back, since it is a user unit that restarts. With --models as
+brings it back, since it is a user unit that restarts. Then Firefox and Ghostty, started from the dock,
+stand side by side between the bar and the dock, each with the title bar it draws itself and a close
+button at its right. The owner's theme set to light and the shell started again make the bar, the dock,
+the desktop, the Applications menu, the lock screen and both apps light, and dark again after that.
+With --models as
 well, a question goes through `lens --do`, which prints quasar's answer, and then into the field,
 where the answer shows up as rows under it.
 """
 
 import argparse
+import collections
 import functools
 import glob
 import http.server
@@ -326,7 +331,7 @@ FLATPAK_APP = "Rift test app"
 WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
 # the words lens --state prints, and how the bar writes the time
-STATE_KEYS = ("clock", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
+STATE_KEYS = ("clock", "theme", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup")
 DATE_FORMAT = "+%a %-d %b %H:%M"
@@ -350,6 +355,17 @@ ACCENT = (120, 174, 237)
 REFUSED = (224, 109, 109)
 LOCK_FIELD_SIZE = (280, 32)
 LOCK_RING = 2
+# the colours of one theme, for the checks that look at the bars, the menu, the desktop and the lock
+# screen. dark is the names above; light is crates/lens/src/theme.rs, crates/horizon-lock/src/draw.rs
+# and the part of horizon's config crates/librift/src/appearance.rs writes for light
+Colors = collections.namedtuple("Colors", "bar line menu field desktop lock lock_field accent refused")
+DARK_COLORS = Colors(bar=BAR, line=BAR_LINE, menu=MENU, field=FIELD, desktop=DESKTOP, lock=LOCK,
+                     lock_field=LOCK_FIELD, accent=ACCENT, refused=REFUSED)
+LIGHT_COLORS = Colors(bar=(235, 235, 235), line=(208, 208, 208), menu=(250, 250, 250), field=(255, 255, 255),
+                      desktop=(242, 241, 240), lock=(235, 235, 235), lock_field=(255, 255, 255),
+                      accent=(53, 132, 228), refused=(192, 28, 40))
+# the apps whose title bars the test looks at, the first two in the dock, from left to right on screen
+TITLED_APPS = ["firefox", "com.mitchellh.ghostty"]
 # the owner's password from nix/profiles/base.nix, and one that is not it
 PASSWORD = "rift"
 WRONG_PASSWORD = "wrongpassword"
@@ -422,7 +438,7 @@ def menu_height(rows, line):
     return MENU_PAD + FIELD_SIZE[1] + listed + under + MENU_PAD
 
 
-def bar_gray_rows(width, height, rgb):
+def bar_gray_rows(width, height, rgb, colors=DARK_COLORS):
     """How much of each row is one of the bar's two grays. The bar is the run of those rows from the
     top of the screen and the dock the run from the bottom; the same gray anywhere else is the
     field's, inside a menu."""
@@ -432,7 +448,7 @@ def bar_gray_rows(width, height, rgb):
         found = 0
         for x in range(width):
             px = rgb[row + x * 3 : row + x * 3 + 3]
-            if near(px, BAR, 3) or near(px, BAR_LINE, 3):
+            if near(px, colors.bar, 3) or near(px, colors.line, 3):
                 found += 1
         rows.append(found)
     return rows
@@ -449,20 +465,20 @@ def bar_and_dock(width, height, rows):
     return bar, dock
 
 
-def ink_in(width, rgb, top, bottom):
+def ink_in(width, rgb, top, bottom, colors=DARK_COLORS):
     """What is drawn on the bar's gray in these rows, counted by third of the screen's width."""
     found = [0, 0, 0]
     for y in range(top, bottom):
         row = y * width * 3
         for x in range(width):
             px = rgb[row + x * 3 : row + x * 3 + 3]
-            if not near(px, BAR, 3) and not near(px, BAR_LINE, 3):
+            if not near(px, colors.bar, 3) and not near(px, colors.line, 3):
                 found[min(2, x * 3 // width)] += 1
     return found
 
 
 def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False, system=None,
-                  notification=None, clock=None, popup=None):
+                  notification=None, clock=None, popup=None, colors=DARK_COLORS):
     """Count the desktop gray and the console's black in a screendump, and with lens the bar along
     the top with something drawn at its left, in its middle and at its right, the dock along the
     bottom with the apps in it, and with menu the Applications menu under the bar with the field in
@@ -471,27 +487,32 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
     menu has, which then hangs under the bar at the right. notification, clock and popup are the
     sizes lens says a notification, the clock menu and the key popup have: the first stands under
     the bar at the right, the second hangs under the clock in the middle, and the third stands over
-    the dock in the middle. Returns (ok, lines to print)."""
+    the dock in the middle. colors are the theme's. Returns (ok, lines to print)."""
     gray = black = menu_gray = 0
     bar_like = [0] * height
+    # the field has the bar's own gray on dark and is white on light
+    field_like = [0] * height
     # the rows that are part of the menu, and where its gray starts and ends in each
     menu_rows = []
     for y in range(height):
         row = y * width * 3
-        row_bar = row_menu = 0
+        row_bar = row_menu = row_field = 0
         first = last = -1
         for x in range(width):
             px = rgb[row + x * 3 : row + x * 3 + 3]
-            if near(px, BAR, 3) or near(px, BAR_LINE, 3):
+            if near(px, colors.bar, 3) or near(px, colors.line, 3):
                 row_bar += 1
-            elif near(px, DESKTOP, 3):
+            elif near(px, colors.desktop, 3):
                 gray += 1
             elif near(px, MOON, 8):
                 black += 1
-            elif near(px, MENU, 3):
+            elif near(px, colors.menu, 3):
                 row_menu += 1
                 first, last = (x if first < 0 else first), x
+            elif near(px, colors.field, 3):
+                row_field += 1
         bar_like[y] = row_bar
+        field_like[y] = row_field if colors.field != colors.bar else row_bar
         menu_gray += row_menu
         # a row of the menu has at least its padding on either side of whatever is in it; a pixel
         # of the menu's gray anywhere else is the edge of a letter or of the pointer
@@ -500,7 +521,7 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
     bar_rows, dock_rows = bar_and_dock(width, height, bar_like)
     # the same gray between the two bars is the field's, inside the menu, and only the rows between
     # them can be the menu's: a few pixels of its gray in the bar are the edges of letters
-    field = sum(bar_like[bar_rows : height - dock_rows])
+    field = sum(field_like[bar_rows : height - dock_rows])
     menu_rows = [found for found in menu_rows if bar_rows <= found[0] < height - dock_rows]
     total = width * height
     checks = [
@@ -512,8 +533,8 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
         return report("desktop", lines, checks)
     # the compositor may scale the bar, so its height on screen gives the scale
     scale = bar_rows / BAR_HEIGHT if bar_rows else 1
-    ink = ink_in(width, rgb, 0, bar_rows)
-    dock_ink = ink_in(width, rgb, height - dock_rows, height)
+    ink = ink_in(width, rgb, 0, bar_rows, colors)
+    dock_ink = ink_in(width, rgb, height - dock_rows, height, colors)
     checks += [
         ("the bar is along the top", 0.9 * BAR_HEIGHT <= bar_rows <= 3 * BAR_HEIGHT,
          f"{bar_rows} rows, expected about {BAR_HEIGHT} at scale 1"),
@@ -779,11 +800,11 @@ def check_tty(width, height, rgb):
     return ok, lines
 
 
-def check_lock(width, height, rgb, refused=False):
+def check_lock(width, height, rgb, refused=False, colors=DARK_COLORS):
     """Find the lock screen in a screendump: its gray over the whole screen, the field in the middle
     with the blue ring around it, and none of the desktop, lens's bar or the console. With
-    refused, the red sentence is under the field, without it there is none. Returns (ok, lines to
-    print)."""
+    refused, the red sentence is under the field, without it there is none. colors are the theme's.
+    Returns (ok, lines to print)."""
     ground = desktop = console = ring = red = field = 0
     left, top, right, bottom = width, height, -1, -1
     for y in range(height):
@@ -791,18 +812,18 @@ def check_lock(width, height, rgb, refused=False):
         row_field, row_left, row_right = 0, width, -1
         for x in range(width):
             px = rgb[row + x * 3 : row + x * 3 + 3]
-            if near(px, LOCK, 2):
+            if near(px, colors.lock, 2):
                 ground += 1
-            elif near(px, LOCK_FIELD, 2):
+            elif near(px, colors.lock_field, 2):
                 row_field += 1
                 row_left, row_right = min(row_left, x), max(row_right, x)
-            elif near(px, DESKTOP, 1):
+            elif near(px, colors.desktop, 1):
                 desktop += 1
             elif near(px, CONSOLE, 1):
                 console += 1
-            elif near(px, ACCENT, 24):
+            elif near(px, colors.accent, 24):
                 ring += 1
-            elif near(px, REFUSED, 24):
+            elif near(px, colors.refused, 24):
                 red += 1
         # a row of the field has a long run of its gray. the edges of the text above and under it
         # pass through that gray in a few pixels
@@ -840,6 +861,95 @@ def check_lock(width, height, rgb, refused=False):
         lines.append(f"lock: {'ok  ' if passed else 'FAIL'} {name}: {detail}")
         ok = ok and passed
     return ok, lines
+
+
+def luminance(px):
+    return (px[0] + px[1] + px[2]) / 3
+
+
+def most_common(rgb, width, left, right, top, bottom):
+    """The colour that covers most of a rectangle of the screendump, and the share of it it covers."""
+    counts = collections.Counter()
+    for y in range(top, bottom):
+        row = y * width * 3
+        for x in range(left, right):
+            counts[bytes(rgb[row + x * 3 : row + x * 3 + 3])] += 1
+    if not counts:
+        return (0, 0, 0), 0.0
+    color, found = counts.most_common(1)[0]
+    return tuple(color), found / sum(counts.values())
+
+
+def check_apps(width, height, rgb, apps, colors=DARK_COLORS):
+    """Find windows side by side between the bar and the dock, one for each of apps from left to right,
+    each with a title bar it draws itself: a band along its top in one neutral gray of the theme that
+    is not the desktop's, with something drawn in the right end of it, where the close button is. The
+    desktop's gray is matched exactly: the dark window gray of GTK and Firefox, #222226, is two steps
+    from it. Returns (ok, lines to print)."""
+    bar_rows, dock_rows = bar_and_dock(width, height, bar_gray_rows(width, height, rgb, colors))
+    scale = bar_rows / BAR_HEIGHT if bar_rows else 1
+    ink = ink_in(width, rgb, 0, bar_rows, colors)
+    checks = [
+        ("the bar is along the top", 0.9 * BAR_HEIGHT <= bar_rows <= 3 * BAR_HEIGHT,
+         f"{bar_rows} rows, expected about {BAR_HEIGHT} at scale 1"),
+        ("the button, the clock and the icons are in it", all(count >= 30 for count in ink),
+         f"{ink[0]} pixels at the left, {ink[1]} in the middle, {ink[2]} at the right"),
+        ("the dock is along the bottom", 0.9 * DOCK_HEIGHT <= dock_rows <= 3 * DOCK_HEIGHT,
+         f"{dock_rows} rows, expected about {DOCK_HEIGHT} at scale 1"),
+    ]
+    # a column of the screen is a gap between windows when the desktop shows in it all the way down the
+    # middle of the working area; the focus ring around the window in front is the accent
+    top_of_area, bottom_of_area = bar_rows, height - dock_rows
+    probes = [round(top_of_area + (bottom_of_area - top_of_area) * part / 10) for part in range(2, 9)]
+    gap = []
+    for x in range(width):
+        pixels = [rgb[(y * width + x) * 3 : (y * width + x) * 3 + 3] for y in probes]
+        gap.append(all(near(px, colors.desktop, 1) or near(px, colors.accent, 40) for px in pixels))
+    windows = []
+    x = 0
+    while x < width:
+        if gap[x]:
+            x += 1
+            continue
+        start = x
+        while x < width and not gap[x]:
+            x += 1
+        if x - start >= 200 * scale:
+            windows.append((start, x))
+    checks.append((f"{len(apps)} windows stand side by side between the bars", len(windows) == len(apps),
+                   f"windows from x {', '.join(f'{a} to {b}' for a, b in windows) or 'nowhere'}"))
+    lines = [f"apps: {width}x{height}"]
+    dark = colors.bar[0] < 128
+    for app, (left, right) in zip(apps, windows):
+        middle = (left + right) // 2
+        samples = [left + (right - left) * part // 6 for part in range(1, 6)]
+        top = -1
+        for y in range(top_of_area, min(bottom_of_area, top_of_area + round(80 * scale))):
+            drawn = [rgb[(y * width + sx) * 3 : (y * width + sx) * 3 + 3] for sx in samples]
+            if sum(1 for px in drawn if not near(px, colors.desktop, 1) and not near(px, colors.accent, 40)) >= 4:
+                top = y
+                break
+        if top < 0:
+            checks.append((f"{app}'s window has a top edge", False, f"nothing but the desktop under the bar at x {middle}"))
+            continue
+        inset = round(12 * scale)
+        fill, share = most_common(rgb, width, left + inset, right - inset, top + round(3 * scale), top + round(30 * scale))
+        neutral = max(fill) - min(fill) <= 10
+        shade = 12 <= luminance(fill) <= 90 if dark else 180 <= luminance(fill) <= 255
+        close = 0
+        for y in range(top + round(4 * scale), top + round(42 * scale)):
+            row = y * width * 3
+            for x in range(right - round(56 * scale), right - round(4 * scale)):
+                if abs(luminance(rgb[row + x * 3 : row + x * 3 + 3]) - luminance(fill)) >= 80:
+                    close += 1
+        checks += [
+            (f"{app}'s title bar is one gray of the theme along the top of its window",
+             neutral and shade and share >= 0.4 and not near(fill, colors.desktop, 1),
+             f"from x {left} to {right}, top {top}: #{bytes(fill).hex()} over {share:.0%} of its first rows"),
+            (f"{app}'s title bar has its close button at the right", close >= 12 * scale * scale,
+             f"{close} pixels drawn in its right end"),
+        ]
+    return report("apps", lines, checks)
 
 
 def screendump(qmp_path, work, name):
@@ -1808,10 +1918,12 @@ def main():
         if state != "active":
             fail(f"greetd.service is {state}, expected active")
 
-        def look(what, png, seconds, console=False, lock=None, journals=(), **shape):
+        def look(what, png, seconds, console=False, lock=None, apps=None, colors=DARK_COLORS, journals=(),
+                 **shape):
             """Screendump until the bar and the menu have the shape we asked for, or the console is
-            open, or the lock screen is up (lock says whether it has refused a password), or give up
-            and save it. On a failure the journal of each tag in journals is printed."""
+            open, or the lock screen is up (lock says whether it has refused a password), or the apps
+            stand side by side with their title bars, or give up and save it. colors are the theme's.
+            On a failure the journal of each tag in journals is printed."""
             deadline = time.monotonic() + seconds
             while True:
                 try:
@@ -1819,14 +1931,16 @@ def main():
                 except (OSError, RuntimeError) as e:
                     fail(f"screendump: {e}")
                 if lock is not None:
-                    good, lines = check_lock(width, height, rgb, refused=lock)
+                    good, lines = check_lock(width, height, rgb, refused=lock, colors=colors)
                 elif console:
                     good, lines = check_console(width, height, rgb)
+                elif apps:
+                    good, lines = check_apps(width, height, rgb, apps, colors)
                 else:
-                    good, lines = check_desktop(width, height, rgb, lens=args.lens, **shape)
+                    good, lines = check_desktop(width, height, rgb, lens=args.lens, colors=colors, **shape)
                 if good or time.monotonic() > deadline:
                     break
-                time.sleep(2 if shape or console or lock is not None else 5)
+                time.sleep(2 if shape or console or apps or lock is not None else 5)
             write_png(png, width, height, rgb)
             print("\nboot-test: " + "\nboot-test: ".join(lines), flush=True)
             if not good:
@@ -2157,7 +2271,7 @@ def main():
             if status != 0 or printed:
                 fail(f"ghostty does not take the settings file the image writes: {printed!r}")
             toggle = (f"horizon msg action toggle-console --app-id {CONSOLE_APP_ID} -- "
-                      f"systemd-cat -t console ghostty --class={CONSOLE_APP_ID}")
+                      f"systemd-cat -t console ghostty --class={CONSOLE_APP_ID} --window-decoration=none")
 
             def console_window():
                 """(id, pid) of the console's window in horizon's list, or None when it is not there."""
@@ -2683,6 +2797,101 @@ def main():
             if not restarts or int(restarts.group(1)) < 1:
                 fail(f"systemd did not restart the shell: NRestarts={without_console(output).strip()!r}")
             ok(f"the shell came back after it was killed, restart {restarts.group(1)}")
+
+            # 5i. apps draw their own title bars. what they read is there first: the dark colour scheme
+            # in dconf, and the cursor and qt's platform theme in the user manager, which lens starts
+            # apps from
+            if bar_state("the theme the shell runs with").get("theme") != "dark":
+                fail(f"lens --state says theme {bar_state('the theme').get('theme')!r}, expected dark")
+            _, output = run("dconf read /org/gnome/desktop/interface/color-scheme", "the colour scheme apps read")
+            if "'prefer-dark'" not in without_console(output):
+                fail(f"dconf reads the colour scheme as {without_console(output).strip()!r}, expected 'prefer-dark'")
+            _, output = run("systemctl --user show-environment | cat", "the user manager's environment")
+            missing = [word for word in ("XCURSOR_THEME=Adwaita", "XCURSOR_SIZE=24", "QT_QPA_PLATFORMTHEME=gtk3")
+                       if word not in without_console(output)]
+            if missing:
+                fail(f"the user manager's environment lacks {', '.join(missing)}")
+            ok("dconf has the dark colour scheme, and the user manager the cursor and qt's platform theme")
+
+            width, height, rgb = screendump(args.qmp, work, "apps")
+            size = (width, height)
+            _, dock_rows = bar_and_dock(width, height, bar_gray_rows(width, height, rgb))
+            scale = dock_rows / DOCK_HEIGHT
+
+            def titled_apps(what, png, colors):
+                """Start the titled apps from the dock, left to right, and look for their title bars."""
+                for place, app in enumerate(TITLED_APPS):
+                    click(args.qmp, size, dock_point(place))
+                    if not wait_for(120, lambda: [win for win in open_windows(f"{app}'s window")
+                                                  if win[1] == app]):
+                        _, output = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
+                        fail(f"a click on {app}'s icon in the dock opened no window: "
+                             f"{without_console(output).strip()[-400:]!r}")
+                # the pointer goes into the terminal, away from both title bars
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                look(what, png, 120, apps=TITLED_APPS, colors=colors, journals=("horizon",))
+
+            def close_titled_apps():
+                for window, app, _ in open_windows("the windows to close"):
+                    if app in TITLED_APPS:
+                        run(f"horizon msg action close-window --id {window}", f"closing {app}'s window")
+                if not wait_for(60, lambda: not [win for win in open_windows("the windows left")
+                                                 if win[1] in TITLED_APPS]):
+                    fail(f"the windows of {', '.join(TITLED_APPS)} did not close")
+                # the last window closing ends firefox, and a click before it has gone would open a
+                # window in the process that is ending
+                wait_for(30, lambda: run("pgrep -f firefox", "whether firefox has ended")[0] != 0)
+
+            titled_apps("firefox and ghostty with their title bars", f"{stem}-apps{extension}", DARK_COLORS)
+
+            def theme_to(word):
+                """Write the owner's theme and start the shell again, which hands it on to dconf and
+                to horizon, and wait until both have it."""
+                scheme = "'default'" if word == "light" else "'prefer-dark'"
+                run(f"printf '{word}\\n' > ~/.config/rift/theme; and systemctl --user restart lens.service",
+                    f"the {word} theme")
+                if not wait_for(30, lambda: bar_state(f"the shell in {word}").get("theme") == word):
+                    fail(f"lens --state does not say theme {word} after the shell started again")
+                if not wait_for(30, lambda: scheme in without_console(
+                        run("dconf read /org/gnome/desktop/interface/color-scheme", "the colour scheme")[1])):
+                    fail(f"the shell did not set the colour scheme to {scheme}")
+                part = without_console(run("cat ~/.local/state/rift/horizon.kdl", "horizon's part for the theme")[1])
+                if f": {word}" not in part or ("#f2f1f0" in part) != (word == "light"):
+                    fail(f"the part of horizon's config says {part.strip()[-200:]!r} for {word}")
+                ok(f"the shell handed the {word} theme on to dconf and to horizon")
+
+            # the owner's theme to light: the shell, the desktop behind it, the menus, the lock screen and
+            # the apps, which start again so they read it as they would at the start of a session
+            close_titled_apps()
+            theme_to("light")
+            point(args.qmp, size, (round(width / 3), round(height / 2)))
+            look("the light desktop", f"{stem}-light{extension}", 30, colors=LIGHT_COLORS,
+                 journals=("lens", "horizon"))
+            run("lens --menu", "the Applications menu in light")
+            listed = int(bar_state("the menu in light").get("rows") or 0)
+            look("the light Applications menu", f"{stem}-light-menu{extension}", 20, menu=True, rows=listed,
+                 colors=LIGHT_COLORS, journals=("lens",))
+            run("lens --escape", "escape, which closes the menu")
+            if not wait_for(20, lambda: bar_state("the menu closed").get("menu") == "closed"):
+                fail("escape did not close the Applications menu in light")
+            # the pointer's white arrow would add to the white of the field, so it goes to the top right
+            point(args.qmp, size, (width - round(40 * scale), round(height / 8)))
+            status, output = run(f"loginctl lock-session {session}", "loginctl lock-session in light")
+            if status != 0:
+                fail(f"loginctl lock-session {session} exited with {status}: {without_console(output).strip()!r}")
+            look("the light lock screen", f"{stem}-light-lock{extension}", 30, lock=False, colors=LIGHT_COLORS,
+                 journals=("lock",))
+            locked_hint("yes", "with the light lock screen up")
+            type_line(PASSWORD, "the owner's password")
+            locked_hint("no", "after unlocking the light lock screen")
+            ok("the light lock screen locked the session and the owner's password unlocked it")
+            titled_apps("firefox and ghostty in light", f"{stem}-light-apps{extension}", LIGHT_COLORS)
+
+            # and dark again, which the rest of the test and the next boots of this drive have
+            close_titled_apps()
+            theme_to("dark")
+            point(args.qmp, size, (round(width / 3), round(height / 2)))
+            look("the desktop back in dark", f"{stem}-dark-again{extension}", 30, journals=("lens", "horizon"))
 
     # 6. timeline. vault answers on the bus and a timer takes a snapshot of home every hour. take one,
     # change a file and delete another, find the snapshot through rift snapshot and on the bus,

@@ -21,6 +21,9 @@ pub struct LayerRule {
     pub place_within_backdrop: Option<bool>,
     #[knuffel(child, unwrap(argument))]
     pub baba_is_float: Option<bool>,
+    /// Fade in with the layer-open animation when the surface maps.
+    #[knuffel(child, unwrap(argument))]
+    pub animate_open: Option<bool>,
     #[knuffel(child, default)]
     pub background_effect: BackgroundEffectRule,
     #[knuffel(child, default)]

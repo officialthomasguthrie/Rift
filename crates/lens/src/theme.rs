@@ -2,6 +2,7 @@
 //! with one blue accent. `~/.config/rift/theme` picks which is in use until Settings writes it.
 
 use iced::Color;
+use librift::appearance::Theme;
 
 /// Every colour the bar, the dock and the menus draw with.
 #[derive(Debug, Clone, Copy)]
@@ -88,21 +89,13 @@ pub const LIGHT: Palette = Palette {
     warn: rgb(0xc8_8800),
 };
 
-/// The palette the session runs with. `~/.config/rift/theme` holds `light` or `dark`; anything
-/// else, or no file, is dark.
+/// The colours of a theme.
 #[must_use]
-pub fn load() -> Palette {
-    match setting().as_deref() {
-        Some("light") => LIGHT,
-        _ => DARK,
+pub const fn palette(theme: Theme) -> Palette {
+    match theme {
+        Theme::Dark => DARK,
+        Theme::Light => LIGHT,
     }
-}
-
-fn setting() -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let path = std::path::Path::new(&home).join(".config/rift/theme");
-    let text = std::fs::read_to_string(path).ok()?;
-    Some(text.trim().to_lowercase())
 }
 
 #[cfg(test)]
@@ -141,6 +134,47 @@ mod tests {
         }
         // the field is the bar's gray on purpose, and they never share a row
         assert!((DARK.field.r - DARK.bar.r).abs() < f32::EPSILON);
+    }
+
+    /// The same for the light theme, whose hairline and border share a gray on purpose. The light
+    /// desktop is `#f2f1f0`, from the part of Horizon's config that librift writes for light.
+    #[test]
+    fn the_grays_the_boot_test_counts_on_light_are_far_enough_apart() {
+        let desktop = [242.0, 241.0, 240.0];
+        let channels = |color: Color| {
+            [
+                (color.r * 255.0).round(),
+                (color.g * 255.0).round(),
+                (color.b * 255.0).round(),
+            ]
+        };
+        let grays = [
+            ("desktop", desktop),
+            ("bar", channels(LIGHT.bar)),
+            ("line", channels(LIGHT.line)),
+            ("menu", channels(LIGHT.menu)),
+            ("field", channels(LIGHT.field)),
+        ];
+        for (name, one) in grays {
+            for (other_name, other) in grays {
+                if name == other_name {
+                    continue;
+                }
+                let apart = one
+                    .iter()
+                    .zip(other)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+                assert!(apart >= 5.0, "{name} and {other_name} are {apart:.1} apart");
+            }
+        }
+        assert!((LIGHT.line.r - LIGHT.edge.r).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_theme_has_its_own_colours() {
+        assert!((palette(Theme::Dark).bar.r - DARK.bar.r).abs() < f32::EPSILON);
+        assert!((palette(Theme::Light).bar.r - LIGHT.bar.r).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! works on any machine the drive meets.
 
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use iced::widget::container;
@@ -15,6 +16,7 @@ use iced_layershell::reexport::{
     Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
 };
 use iced_layershell::settings::{LayerShellSettings, Settings};
+use librift::appearance;
 use librift::battery::Battery;
 use librift::os::{self, Action};
 use librift::{bluetooth, network, quasar, session};
@@ -74,6 +76,8 @@ const JOIN_WAIT: Duration = Duration::from_secs(45);
 /// The shell's state. The bar and the dock are always there; a menu, a dialog, a notification or the
 /// key popup comes and goes with its surface.
 struct Lens {
+    /// Dark or light, as the owner's setting said when the shell started.
+    theme: appearance::Theme,
     look: Palette,
     apps: Vec<App>,
     clock: String,
@@ -442,8 +446,15 @@ fn popup_surface() -> NewLayerShellSettings {
 ///
 /// When there is no display or the compositor has no layer-shell.
 pub fn run(apps: Vec<App>) -> Result<(), iced_layershell::Error> {
-    let look = crate::theme::load();
-    iced_layershell::daemon(move || boot(look, apps.clone()), "lens", update, view)
+    let chosen = appearance::Theme::read();
+    // apps and the compositor follow the same setting. dconf may have to be started on the bus
+    // first, which the bar does not wait for
+    thread::spawn(move || {
+        if let Err(why) = appearance::apply(chosen) {
+            eprintln!("lens: {why}");
+        }
+    });
+    iced_layershell::daemon(move || boot(chosen, apps.clone()), "lens", update, view)
         .theme(|state: &Lens, _| Theme::custom("Rift", palette(state.look)))
         .style(|state: &Lens, _: &Theme| theme::Style {
             // every surface paints its own background over all of itself; this is what shows if
@@ -481,14 +492,15 @@ fn palette(look: Palette) -> theme::Palette {
     }
 }
 
-fn boot(look: Palette, apps: Vec<App>) -> (Lens, Task<Message>) {
+fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
     // the dock is made here, not when something opens it: it is a part of the shell like the bar,
     // and it takes its own height from the screen before the first window is placed
     let dock = Dock::new(window::Id::unique(), &apps);
     let opening = Task::done(Message::OpenDock(dock.id));
     let now = clock::now();
     let state = Lens {
-        look,
+        theme: chosen,
+        look: crate::theme::palette(chosen),
         apps,
         clock: now.line,
         today: now.today,
@@ -1477,6 +1489,7 @@ fn remember(state: &Lens) {
     };
     let status = &state.status;
     line("clock", &state.clock);
+    line("theme", state.theme.word());
     line("apps", &state.apps.len().to_string());
     line("network", &status::network_word(status.network.as_ref()));
     line(

@@ -27,14 +27,18 @@ let
     "${self.packages.${pkgs.stdenv.hostPlatform.system}.workspace}/bin/horizon-lock"
   ];
   # ghostty's settings, written into the owner's home once, when there is no file yet. tmpfiles
-  # turns the \n into new lines. the background is the near black the logo was drawn on
+  # turns the \n into new lines. the background is the near black the logo was drawn on, and the
+  # title bar follows the desktop, dark or light
   ghosttySettings = lib.concatStringsSep "\\n" [
     "font-family = DejaVu Sans Mono"
     "font-size = 11"
     "background = #040406"
     "foreground = #d4d4d4"
-    "window-theme = dark"
+    "window-theme = system"
   ];
+  # the part of the config the shell writes from the owner's theme when the session starts. horizon
+  # reads its config again when the file changes, and a file that is not there yet is no error
+  themePart = "~/.local/state/rift/horizon.kdl";
   # the system config. the binary still reads the niri paths: /etc/niri/config.kdl here, and a
   # file at ~/.config/niri/config.kdl replaces it for that user
   configFile = pkgs.writeText "horizon-config.kdl" ''
@@ -63,9 +67,36 @@ let
         default-column-width { proportion 0.5; }
     }
 
-    prefer-no-csd
+    // apps draw their own title bars, with the close button, the way gtk and firefox do on gnome.
+    // every window is told it is tiled, so it draws square corners and no shadow of its own and
+    // sits flush inside the focus ring. a window opens as a column of the default width even when
+    // it asks to open maximized, as firefox does on a small screen; maximizing it later still works
+    window-rule {
+        tiled-state true
+        open-maximized-to-edges false
+    }
 
-    // the console floats along the top of the working area, under lens's bar, full width
+    cursor {
+        xcursor-theme "Adwaita"
+        xcursor-size 24
+    }
+
+    // a menu of the shell fades in, quickly. nothing else of the shell moves
+    animations {
+        layer-open {
+            duration-ms 150
+            curve "ease-out-quad"
+        }
+    }
+
+    layer-rule {
+        match namespace="^lens-menu$"
+        match namespace="^lens-dialog$"
+        animate-open true
+    }
+
+    // the console floats along the top of the working area, under lens's bar, full width. it has no
+    // title bar: ghostty starts it with no decorations
     window-rule {
         match app-id=r#"^${lib.escapeRegex console.appId}$"#
         open-floating true
@@ -88,7 +119,7 @@ let
         Mod+Shift+Slash hotkey-overlay-title="Show these shortcuts" { show-hotkey-overlay; }
         Mod+T hotkey-overlay-title="Open a terminal" { spawn "ghostty"; }
         Mod+Space hotkey-overlay-title="Show the Applications menu" { spawn "lens" "--menu"; }
-        Mod+Grave hotkey-overlay-title="Show or hide the console" { toggle-console app-id="${console.appId}" "${config.systemd.package}/bin/systemd-cat" "-t" "console" "ghostty" "--class=${console.appId}"; }
+        Mod+Grave hotkey-overlay-title="Show or hide the console" { toggle-console app-id="${console.appId}" "${config.systemd.package}/bin/systemd-cat" "-t" "console" "ghostty" "--class=${console.appId}" "--window-decoration=none"; }
         // while the session is locked the key starts a lock screen again, in case the one that
         // locked it has gone. horizon turns a second one away while the first is still there
         Mod+L allow-when-locked=true hotkey-overlay-title="Lock the screen" { spawn ${
@@ -144,6 +175,9 @@ let
         Mod+Shift+E hotkey-overlay-title="End the session" { quit; }
         Ctrl+Alt+Delete { quit; }
     }
+
+    // last, so the light theme's colours take the place of the ones above
+    include "${themePart}" optional=true
   '';
 in
 {
@@ -218,6 +252,43 @@ in
       pkgs.noto-fonts
       pkgs.dejavu_fonts
     ];
+
+    # one look for apps. gtk 3 and 4 and libadwaita read these through gsettings, and apps in a
+    # flatpak through the gtk portal, which passes the colour scheme on. this is the system database
+    # under the owner's own: the shell writes color-scheme and gtk-theme there from the theme
+    # setting, dark by default. accent blue is libadwaita's own default, #78aeed on dark and #3584e4
+    # on light. gtk 3 has no colour scheme and goes dark by the theme's name
+    programs.dconf = {
+      enable = true;
+      profiles.user.databases = [
+        {
+          settings = {
+            "org/gnome/desktop/interface" = {
+              color-scheme = "prefer-dark";
+              accent-color = "blue";
+              gtk-theme = "Adwaita-dark";
+              icon-theme = "Adwaita";
+              cursor-theme = "Adwaita";
+              cursor-size = lib.gvariant.mkInt32 24;
+              font-name = "Noto Sans 11";
+              document-font-name = "Noto Sans 11";
+              monospace-font-name = "DejaVu Sans Mono 11";
+            };
+            # the close button alone, as gnome has it. horizon has no minimize
+            "org/gnome/desktop/wm/preferences".button-layout = "appmenu:close";
+          };
+        }
+      ];
+    };
+    environment.sessionVariables = {
+      # the cursor for apps that do not read gsettings, and for the user manager, which lens starts
+      # apps from. horizon's own cursor section says the same
+      XCURSOR_THEME = "Adwaita";
+      XCURSOR_SIZE = "24";
+      # qt 5 and 6 take their colours, font, icons and file dialog from gtk. nixpkgs builds qtbase
+      # with the gtk 3 platform theme, so this needs nothing more in the image
+      QT_QPA_PLATFORMTHEME = "gtk3";
+    };
     # the icon theme lens looks names up in, and the one gtk apps fall back to
     environment.pathsToLink = [ "/share/icons" ];
     fonts.fontconfig.defaultFonts = {
