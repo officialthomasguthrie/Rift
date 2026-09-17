@@ -260,8 +260,12 @@ in
       pkgs.brightnessctl
       pkgs.adwaita-icon-theme
       pkgs.hicolor-icon-theme
+      # the title bar qt 5 apps draw on wayland, in the adwaita style, dark or light with the desktop
+      pkgs.qadwaitadecorations
       wallpapers
     ];
+    # QT_PLUGIN_PATH to the plugins of the system's packages, where qt finds the decorations
+    qt.enable = true;
 
     fonts.packages = [
       pkgs.noto-fonts
@@ -303,6 +307,8 @@ in
       # qt 5 and 6 take their colours, font, icons and file dialog from gtk. nixpkgs builds qtbase
       # with the gtk 3 platform theme, so this needs nothing more in the image
       QT_QPA_PLATFORMTHEME = "gtk3";
+      # and their title bar from the adwaita decorations, not qt's own with its blue gradient
+      QT_WAYLAND_DECORATION = "adwaita";
     };
     # the icon theme lens looks names up in, and the one gtk apps fall back to. the wallpapers go
     # under /run/current-system/sw too, where a path to one outlives the store path it came in

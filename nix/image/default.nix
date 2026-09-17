@@ -75,16 +75,21 @@ in
           SizeMaxBytes = "1G";
         };
       };
-      # as small as what is in it, and the last partition, so the flash step can grow it to its 8G slot
+      # as small as what is in it, and the last partition, so the flash step can grow it to its 8G slot.
+      # erofs compresses it with zstd in clusters of up to 64 KiB, so a read decompresses little more
+      # than it asked for. higher levels save a few percent and take many times as long to build
       "20-store" = {
         repartConfig = {
           Type = "usr";
           Label = "store_${version}";
           Minimize = "best";
           SizeMaxBytes = "8G";
+          Compression = "zstd";
+          CompressionLevel = "3";
         };
       };
     };
+    mkfsOptions.erofs = [ "-C65536" ];
   };
 
   # no nix-daemon on the device yet: the store is read-only and root is tmpfs, the db wouldn't survive a boot.
