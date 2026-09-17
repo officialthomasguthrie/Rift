@@ -43,7 +43,7 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 
 ### Immutable system and atomic updates
 
-- The operating system is a read-only Nix store protected by dm-verity. A block that does not match its hash is refused rather than read.
+- The operating system is a read-only Nix store in an EROFS file system, compressed with zstd and protected by dm-verity. A block that does not match its hash is refused rather than read.
 - The drive carries two system slots. systemd-sysupdate writes a new version into the inactive slot, so the running version is never modified during an update.
 - systemd-boot counts boot attempts for each new version. A version that fails to boot three times is set aside and the previous version starts again.
 - Each version boots as a unified kernel image on UEFI firmware, with the current stable Linux kernel.
@@ -69,8 +69,17 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 - A drop-down terminal and a lock screen are built into the compositor.
 - The desktop is dark by default and can be switched to light. GTK, libadwaita and Qt applications follow the same setting in the Adwaita style with a blue accent, Noto Sans and the Adwaita icons and cursor, and draw their own title bars.
 - The wallpaper is one of nine NASA photographs included in the image, each with its source and license in a text file beside it, or any JPEG or PNG picture, or a flat colour. Horizon scales it to fill each display. The default is a photograph of the night side of Earth taken from the Orion spacecraft on Artemis II.
-- Firefox, Ghostty, Zed, Helix, zellij, fish and Podman are included in the image.
 - Flatpak is integrated with xdg-desktop-portal for applications installed from Flathub.
+
+### Applications and development tools
+
+The image includes the following software, so a new drive is usable without a network connection.
+
+- Firefox, Ghostty, Zed, Helix, Neovim, KeePassXC and virt-manager, with fish, bash, Nushell and zellij.
+- Rootless Podman, which also answers to `docker`, and QEMU with KVM through libvirt, with UEFI firmware and a software TPM for guests.
+- Compilers and runtimes for Rust, C and C++ (GCC, Clang and LLVM, with CMake, Ninja and Make), Python, Node.js, Bun, Go, Zig and Java.
+- gdb, LLDB, Valgrind, strace, ltrace and perf for debugging, and git, the GitHub CLI, ripgrep, fd, fzf and bat.
+- nmap, OpenSSH, WireGuard tools, GnuPG and age for networks and encryption, and lm_sensors, smartmontools, PowerTOP, iotop, nvtop and btop for the hardware.
 
 ### Per-machine configuration
 
@@ -164,7 +173,7 @@ just test           # run the test suite
 just lint           # rustfmt and clippy
 ```
 
-Every change to `main` is built and tested by continuous integration. The pipeline builds the full image and boots it in QEMU, then exercises unlocking, an update, a rollback, snapshots, a backup, a clone, the sandbox and the local AI inside the running system.
+Every change to `main` is built and tested by continuous integration. The pipeline builds the full image and boots it in QEMU, then exercises unlocking, an update, a rollback, snapshots, a backup, a clone, the sandbox, the local AI and the included compilers inside the running system.
 
 ## Project status
 

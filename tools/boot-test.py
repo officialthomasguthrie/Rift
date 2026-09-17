@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Boots an image through the flake's vm app and checks that the system comes up. The boot job in ci
-runs this.
+"""Boots an image through the flake's vm app and checks that the system comes up. The image job in ci
+runs this after it builds the image.
 
 Usage: boot-test.py <rift-vm> <image> <passfile> [--models dir] [--exchange size] [--timeout 600]
        [--log serial.log] [--splash splash.png] [--desktop desktop.png] [--lens] [--updates updates.img]
@@ -21,6 +21,12 @@ for persist, then boots the drive as an nvme drive. Everything goes through the 
 the autologin shell, a few commands, the default apps on the path, the a/b slots, the host profile
 orbit wrote and what `rift host` and `rift doctor` print. The serial output is printed as it
 arrives and kept in the log file.
+
+The first tier of apps: every app, tool and language in the image prints its version. gcc, clang, g++,
+clang++, cmake with ninja, make, zig cc, rustc and go each build a program that runs, java runs one from
+its source, and python, node and bun run a line. JAVA_HOME is the jdk in the image. libvirtd is not
+running after the boot, starts when `virsh -c qemu:///system version` connects as the owner and names the
+QEMU it runs guests with, and has UEFI firmware with secure boot for them.
 
 Timeline: the test takes a snapshot of home with `rift snapshot take`, changes one file and
 deletes another, finds the snapshot through `rift snapshot` and on the bus, and restores both from
@@ -110,8 +116,10 @@ its Do not disturb switch keeps the next one off the screen, and a second click 
 volume key sent over qmp turns the sink up and shows the key popup over the dock. Killing the shell
 brings it back, since it is a user unit that restarts. Then Firefox and Ghostty, started from the dock,
 stand side by side between the bar and the dock, each with the title bar it draws itself and a close
-button at its right. The owner's theme set to light and the shell started again make the bar, the dock,
-the desktop, the Applications menu, the lock screen and both apps light, and dark again after that.
+button at its right. KeePassXC, the first Qt app, started from the Applications menu, stands there with
+the Adwaita title bar Qt draws for it in dark. The owner's theme set to light and the shell started again
+make the bar, the dock, the desktop, the Applications menu, the lock screen and both apps light, and dark
+again after that.
 With --models as
 well, a question goes through `lens --do`, which prints quasar's answer, and then into the field,
 where the answer shows up as rows under it.
@@ -381,6 +389,86 @@ LIGHT_COLORS = Colors(bar=(235, 235, 235), line=(208, 208, 208), menu=(250, 250,
                       accent=(53, 132, 228), refused=(192, 28, 40))
 # the apps whose title bars the test looks at, the first two in the dock, from left to right on screen
 TITLED_APPS = ["firefox", "com.mitchellh.ghostty"]
+# the image's first qt app, which the test starts from the Applications menu: its name in the list and
+# the app id its window has
+QT_APP = "KeePassXC"
+QT_APP_ID = "org.keepassxc.KeePassXC"
+# the apps, tools and languages of the image's first tier, each with the command that prints its
+# version and what that has to print. the commands run in fish, as the owner
+TOOLS = [
+    ("keepassxc-cli --version", r"^2\.\d+\.\d+"),
+    ("nvim --version", r"^NVIM v0\.\d+"),
+    ("virt-manager --version", r"^\d+\.\d+\.\d+"),
+    ("virsh --version", r"^\d+\.\d+\.\d+"),
+    ("gh --version", r"^gh version \d"),
+    ("gdb --version", r"^GNU gdb .* \d+\.\d+"),
+    ("lldb --version", r"^lldb version \d"),
+    ("valgrind --version", r"^valgrind-\d"),
+    ("strace -V", r"^strace -- version \d"),
+    ("ltrace -V", r"^ltrace version \d"),
+    ("perf --version", r"^perf version \d"),
+    ("fzf --version", r"^\d+\.\d+"),
+    ("bat --version", r"^bat \d"),
+    ("nmap --version", r"^Nmap version \d"),
+    ("ssh -V 2>&1", r"^OpenSSH_\d"),
+    ("wg --version", r"^wireguard-tools v\d"),
+    ("gpg --version", r"^gpg \(GnuPG\) 2\."),
+    ("age --version", r"^v?1\.\d+"),
+    ("sensors -v", r"^sensors version \d"),
+    ("smartctl --version", r"^smartctl \d"),
+    ("powertop --version", r"PowerTOP version"),
+    ("iotop --version", r"^iotop \d"),
+    ("nvtop --version", r"^nvtop version \d"),
+    ("rustc --version", r"^rustc 1\.\d+"),
+    ("cargo --version", r"^cargo 1\.\d+"),
+    ("rustfmt --version", r"^rustfmt \d"),
+    ("cargo clippy --version", r"^clippy \d"),
+    ("rust-analyzer --version", r"^rust-analyzer "),
+    ("gcc --version", r"^gcc \(GCC\) \d"),
+    ("g++ --version", r"^g\+\+ \(GCC\) \d"),
+    ("cc --version", r"^gcc \(GCC\) \d"),
+    ("clang --version", r"^clang version \d"),
+    ("clangd --version", r"clangd version \d"),
+    ("ld.lld --version", r"^LLD \d"),
+    ("llvm-ar --version", r"LLVM version \d"),
+    ("cmake --version", r"^cmake version \d"),
+    ("ninja --version", r"^1\.\d+"),
+    ("make --version", r"^GNU Make \d"),
+    ("python3 --version", r"^Python 3\.\d+"),
+    ("node --version", r"^v\d+\."),
+    ("npm --version", r"^\d+\.\d+"),
+    ("bun --version", r"^1\.\d+"),
+    ("go version", r"^go version go1\.\d+"),
+    ("zig version", r"^0\.\d+"),
+    ("java -version 2>&1", r'^openjdk version "25'),
+    ("javac -version 2>&1", r"^javac 25"),
+]
+# a program for each compiler of the first tier: the command line that writes, builds and runs it in the
+# folder the test makes, and the line it prints. fish's printf with %s writes each word as a line
+BUILDS = [
+    ("gcc", r'''printf '%s\n' '#include <stdio.h>' 'int main(void) { puts("c runs"); return 0; }' > hello.c; '''
+            r'''and gcc -o hello-gcc hello.c; and ./hello-gcc''', "c runs"),
+    ("clang", r'''clang -o hello-clang hello.c; and ./hello-clang''', "c runs"),
+    ("g++", r'''printf '%s\n' '#include <iostream>' '''
+            r''''int main() { std::cout << "c++ runs" << std::endl; }' > hello.cpp; '''
+            r'''and g++ -o hello-gxx hello.cpp; and ./hello-gxx''', "c++ runs"),
+    ("clang++", r'''clang++ -o hello-clangxx hello.cpp; and ./hello-clangxx''', "c++ runs"),
+    ("cmake and ninja", r'''printf '%s\n' 'cmake_minimum_required(VERSION 3.20)' 'project(hello C)' '''
+                        r''''add_executable(hello hello.c)' > CMakeLists.txt; '''
+                        r'''and cmake -G Ninja -S . -B build; and cmake --build build; and ./build/hello''', "c runs"),
+    ("make", r'''printf 'hello-make: hello.c\n\tcc -o hello-make hello.c\n' > Makefile; '''
+             r'''and make hello-make; and ./hello-make''', "c runs"),
+    ("zig cc", r'''zig cc -o hello-zig hello.c; and ./hello-zig''', "c runs"),
+    ("rustc", r'''printf '%s\n' 'fn main() { println!("rust runs"); }' > hello.rs; '''
+              r'''and rustc -o hello-rs hello.rs; and ./hello-rs''', "rust runs"),
+    ("go", r'''printf '%s\n' 'package main' 'import "fmt"' 'func main() { fmt.Println("go runs") }' > hello.go; '''
+           r'''and go run hello.go''', "go runs"),
+    ("java", r'''printf '%s\n' 'class Hello { public static void main(String[] args) { '''
+             r'''System.out.println("java runs"); } }' > Hello.java; and java Hello.java''', "java runs"),
+    ("python", r'''python3 -c 'print("python runs")' ''', "python runs"),
+    ("node", r'''node -e 'console.log("node runs")' ''', "node runs"),
+    ("bun", r'''bun -e 'console.log("bun runs")' ''', "bun runs"),
+]
 # the owner's password from nix/profiles/base.nix, and one that is not it
 PASSWORD = "rift"
 WRONG_PASSWORD = "wrongpassword"
@@ -1625,6 +1713,48 @@ def main():
             child.terminate(force=True)
         print(f"\nboot-test: PASSED in {since()}", flush=True)
         return
+
+    # 2f. the apps, tools and languages of the image's first tier. each prints its version, each compiler
+    # builds a program that runs, java runs one from its source, and libvirtd, which no boot starts,
+    # starts when virsh connects to the system instance as the owner and names the qemu it runs guests
+    # with. every problem is gathered before the step fails, so one run shows all of them
+    problems = []
+    for command, pattern in TOOLS:
+        status, output = run(command, command)
+        printed = "\n".join(line.strip() for line in without_console(output).splitlines())
+        if status != 0 or not re.search(pattern, printed, re.M):
+            problems.append(f"{command} exited with {status} and printed {printed.strip()[-300:]!r}")
+    print(f"\nboot-test: {len(TOOLS) - len(problems)} of {len(TOOLS)} version commands printed their versions",
+          flush=True)
+    _, output = run("echo $JAVA_HOME", "JAVA_HOME")
+    if "openjdk-25" not in without_console(output):
+        problems.append(f"JAVA_HOME is {without_console(output).strip()!r}, not the jdk in the image")
+    run("mkdir -p /tmp/first-tier; and cd /tmp/first-tier", "a folder to build in")
+    for name, command, line in BUILDS:
+        started = time.monotonic()
+        status, output = run(command, f"a program built with {name}")
+        printed = "\n".join(printed_line.strip() for printed_line in without_console(output).splitlines())
+        if status != 0 or line not in printed.splitlines():
+            problems.append(f"the program built with {name} exited with {status} and printed "
+                            f"{printed.strip()[-600:]!r}")
+        else:
+            print(f"\nboot-test: {name} built and ran a program in {time.monotonic() - started:.0f}s", flush=True)
+    run("cd ~", "home again")
+    _, output = run("systemctl is-active libvirtd | cat", "libvirtd before anything connects to it")
+    if without_console(output).strip().splitlines()[-1:] != ["inactive"]:
+        problems.append(f"libvirtd is {without_console(output).strip()!r} before anything connects, not inactive")
+    status, output = run("virsh -c qemu:///system version", "libvirtd's version on the system connection")
+    printed = without_console(output)
+    if status != 0 or not re.search(r"^\s*Running hypervisor: QEMU \d", printed, re.M):
+        problems.append(f"virsh -c qemu:///system version exited with {status}: {printed.strip()[-400:]!r}")
+    _, output = run("ls /run/libvirt/nix-ovmf", "the uefi firmware for guests")
+    if "edk2-x86_64-secure-code.fd" not in without_console(output):
+        problems.append("libvirt has no uefi firmware with secure boot for guests: "
+                        f"{without_console(output).strip()!r}")
+    if problems:
+        fail("the first tier: " + "; ".join(problems))
+    ok(f"the {len(TOOLS)} version commands, {len(BUILDS)} programs built and run, JAVA_HOME, and libvirtd "
+       "started on the owner's connection")
 
     # 3. orbit: the profile it wrote into @hosts, and the same answers on the system bus.
     # fish puts a bare \r before a command's output, so these anchor on the whitespace after the
@@ -2915,11 +3045,13 @@ def main():
             if "'prefer-dark'" not in without_console(output):
                 fail(f"dconf reads the colour scheme as {without_console(output).strip()!r}, expected 'prefer-dark'")
             _, output = run("systemctl --user show-environment | cat", "the user manager's environment")
-            missing = [word for word in ("XCURSOR_THEME=Adwaita", "XCURSOR_SIZE=24", "QT_QPA_PLATFORMTHEME=gtk3")
+            missing = [word for word in ("XCURSOR_THEME=Adwaita", "XCURSOR_SIZE=24", "QT_QPA_PLATFORMTHEME=gtk3",
+                                         "QT_WAYLAND_DECORATION=adwaita", "/run/current-system/sw/lib/qt-5.")
                        if word not in without_console(output)]
             if missing:
                 fail(f"the user manager's environment lacks {', '.join(missing)}")
-            ok("dconf has the dark colour scheme, and the user manager the cursor and qt's platform theme")
+            ok("dconf has the dark colour scheme, and the user manager the cursor, qt's platform theme, its "
+               "decorations and the system's qt plugins")
 
             width, height, rgb = screendump(args.qmp, work, "apps")
             size = (width, height)
@@ -2972,9 +3104,27 @@ def main():
                     fail(f"the part of horizon's config says {part.strip()[-300:]!r} for {word}")
                 ok(f"the shell handed the {word} theme on to dconf and to horizon")
 
+            # keepassxc, the image's first qt app, from the Applications menu. qt draws its title bar with the
+            # adwaita decorations the session names, over the wayland plugin that came with it, dark with the
+            # desktop, and not with qt's own decorations and their blue gradient
+            close_titled_apps()
+            run("lens --menu", f"the Applications menu for {QT_APP}")
+            run(f'lens --type "{QT_APP}"', f"{QT_APP}'s name typed into the field")
+            run("lens --enter", f"enter on {QT_APP}")
+            if not wait_for(120, lambda: [win for win in open_windows(f"{QT_APP}'s window") if win[1] == QT_APP_ID]):
+                _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"the Applications menu opened no {QT_APP_ID} window: {without_console(output).strip()[-800:]!r}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{QT_APP} with its title bar", f"{stem}-keepassxc{extension}", 120, apps=[QT_APP_ID],
+                 journals=("horizon", "lens"), settle=3)
+            for window, app, _ in open_windows(f"{QT_APP}'s window to close"):
+                if app == QT_APP_ID:
+                    run(f"horizon msg action close-window --id {window}", f"closing {QT_APP}'s window")
+            if not wait_for(60, lambda: not [win for win in open_windows("the windows left") if win[1] == QT_APP_ID]):
+                fail(f"{QT_APP}'s window did not close")
+
             # the owner's theme to light: the shell, the desktop behind it, the menus, the lock screen and
             # the apps, which start again so they read it as they would at the start of a session
-            close_titled_apps()
             theme_to("light")
             point(args.qmp, size, (round(width / 3), round(height / 2)))
             look("the light desktop", f"{stem}-light{extension}", 30, colors=LIGHT_COLORS,

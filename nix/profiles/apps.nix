@@ -1,6 +1,7 @@
-# the apps every image has next to the shell: firefox, zed and podman here, helix, zellij and fish
-# in base.nix, ghostty with horizon. none of them reports home or asks for an account
-{ pkgs, ... }:
+# the apps every image has next to the shell: firefox, zed, keepassxc, podman and virt-manager here,
+# helix, zellij and fish in base.nix, ghostty with horizon, the command line tools and languages in
+# tools.nix. none of them reports home or asks for an account
+{ lib, pkgs, ... }:
 let
   # zed only reads settings from the owner's home, so they are written there once, when there is
   # no file yet. the owner can change them afterwards
@@ -83,7 +84,11 @@ in
     };
   };
 
-  environment.systemPackages = [ pkgs.zed-editor ];
+  # keepassxc is qt 5. its title bar and its look come from horizon.nix
+  environment.systemPackages = [
+    pkgs.zed-editor
+    pkgs.keepassxc
+  ];
   systemd.user.tmpfiles.rules = [
     "d %h/.config/zed 0755 - - -"
     "f %h/.config/zed/settings.json 0644 - - - ${zedSettings}"
@@ -94,8 +99,30 @@ in
     # docker in scripts runs podman. there is no docker daemon
     dockerCompat = true;
   };
-  # rootless containers map their users into the owner's ranges
+  # virtual machines: libvirtd with qemu for the host's own architecture, a software tpm for guests
+  # that need one, windows 11 among them, and virt-manager, which connects to the system instance.
+  # libvirtd starts when something connects to its socket instead of at every boot
+  virtualisation.libvirtd = {
+    enable = true;
+    qemu.package = pkgs.qemu_kvm;
+    qemu.swtpm.enable = true;
+  };
+  systemd.services.libvirtd.wantedBy = lib.mkForce [ ];
+  systemd.services.libvirt-guests.wantedBy = lib.mkForce [ ];
+  programs.virt-manager.enable = true;
+  # guests on libvirt's default network get their addresses and names from its dnsmasq on the host
+  networking.firewall.interfaces.virbr0 = {
+    allowedUDPPorts = [
+      53
+      67
+    ];
+    allowedTCPPorts = [ 53 ];
+  };
+
+  # rootless containers map their users into the owner's ranges, and the owner manages the system's
+  # virtual machines without a password
   users.users.rift = {
+    extraGroups = [ "libvirtd" ];
     subUidRanges = [
       {
         startUid = 100000;
