@@ -7,7 +7,7 @@ jobs:
   probe:
     name: Store compression
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 100
     permissions:
       contents: read
       actions: read
@@ -46,31 +46,6 @@ jobs:
         run: |
           nix build --inputs-from . nixpkgs#erofs-utils -o erofs
           erofs/bin/mkfs.erofs --version || true
-      - name: Compress the store as it is
-        run: |
-          try() {
-            name=$1 source=$2
-            shift 2
-            start=$(date +%s)
-            if sudo erofs/bin/mkfs.erofs --quiet -U 5a3b1c2d-0000-4000-8000-000000000001 "$@" /tmp/try.erofs "$source"; then
-              size=$(stat -c %s /tmp/try.erofs)
-              echo "$name: $size bytes, $(numfmt --to=iec-i --suffix=B "$size"), $(( $(date +%s) - start )) s" | tee -a results.txt
-            else
-              echo "$name: mkfs.erofs failed after $(( $(date +%s) - start )) s" | tee -a results.txt
-            fi
-            sudo rm -f /tmp/try.erofs
-          }
-          try none /mnt/store
-          try zstd3 /mnt/store -zzstd,level=3
-          try zstd9 /mnt/store -zzstd,level=9
-          try zstd9-16k /mnt/store -zzstd,level=9 -C16384
-          try zstd9-64k /mnt/store -zzstd,level=9 -C65536
-          try zstd15-64k /mnt/store -zzstd,level=15 -C65536
-          try zstd9-256k /mnt/store -zzstd,level=9 -C262144
-          try zstd9-64k-ztail /mnt/store -zzstd,level=9 -C65536 -Eztailpacking
-          try zstd15 /mnt/store -zzstd,level=15
-          try lz4hc12 /mnt/store -zlz4hc,level=12
-          cat results.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Add the new packages
         run: |
           nix-store -r $(cat .github/probe-paths.txt) >/dev/null
@@ -93,9 +68,9 @@ jobs:
             start=$(date +%s)
             if sudo erofs/bin/mkfs.erofs --quiet -U 5a3b1c2d-0000-4000-8000-000000000001 "$@" "/tmp/$name.erofs" "$source"; then
               size=$(stat -c %s "/tmp/$name.erofs")
-              echo "with new packages, $name: $size bytes, $(numfmt --to=iec-i --suffix=B "$size"), $(( $(date +%s) - start )) s" | tee -a results.txt
+              echo "$name: $size bytes, $(numfmt --to=iec-i --suffix=B "$size"), $(( $(date +%s) - start )) s" | tee -a results.txt
             else
-              echo "with new packages, $name: mkfs.erofs failed after $(( $(date +%s) - start )) s" | tee -a results.txt
+              echo "$name: mkfs.erofs failed after $(( $(date +%s) - start )) s" | tee -a results.txt
             fi
           }
           readspeed() {
@@ -116,11 +91,21 @@ jobs:
           }
           try none /tmp/root
           readspeed none
-          try zstd9-64k /tmp/root -zzstd,level=9 -C65536
-          readspeed zstd9-64k
-          try zstd3 /tmp/root -zzstd,level=3
-          readspeed zstd3
-          try zstd15-64k /tmp/root -zzstd,level=15 -C65536
-          readspeed zstd15-64k
+          try zstd3-64k /tmp/root -zzstd,level=3 -C65536
+          readspeed zstd3-64k
+          try zstd3-4k /tmp/root -zzstd,level=3
+          readspeed zstd3-4k
+          try store-zstd3-64k /mnt/store -zzstd,level=3 -C65536
+          rm -f /tmp/store-zstd3-64k.erofs
+          try store-zstd3-256k /mnt/store -zzstd,level=3 -C262144
+          rm -f /tmp/store-zstd3-256k.erofs
+          try store-zstd3-48bit /mnt/store -zzstd,level=3 -E48bit
+          rm -f /tmp/store-zstd3-48bit.erofs
+          try store-zstd3-48bit-64k /mnt/store -zzstd,level=3 -E48bit -C65536
+          rm -f /tmp/store-zstd3-48bit-64k.erofs
+          try store-zstd9-48bit-64k /mnt/store -zzstd,level=9 -E48bit -C65536
+          rm -f /tmp/store-zstd9-48bit-64k.erofs
+          try store-zstd3-64k-ztail /mnt/store -zzstd,level=3 -C65536 -Eztailpacking
+          rm -f /tmp/store-zstd3-64k-ztail.erofs
           echo >> "$GITHUB_STEP_SUMMARY"
           cat results.txt >> "$GITHUB_STEP_SUMMARY"
