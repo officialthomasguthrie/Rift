@@ -1,6 +1,7 @@
 //! rift: the CLI. `host`, `ai`, `doctor`, `snapshot`, `backup` and `net` ask the same D-Bus
-//! services Lens uses, `clone` runs Vault as root, and `run --sandbox` runs Airlock. The other
-//! commands are only a line in the help so far.
+//! services Lens uses, `clone` runs Vault as root, `run --sandbox` runs Airlock, and `wallpaper`
+//! writes the owner's setting and Horizon's part of the config. The other commands are only a line
+//! in the help so far.
 
 mod ai;
 mod backup;
@@ -14,6 +15,7 @@ mod search;
 mod snapshot;
 mod text;
 mod version;
+mod wallpaper;
 
 use std::process::ExitCode;
 
@@ -61,6 +63,11 @@ const COMMANDS: &[(&str, &str, &str)] = &[
         "Check the drive, the host, and the services",
         "Phase 1",
     ),
+    (
+        "wallpaper",
+        "List the wallpapers, or set a photograph, a picture or a colour",
+        "Phase 1",
+    ),
     ("flash", "Write Rift onto a drive", "Phase 2"),
 ];
 
@@ -81,6 +88,7 @@ fn main() -> ExitCode {
         Some("clone") => clone::run(rest),
         Some("run") => run::run(rest),
         Some("net") => net::run(rest),
+        Some("wallpaper") => wallpaper::run(rest),
         Some(cmd) => {
             if let Some((name, what, phase)) = COMMANDS.iter().find(|(name, _, _)| *name == cmd) {
                 eprintln!("rift {name}: {what}. Not implemented yet ({phase}).");

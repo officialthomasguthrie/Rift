@@ -68,6 +68,7 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 - Lens is the notification server of the session, following the freedesktop.org notification specification, and shows the level when a volume or brightness key is pressed.
 - A drop-down terminal and a lock screen are built into the compositor.
 - The desktop is dark by default and can be switched to light. GTK, libadwaita and Qt applications follow the same setting in the Adwaita style with a blue accent, Noto Sans and the Adwaita icons and cursor, and draw their own title bars.
+- The wallpaper is one of nine NASA photographs included in the image, each with its source and license in a text file beside it, or any JPEG or PNG picture, or a flat colour. Horizon scales it to fill each display. The default is a photograph of the night side of Earth taken from the Orion spacecraft on Artemis II.
 - Firefox, Ghostty, Zed, Helix, zellij, fish and Podman are included in the image.
 - Flatpak is integrated with xdg-desktop-portal for applications installed from Flathub.
 
@@ -125,6 +126,7 @@ The `rift` command reaches the same services as the desktop.
 | `rift clone` | Write a complete second drive with a new key |
 | `rift run --sandbox` | Run a command inside a sandbox |
 | `rift net` | Turn network access off or on for a sandboxed application |
+| `rift wallpaper` | List the wallpapers, or set a photograph, a picture or a colour |
 
 ## System requirements
 

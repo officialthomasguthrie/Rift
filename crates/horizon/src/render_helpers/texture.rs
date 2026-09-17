@@ -91,6 +91,10 @@ impl<T: Texture> TextureBuffer<T> {
         &self.texture
     }
 
+    pub fn renderer_context_id(&self) -> &ContextId<T> {
+        &self.renderer_context_id
+    }
+
     pub fn texture_scale(&self) -> Scale<f64> {
         self.scale
     }

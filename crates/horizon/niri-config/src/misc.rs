@@ -64,6 +64,11 @@ impl Default for ScreenshotPath {
     }
 }
 
+/// A picture drawn under the windows of every workspace, scaled to fill each output. Without one,
+/// or while it is read, the workspace's background color shows.
+#[derive(knuffel::Decode, Debug, Default, Clone, PartialEq, Eq)]
+pub struct Wallpaper(#[knuffel(argument)] pub Option<String>);
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct HotkeyOverlay {
     pub skip_at_startup: bool,

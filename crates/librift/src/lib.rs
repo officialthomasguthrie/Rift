@@ -1,7 +1,7 @@
 //! Names, D-Bus addresses and paths shared by every Rift component, the OS commands Lens and
 //! the rift command run, the client side of the services on the system bus (Rift's own, and
 //! `NetworkManager`, `BlueZ`, `UPower` and logind for the system menu), the index for search by meaning,
-//! what the system calls itself, dark or light, and how a drive is written.
+//! what the system calls itself, dark or light and the wallpaper, and how a drive is written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
 //! which the asking side of the bus turns on, brings in zbus, and only the `disk` feature serde and
@@ -22,6 +22,7 @@ pub mod release;
 pub mod search;
 pub mod session;
 pub mod vault;
+pub mod wallpaper;
 
 /// Version of the Rift workspace this crate was built from.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

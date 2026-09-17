@@ -10,6 +10,8 @@
 let
   cfg = config.rift.horizon;
   horizon = self.packages.${pkgs.stdenv.hostPlatform.system}.horizon;
+  # the photographs the owner can pick from, each with its text file
+  wallpapers = pkgs.callPackage ../wallpapers { };
   # the console: a terminal that drops down from the top of the screen over whatever is open. the
   # bind shows or hides the window with this app id, and starts ghostty with it when there is none
   console = {
@@ -36,8 +38,9 @@ let
     "foreground = #d4d4d4"
     "window-theme = system"
   ];
-  # the part of the config the shell writes from the owner's theme when the session starts. horizon
-  # reads its config again when the file changes, and a file that is not there yet is no error
+  # the part of the config written from the owner's theme and wallpaper: by the shell when the
+  # session starts, and by rift wallpaper set. horizon reads its config again when the file changes,
+  # and a file that is not there yet is no error
   themePart = "~/.local/state/rift/horizon.kdl";
   # the system config. the binary still reads the niri paths: /etc/niri/config.kdl here, and a
   # file at ~/.config/niri/config.kdl replaces it for that user
@@ -66,6 +69,10 @@ let
         }
         default-column-width { proportion 0.5; }
     }
+
+    // the system's photograph, drawn under the windows of every workspace and scaled to fill each
+    // output. the background colour above shows while it is read, and when the owner picks a colour
+    wallpaper "${cfg.wallpaper}"
 
     // apps draw their own title bars, with the close button, the way gtk and firefox do on gnome.
     // every window is told it is tiled, so it draws square corners and no shadow of its own and
@@ -176,7 +183,7 @@ let
         Ctrl+Alt+Delete { quit; }
     }
 
-    // last, so the light theme's colours take the place of the ones above
+    // last, so the owner's theme and wallpaper take the place of the ones above
     include "${themePart}" optional=true
   '';
 in
@@ -191,7 +198,12 @@ in
     background = lib.mkOption {
       type = lib.types.str;
       default = "#242424";
-      description = "the desktop background, a flat neutral gray. the boot test looks for it";
+      description = "the desktop background, a flat neutral gray under the wallpaper. the boot test looks for it";
+    };
+    wallpaper = lib.mkOption {
+      type = lib.types.str;
+      default = "/run/current-system/sw/share/backgrounds/rift/${wallpapers.default}.jpg";
+      description = "the picture the desktop has until the owner picks another, by a path that stays the same across updates";
     };
     startup = lib.mkOption {
       type = lib.types.listOf (lib.types.listOf lib.types.str);
@@ -235,6 +247,8 @@ in
     services.displayManager.enable = false;
 
     environment.etc."niri/config.kdl".source = configFile;
+    # librift reads the system's wallpaper here when the owner has not picked one
+    environment.etc."rift/wallpaper".text = "${cfg.wallpaper}\n";
     systemd.user.tmpfiles.rules = [
       "d %h/.config/ghostty 0755 - - -"
       "f %h/.config/ghostty/config.ghostty 0644 - - - ${ghosttySettings}"
@@ -246,6 +260,7 @@ in
       pkgs.brightnessctl
       pkgs.adwaita-icon-theme
       pkgs.hicolor-icon-theme
+      wallpapers
     ];
 
     fonts.packages = [
@@ -289,8 +304,12 @@ in
       # with the gtk 3 platform theme, so this needs nothing more in the image
       QT_QPA_PLATFORMTHEME = "gtk3";
     };
-    # the icon theme lens looks names up in, and the one gtk apps fall back to
-    environment.pathsToLink = [ "/share/icons" ];
+    # the icon theme lens looks names up in, and the one gtk apps fall back to. the wallpapers go
+    # under /run/current-system/sw too, where a path to one outlives the store path it came in
+    environment.pathsToLink = [
+      "/share/icons"
+      "/share/backgrounds"
+    ];
     fonts.fontconfig.defaultFonts = {
       sansSerif = [ "Noto Sans" ];
       monospace = [ "DejaVu Sans Mono" ];

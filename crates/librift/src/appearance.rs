@@ -1,11 +1,15 @@
 //! Dark or light, which the owner picks. `~/.config/rift/theme` holds the word until Settings writes
 //! it. The shell and the lock screen read it themselves; the shell also hands it on when it starts, to
 //! GTK and libadwaita through the owner's dconf database and to Horizon through a part of its config
-//! that the system config includes from the owner's state directory.
+//! that the system config includes from the owner's state directory. That part carries the
+//! [`crate::wallpaper`] too, so whoever writes it writes both.
 
-use std::path::PathBuf;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
+
+use crate::wallpaper::{self, Wallpaper};
 
 /// Where the setting lives, under home.
 pub const SETTING: &str = ".config/rift/theme";
@@ -73,21 +77,47 @@ impl Theme {
         }
     }
 
-    /// The part of Horizon's config for this theme. Dark says nothing, since the system config is
-    /// dark; light has the light desktop and the light accent around the focused window.
+    /// The part of Horizon's config for this theme and this wallpaper. The system config is dark,
+    /// so dark adds nothing of its own; light has the light desktop and the light accent around the
+    /// focused window. A picture is named for Horizon to draw, with the theme's gray under it while
+    /// it is read; a colour takes the desktop's place and no picture is drawn.
     #[must_use]
-    pub fn horizon(self) -> String {
-        let head = format!(
-            "// written by lens when the session starts, from ~/{SETTING}: {}\n",
-            self.word()
+    pub fn horizon(self, wallpaper: &Wallpaper) -> String {
+        let mut part = format!(
+            "// written from ~/{SETTING} and ~/{}: {}, {}\n",
+            wallpaper::SETTING,
+            self.word(),
+            wallpaper.setting().replace('\n', " ")
         );
-        match self {
-            Self::Dark => head,
-            Self::Light => format!(
-                "{head}layout {{\n    background-color \"{LIGHT_BACKGROUND}\"\n    \
-                 focus-ring {{\n        active-color \"{LIGHT_ACCENT}\"\n    }}\n}}\n"
-            ),
+        let background = match wallpaper {
+            Wallpaper::Color(color) => Some(color.as_str()),
+            Wallpaper::Picture(_) => (self == Self::Light).then_some(LIGHT_BACKGROUND),
+        };
+        let accent = (self == Self::Light).then_some(LIGHT_ACCENT);
+        if background.is_some() || accent.is_some() {
+            part.push_str("layout {\n");
+            if let Some(background) = background {
+                let _ = writeln!(part, "    background-color \"{background}\"");
+            }
+            if let Some(accent) = accent {
+                let _ = writeln!(
+                    part,
+                    "    focus-ring {{\n        active-color \"{accent}\"\n    }}"
+                );
+            }
+            part.push_str("}\n");
         }
+        match wallpaper {
+            Wallpaper::Picture(path) => {
+                let _ = writeln!(
+                    part,
+                    "wallpaper \"{}\"",
+                    kdl_string(&path.display().to_string())
+                );
+            }
+            Wallpaper::Color(_) => part.push_str("wallpaper null\n"),
+        }
+        part
     }
 }
 
@@ -99,7 +129,7 @@ impl Theme {
 /// A sentence for each part that could not be written. The other part is still written.
 pub fn apply(theme: Theme) -> Result<(), String> {
     let mut failed = Vec::new();
-    if let Err(why) = write_horizon(theme) {
+    if let Err(why) = write_horizon(theme, &Wallpaper::read()) {
         failed.push(why);
     }
     for (key, value) in theme.gtk() {
@@ -114,28 +144,55 @@ pub fn apply(theme: Theme) -> Result<(), String> {
     }
 }
 
-fn home() -> Option<PathBuf> {
+pub(crate) fn home() -> Option<PathBuf> {
     env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
 }
 
-fn write_horizon(theme: Theme) -> Result<(), String> {
+/// Write the part of Horizon's config for a theme and a wallpaper. Horizon reads its config again
+/// when the file changes, so the desktop follows at once.
+///
+/// # Errors
+///
+/// A sentence when there is no home or the file could not be written.
+pub fn write_horizon(theme: Theme, wallpaper: &Wallpaper) -> Result<(), String> {
     let path = home()
         .ok_or("There is no home to write the compositor's part into.")?
         .join(HORIZON_PART);
-    let text = theme.horizon();
-    if fs::read_to_string(&path).is_ok_and(|old| old == text) {
+    write_beside(&path, &theme.horizon(wallpaper))
+}
+
+/// Write a file beside itself and rename it over the old one, so nothing ever reads half of it. A
+/// file that already says it is left alone.
+pub(crate) fn write_beside(path: &Path, text: &str) -> Result<(), String> {
+    if fs::read_to_string(path).is_ok_and(|old| old == text) {
         return Ok(());
     }
     if let Some(folder) = path.parent() {
         fs::create_dir_all(folder)
             .map_err(|e| format!("Could not make {}: {e}.", folder.display()))?;
     }
-    // written beside it and renamed over it, so Horizon never reads half a file
-    let fresh = path.with_extension("kdl.new");
+    let mut fresh = path.as_os_str().to_owned();
+    fresh.push(".new");
+    let fresh = PathBuf::from(fresh);
     fs::write(&fresh, text).map_err(|e| format!("Could not write {}: {e}.", fresh.display()))?;
-    fs::rename(&fresh, &path).map_err(|e| format!("Could not write {}: {e}.", path.display()))
+    fs::rename(&fresh, path).map_err(|e| format!("Could not write {}: {e}.", path.display()))
+}
+
+/// Text as it goes between the quotes of a KDL string.
+fn kdl_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn write_key(key: &str, value: &str) -> Result<(), String> {
@@ -185,17 +242,62 @@ mod tests {
         assert_eq!(Theme::Light.gtk()[1].1, "'Adwaita'");
     }
 
+    fn photo() -> Wallpaper {
+        Wallpaper::Picture(PathBuf::from(
+            "/run/current-system/sw/share/backgrounds/rift/earthset.jpg",
+        ))
+    }
+
     #[test]
-    fn the_compositor_part_is_a_comment_on_dark_and_the_light_colours_on_light() {
-        let dark = Theme::Dark.horizon();
-        assert_eq!(dark.lines().count(), 1);
-        assert!(dark.starts_with("// ") && dark.ends_with(": dark\n"));
-        let light = Theme::Light.horizon();
+    fn dark_with_a_picture_names_the_picture_alone() {
+        let dark = Theme::Dark.horizon(&photo());
+        assert_eq!(
+            dark,
+            "// written from ~/.config/rift/theme and ~/.config/rift/wallpaper: dark, \
+             /run/current-system/sw/share/backgrounds/rift/earthset.jpg\n\
+             wallpaper \"/run/current-system/sw/share/backgrounds/rift/earthset.jpg\"\n"
+        );
+    }
+
+    #[test]
+    fn light_has_its_desktop_and_accent_under_the_picture() {
+        let light = Theme::Light.horizon(&photo());
         assert!(light.contains("background-color \"#f2f1f0\""));
         assert!(light.contains("active-color \"#3584e4\""));
+        assert!(light.ends_with(
+            "wallpaper \"/run/current-system/sw/share/backgrounds/rift/earthset.jpg\"\n"
+        ));
         // every brace it opens it closes, or Horizon refuses the whole config
         assert_eq!(light.matches('{').count(), 2);
         assert_eq!(light.matches('}').count(), 2);
         assert!(light.is_ascii());
+    }
+
+    #[test]
+    fn a_colour_takes_the_desktops_place_and_no_picture_is_drawn() {
+        let gray = Wallpaper::Color("#242424".into());
+        let dark = Theme::Dark.horizon(&gray);
+        assert!(dark.lines().next().unwrap().ends_with(": dark, #242424"));
+        assert!(dark.contains("layout {\n    background-color \"#242424\"\n}\n"));
+        assert!(dark.ends_with("wallpaper null\n"));
+        let light = Theme::Light.horizon(&gray);
+        assert_eq!(light.matches("background-color").count(), 1);
+        assert!(light.contains("background-color \"#242424\""));
+        assert!(light.contains("active-color \"#3584e4\""));
+        assert!(light.ends_with("wallpaper null\n"));
+    }
+
+    #[test]
+    fn a_path_is_escaped_inside_its_quotes() {
+        assert_eq!(
+            kdl_string(r#"/home/rift/a "b"\c.jpg"#),
+            r#"/home/rift/a \"b\"\\c.jpg"#
+        );
+        let odd = Wallpaper::Picture(PathBuf::from("/home/rift/it's \"here\".png"));
+        let part = Theme::Dark.horizon(&odd);
+        assert!(
+            part.ends_with("wallpaper \"/home/rift/it's \\\"here\\\".png\"\n"),
+            "{part}"
+        );
     }
 }
