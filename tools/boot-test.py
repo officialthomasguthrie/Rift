@@ -870,6 +870,9 @@ def click(qmp_path, size, at, button="left"):
     # the compositor takes the motion first, then the button, or the click lands where the pointer was
     time.sleep(0.3)
     qmp(qmp_path, press(True), press(False))
+    # and the button before whatever moves the pointer next: iced reads the cursor once for the events
+    # that reach a surface together, so a leave that comes with the release takes the click away
+    time.sleep(0.3)
 
 
 class Tee:
@@ -2474,9 +2477,10 @@ def main():
             banner_right = width - NOTIFY_GAP * scale
             click(args.qmp, size, (round(banner_right - (NOTIFY_PAD + NOTIFY_CLOSE / 2) * scale),
                                    round(banner_top + (NOTIFY_PAD + NOTIFY_CLOSE / 2) * scale)))
-            point(args.qmp, size, away)
             if wait_for(20, lambda: notices("the state after the close button") == (0, 0)) is not True:
                 fail(f"the close button left {notices('the notifications')} (on screen, kept)")
+            # away only once the click did what it does, and off where the next one will stand
+            point(args.qmp, size, away)
             ok("the close button closed the critical notification")
 
             # a button for an action: notify-send waits for it and prints the action's key
@@ -2488,12 +2492,14 @@ def main():
             words_left = width - (NOTIFY_GAP + NOTIFY_WIDTH - NOTIFY_PAD - NOTIFY_ICON - NOTIFY_ICON_GAP) * scale
             click(args.qmp, size, (round(words_left + 40 * scale),
                                    round(banner_top + (sizes[0][1] - NOTIFY_PAD - NOTIFY_BUTTON / 2) * scale)))
-            point(args.qmp, size, away)
             if wait_for(20, lambda: "open" in without_console(run("cat /tmp/rift-action.txt", "what notify-send printed")[1]).split()) is not True:
                 fail(f"notify-send printed {without_console(run('cat /tmp/rift-action.txt', 'notify-send')[1]).strip()!r} "
                      "after a click on the button, expected the action's key")
             if wait_for(20, lambda: notices("the state after the button") == (0, 0)) is not True:
                 fail(f"the button left {notices('the notifications')} (on screen, kept)")
+            # a notification under the pointer keeps its time, so the pointer goes before the next one
+            point(args.qmp, size, away)
+            time.sleep(1)
             ok("a click on the notification's button told notify-send, and the notification closed")
 
             # a notification that is not critical goes after five seconds and stays in the list
