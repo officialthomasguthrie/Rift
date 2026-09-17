@@ -1739,7 +1739,8 @@ def main():
                             f"{printed.strip()[-600:]!r}")
         else:
             print(f"\nboot-test: {name} built and ran a program in {time.monotonic() - started:.0f}s", flush=True)
-    run("cd ~", "home again")
+    # what the builds left in home would go into the backups, snapshots and the clone of the steps after
+    run("cd ~; and rm -rf /tmp/first-tier ~/.cache/zig ~/.cache/go-build", "home again, without the build caches")
     _, output = run("systemctl is-active libvirtd | cat", "libvirtd before anything connects to it")
     if without_console(output).strip().splitlines()[-1:] != ["inactive"]:
         problems.append(f"libvirtd is {without_console(output).strip()!r} before anything connects, not inactive")

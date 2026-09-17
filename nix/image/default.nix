@@ -76,8 +76,8 @@ in
         };
       };
       # as small as what is in it, and the last partition, so the flash step can grow it to its 8G slot.
-      # erofs compresses it with zstd, in clusters of up to 64 KiB, so a read decompresses little
-      # more than it asked for
+      # erofs compresses it with zstd in clusters of up to 64 KiB, so a read decompresses little more
+      # than it asked for. higher levels save a few percent and take many times as long to build
       "20-store" = {
         repartConfig = {
           Type = "usr";
@@ -85,7 +85,7 @@ in
           Minimize = "best";
           SizeMaxBytes = "8G";
           Compression = "zstd";
-          CompressionLevel = "15";
+          CompressionLevel = "3";
         };
       };
     };
