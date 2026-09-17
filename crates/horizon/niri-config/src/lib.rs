@@ -76,6 +76,7 @@ pub struct Config {
     pub prefer_no_csd: bool,
     pub cursor: Cursor,
     pub screenshot_path: ScreenshotPath,
+    pub wallpaper: Wallpaper,
     pub clipboard: Clipboard,
     pub hotkey_overlay: HotkeyOverlay,
     pub config_notification: ConfigNotification,
@@ -241,6 +242,11 @@ where
                 "screenshot-path" => {
                     let part = knuffel::Decode::decode_node(node, ctx)?;
                     config.borrow_mut().screenshot_path = part;
+                }
+
+                "wallpaper" => {
+                    let part = knuffel::Decode::decode_node(node, ctx)?;
+                    config.borrow_mut().wallpaper = part;
                 }
 
                 "layout" => {
@@ -858,6 +864,8 @@ mod tests {
             }
 
             screenshot-path "~/Screenshots/screenshot.png"
+
+            wallpaper "~/Pictures/wallpaper.jpg"
 
             clipboard {
                 disable-primary
@@ -1519,6 +1527,11 @@ mod tests {
             screenshot_path: ScreenshotPath(
                 Some(
                     "~/Screenshots/screenshot.png",
+                ),
+            ),
+            wallpaper: Wallpaper(
+                Some(
+                    "~/Pictures/wallpaper.jpg",
                 ),
             ),
             clipboard: Clipboard {

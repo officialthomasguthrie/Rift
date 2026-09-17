@@ -173,6 +173,7 @@ use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
 use crate::ui::screen_transition::{self, ScreenTransition};
 use crate::ui::screenshot_ui::{OutputScreenshot, ScreenshotUi, ScreenshotUiRenderElement};
+use crate::ui::wallpaper::{self, Wallpaper};
 use crate::utils::scale::{closest_representable_scale, guess_monitor_scale};
 use crate::utils::spawning::{CHILD_DISPLAY, CHILD_ENV};
 use crate::utils::vblank_throttle::VBlankThrottle;
@@ -395,6 +396,7 @@ pub struct Niri {
     pub config_error_notification: ConfigErrorNotification,
     pub hotkey_overlay: HotkeyOverlay,
     pub exit_confirm_dialog: ExitConfirmDialog,
+    pub wallpaper: Wallpaper,
 
     pub window_mru_ui: WindowMruUi,
     pub pending_mru_commit: Option<PendingMruCommit>,
@@ -1624,6 +1626,8 @@ impl State {
             recent_windows_changed = true;
         }
 
+        let wallpaper_changed = self.niri.wallpaper.update_config(&config.wallpaper);
+
         if config.xwayland_satellite != old_config.xwayland_satellite {
             xwls_changed = true;
         }
@@ -1704,6 +1708,11 @@ impl State {
 
         if recent_windows_changed {
             self.niri.window_mru_ui.update_config();
+        }
+
+        if wallpaper_changed {
+            self.niri.refresh_wallpaper();
+            self.niri.queue_redraw_all();
         }
 
         if xwls_changed {
@@ -2452,6 +2461,7 @@ impl Niri {
         }
 
         let exit_confirm_dialog = ExitConfirmDialog::new(animation_clock.clone(), config.clone());
+        let wallpaper = Wallpaper::new(&config_.wallpaper, event_loop.clone());
 
         #[cfg(feature = "dbus")]
         let a11y = A11y::new(event_loop.clone());
@@ -2637,6 +2647,7 @@ impl Niri {
             config_error_notification,
             hotkey_overlay,
             exit_confirm_dialog,
+            wallpaper,
 
             window_mru_ui,
             pending_mru_commit: None,
@@ -2917,6 +2928,8 @@ impl Niri {
         let rv = self.output_state.insert(output.clone(), state);
         assert!(rv.is_none(), "output was already tracked");
 
+        self.refresh_wallpaper();
+
         // Must be last since it will call queue_redraw(output) which needs things to be filled-in.
         self.reposition_outputs(Some(&output));
     }
@@ -2946,6 +2959,7 @@ impl Niri {
         self.gamma_control_manager_state.output_removed(output);
 
         let state = self.output_state.remove(output).unwrap();
+        self.refresh_wallpaper();
 
         match state.redraw_state {
             RedrawState::Idle => (),
@@ -3009,6 +3023,23 @@ impl Niri {
         }
     }
 
+    /// Asks the wallpaper for a picture at the size of each output.
+    pub fn refresh_wallpaper(&mut self) {
+        let sizes: Vec<_> = self
+            .output_state
+            .keys()
+            .filter_map(wallpaper::physical_size)
+            .collect();
+        self.wallpaper.ensure(&sizes);
+    }
+
+    /// Takes a wallpaper picture its thread read, and draws it.
+    pub fn wallpaper_read(&mut self, read: wallpaper::Read) {
+        if self.wallpaper.finish(read) {
+            self.queue_redraw_all();
+        }
+    }
+
     pub fn output_resized(&mut self, output: &Output) {
         let output_size = output_size(output);
         let scale = output.current_scale();
@@ -3029,6 +3060,8 @@ impl Niri {
         }
 
         self.layout.update_output_size(output);
+
+        self.refresh_wallpaper();
 
         if let Some(state) = self.output_state.get_mut(output) {
             state.backdrop_buffer.resize(output_size);
@@ -4328,6 +4361,9 @@ impl Niri {
         // workspaces, since the interactively-moved window already has a focus ring.
         let focus_ring = !self.layout.interactive_move_is_moving_above_output(output);
 
+        // The wallpaper goes under the windows of each workspace, over its background color.
+        let wallpaper = self.wallpaper.render(ctx.renderer, output);
+
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();
         let zoom = mon.overview_zoom();
@@ -4414,6 +4450,9 @@ impl Niri {
 
             // We don't expect more than one workspace when render_above_top_layer().
             if let Some((ws, _geo)) = mon.workspaces_with_render_geo().next() {
+                if let Some(elem) = &wallpaper {
+                    push(elem.clone().into());
+                }
                 push(ws.render_background().into());
             }
         } else {
@@ -4459,6 +4498,9 @@ impl Niri {
                 push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
                 push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
 
+                if let Some(elem) = &wallpaper {
+                    process!(geo)(elem.clone());
+                }
                 process!(geo)(ws.render_background());
             }
         }
@@ -6559,6 +6601,9 @@ niri_render_elements! {
         >>>,
         RelocatedColor = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
             SolidColorRenderElement
+        >>>,
+        RelocatedWallpaper = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
+            PrimaryGpuTextureRenderElement
         >>>,
         Pointer = PointerRenderElements<R>,
         Wayland = WaylandSurfaceRenderElement<R>,

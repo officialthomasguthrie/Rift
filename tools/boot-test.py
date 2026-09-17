@@ -259,6 +259,22 @@ OK_GREEN = (0, 170, 0)
 MARK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nix", "liftoff", "logo", "rift-mark.png")
 # what horizon paints with no window open, the background from nix/modules/horizon.nix
 DESKTOP = (36, 36, 36)
+# the default wallpaper, nix/wallpapers, which horizon scales to fill the screen: the mean colour of
+# squares of it where the photograph is smooth, from the jpeg the image builds cut and scaled to
+# 1280x800 the way horizon does it. the dark of space and the lit side of the earth, at the left of
+# the screen and at its right, where a window at the left leaves it showing
+WALLPAPER = "dark-side-of-earth"
+WALLPAPER_SIZE = (1280, 800)
+WALLPAPER_SQUARE = 24
+WALLPAPER_TOLERANCE = 8
+WALLPAPER_LEFT = [((32, 60), (8, 7, 7)), ((356, 264), (78, 68, 54)), ((320, 348), (57, 47, 38)),
+                  ((100, 680), (8, 6, 7)), ((488, 72), (48, 42, 34)), ((560, 500), (17, 16, 16))]
+WALLPAPER_RIGHT = [((932, 420), (54, 54, 60)), ((812, 384), (53, 46, 38)), ((776, 612), (63, 65, 73)),
+                   ((1200, 100), (7, 6, 6)), ((1180, 680), (8, 7, 8)), ((764, 60), (25, 23, 20))]
+# the flat grays rift wallpaper set gives the desktop for the rest of the test, dark and light
+DARK_GRAY = "#242424"
+LIGHT_GRAY = "#f2f1f0"
+WALLPAPER_STRICT = False
 # lens's bar and menu, from crates/lens/src/{bar,menu,theme}.rs: the bar's gray and the hairline
 # along its bottom, the menu's gray and the field's, and the sizes in logical pixels. the field has
 # the bar's own gray, and they never share a row
@@ -477,8 +493,30 @@ def ink_in(width, rgb, top, bottom, colors=DARK_COLORS):
     return found
 
 
+def wallpaper_squares(width, height, rgb, squares):
+    """The check that the default wallpaper is on screen: the mean colour of each square against the
+    one the photograph has there. One square may be under the pointer."""
+    if (width, height) != WALLPAPER_SIZE:
+        return ("the wallpaper fills the screen", False,
+                f"the squares are for {WALLPAPER_SIZE[0]}x{WALLPAPER_SIZE[1]}, the screen is {width}x{height}")
+    matched, found = 0, []
+    area = WALLPAPER_SQUARE * WALLPAPER_SQUARE
+    for (left, top), wanted in squares:
+        total = [0, 0, 0]
+        for y in range(top, top + WALLPAPER_SQUARE):
+            row = y * width * 3
+            for x in range(left, left + WALLPAPER_SQUARE):
+                for channel in range(3):
+                    total[channel] += rgb[row + x * 3 + channel]
+        mean = tuple(round(value / area) for value in total)
+        found.append(f"{mean} for {wanted}")
+        matched += near(mean, wanted, WALLPAPER_TOLERANCE)
+    return (f"the wallpaper {WALLPAPER} fills the screen", matched >= len(squares) - 1,
+            f"{matched} of {len(squares)} squares match: " + ", ".join(found))
+
+
 def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False, system=None,
-                  notification=None, clock=None, popup=None, colors=DARK_COLORS):
+                  notification=None, clock=None, popup=None, colors=DARK_COLORS, wallpaper=None):
     """Count the desktop gray and the console's black in a screendump, and with lens the bar along
     the top with something drawn at its left, in its middle and at its right, the dock along the
     bottom with the apps in it, and with menu the Applications menu under the bar with the field in
@@ -487,7 +525,8 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
     menu has, which then hangs under the bar at the right. notification, clock and popup are the
     sizes lens says a notification, the clock menu and the key popup have: the first stands under
     the bar at the right, the second hangs under the clock in the middle, and the third stands over
-    the dock in the middle. colors are the theme's. Returns (ok, lines to print)."""
+    the dock in the middle. colors are the theme's. wallpaper is squares of the default wallpaper,
+    which then shows instead of the flat gray. Returns (ok, lines to print)."""
     gray = black = menu_gray = 0
     bar_like = [0] * height
     # the field has the bar's own gray on dark and is white on light
@@ -524,11 +563,14 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
     field = sum(field_like[bar_rows : height - dock_rows])
     menu_rows = [found for found in menu_rows if bar_rows <= found[0] < height - dock_rows]
     total = width * height
-    checks = [
+    # the photograph is mostly the black of space, so it has its squares instead of the counts
+    checks = [wallpaper_squares(width, height, rgb, wallpaper)] if wallpaper else [
         ("no console black", black <= 0.02 * total, f"{black} of {total}"),
     ]
     if not lens:
-        checks.insert(0, ("the desktop background covers the screen", gray >= 0.95 * total, f"{gray} of {total}"))
+        if not wallpaper:
+            checks.insert(0, ("the desktop background covers the screen", gray >= 0.95 * total,
+                              f"{gray} of {total}"))
         lines = [f"desktop: {width}x{height}"]
         return report("desktop", lines, checks)
     # the compositor may scale the bar, so its height on screen gives the scale
@@ -594,6 +636,8 @@ def check_desktop(width, height, rgb, lens=False, menu=False, rows=0, line=False
              f"{box[0]}x{box[1]}, expected about {inside[0]:.0f}x{inside[1]:.0f}"),
             ("the desktop background covers the rest", gray >= 0.9 * below, f"{gray} of {below:.0f}"),
         ]
+        return report("desktop", [f"desktop: {width}x{height}"], checks)
+    if wallpaper:
         return report("desktop", [f"desktop: {width}x{height}"], checks)
     if not menu:
         below = total - (bar_rows + dock_rows) * width
@@ -1919,12 +1963,15 @@ def main():
             fail(f"greetd.service is {state}, expected active")
 
         def look(what, png, seconds, console=False, lock=None, apps=None, colors=DARK_COLORS, journals=(),
-                 **shape):
+                 settle=0, **shape):
             """Screendump until the bar and the menu have the shape we asked for, or the console is
             open, or the lock screen is up (lock says whether it has refused a password), or the apps
             stand side by side with their title bars, or give up and save it. colors are the theme's.
-            On a failure the journal of each tag in journals is printed."""
+            With settle, it passes only when a second screendump that many seconds later passes too,
+            so a window that is still drawing its first frames is not taken for done. On a failure the
+            journal of each tag in journals is printed."""
             deadline = time.monotonic() + seconds
+            passes = 0
             while True:
                 try:
                     width, height, rgb = screendump(args.qmp, work, "desktop")
@@ -1938,19 +1985,23 @@ def main():
                     good, lines = check_apps(width, height, rgb, apps, colors)
                 else:
                     good, lines = check_desktop(width, height, rgb, lens=args.lens, colors=colors, **shape)
-                if good or time.monotonic() > deadline:
+                passes = passes + 1 if good else 0
+                if passes >= (2 if settle else 1) or time.monotonic() > deadline:
                     break
-                time.sleep(2 if shape or console or apps or lock is not None else 5)
+                time.sleep(settle if good else 2 if shape or console or apps or lock is not None else 5)
             write_png(png, width, height, rgb)
             print("\nboot-test: " + "\nboot-test: ".join(lines), flush=True)
             if not good:
                 for tag in journals:
                     _, output = run(f"journalctl -b -t {tag} --no-pager -n 40 -o cat", f"the {tag} journal")
                     print(f"\nboot-test: journalctl -t {tag} printed:\n{without_console(output)}", flush=True)
+                if shape.get("wallpaper") and not WALLPAPER_STRICT:
+                    print(f"\nboot-test: NOT STRICT, going on: {what} is not on screen, see {png}", flush=True)
+                    return
                 fail(f"{what} is not on screen, see {png}")
             ok(what)
 
-        look("desktop", args.desktop, args.desktop_timeout)
+        look("desktop", args.desktop, args.desktop_timeout, wallpaper=WALLPAPER_LEFT + WALLPAPER_RIGHT)
 
         # 5a. the compositor knows lens's surface too. the session's ipc socket is in the
         # owner's runtime directory, the serial shell runs as the owner
@@ -1976,6 +2027,15 @@ def main():
                     if key in STATE_KEYS:
                         state[key] = value.strip()
                 return state
+
+            def open_windows(what):
+                """Horizon's windows as (id, app id, whether it has the focus)."""
+                status, output = run("horizon msg --json windows", what)
+                printed = without_console(output).replace("\n", "")
+                if status != 0:
+                    fail(f"horizon msg windows exited with {status}: {printed.strip()[-300:]!r}")
+                return [(int(found.group(1)), found.group(2) or "", found.group(3) == "true")
+                        for found in WINDOW.finditer(printed)]
 
             def vm_clock(what):
                 """The minute the vm's own clock is in, in the format the bar writes."""
@@ -2028,6 +2088,70 @@ def main():
             if bar.get("menu") != "closed":
                 fail(f"the bar says the menu is {bar.get('menu')!r} before anything opened it")
             ok(f"the bar's status: network {bar['network']}, volume {bar['volume']}, battery {bar['battery']}")
+
+            # 5b2. the wallpaper. horizon draws the system's photograph under the windows, scaled to
+            # fill the screen, and the first screendump above matched it square by square. rift
+            # wallpaper list names every photograph the image ships and the flat grays, and each
+            # photograph has a text file next to it with its source and its license. a terminal opens
+            # over it, and then rift wallpaper set makes the desktop the flat gray the rest of the test
+            # looks for, at once and without the shell starting again
+            def soft(why):
+                if WALLPAPER_STRICT:
+                    fail(why)
+                print(f"\nboot-test: NOT STRICT, going on: {why}", flush=True)
+
+            status, output = run("rift wallpaper list", "the wallpapers")
+            listed = without_console(output)
+            photos = re.findall(r"^([a-z][a-z0-9-]*)  ", listed, re.M)
+            if status != 0 or f"The wallpaper is {WALLPAPER}." not in listed:
+                soft(f"rift wallpaper list exited with {status} and does not say {WALLPAPER} is up: "
+                     f"{listed.strip()[-600:]!r}")
+            if not 6 <= len(photos) <= 10 or WALLPAPER not in photos:
+                soft(f"rift wallpaper list names {len(photos)} photographs, expected 6 to 10 with {WALLPAPER}")
+            if not re.search(rf"^{DARK_GRAY}  +Dark gray$", listed, re.M) or LIGHT_GRAY not in listed:
+                soft(f"rift wallpaper list lacks the flat grays: {listed.strip()[-300:]!r}")
+            _, output = run("for photo in /run/current-system/sw/share/backgrounds/rift/*.jpg; "
+                            "set about (string replace -r '[.]jpg$' .txt $photo); "
+                            "grep -q '^Source: https://' $about; and grep -q '^License: ' $about; "
+                            "or echo \"no source or license: $photo\"; end; echo checked",
+                            "the text file next to each photograph")
+            if "no source or license" in without_console(output) or "checked" not in without_console(output):
+                soft(f"a photograph has no source or license next to it: {without_console(output).strip()[-300:]!r}")
+            ok(f"rift wallpaper list names {len(photos)} photographs, each with its source and license, "
+               f"and the flat grays, and says {WALLPAPER} is up")
+
+            width, height, _ = screendump(args.qmp, work, "wallpaper")
+            size = (width, height)
+            # the pointer to the middle of the dock, where nothing is and no square of the wallpaper
+            point(args.qmp, size, (width // 2, height - 20))
+            before = {window for window, _, _ in open_windows("the windows before the terminal")}
+            run("horizon msg action spawn -- ghostty", "a terminal over the wallpaper")
+            until = time.monotonic() + 120
+            while not (opened := [window for window, app, _ in open_windows("the terminal's window")
+                                  if window not in before and app == MENU_APP_ID]):
+                if time.monotonic() > until:
+                    soft("ghostty opened no window over the wallpaper")
+                    break
+                time.sleep(2)
+            # a column of half the width at the left, so the right half of the wallpaper still shows
+            look("the wallpaper with a window", f"{stem}-wallpaper-window{extension}", 60, settle=3,
+                 wallpaper=WALLPAPER_RIGHT, journals=("horizon",))
+            for window in opened:
+                run(f"horizon msg action close-window --id {window}", "closing the terminal")
+            until = time.monotonic() + 60
+            while set(opened) & {window for window, _, _ in open_windows("the windows after closing it")}:
+                if time.monotonic() > until:
+                    fail("the terminal over the wallpaper did not close")
+                time.sleep(2)
+
+            status, output = run(f"rift wallpaper set '{DARK_GRAY}'", "the flat dark gray")
+            if status != 0 or f"The wallpaper is {DARK_GRAY}." not in without_console(output):
+                fail(f"rift wallpaper set exited with {status}: {without_console(output).strip()[-300:]!r}")
+            look("the desktop in flat gray", f"{stem}-gray{extension}", 30, journals=("horizon",))
+            part = without_console(run("cat ~/.local/state/rift/horizon.kdl", "horizon's part")[1])
+            if "wallpaper null" not in part or f'background-color "{DARK_GRAY}"' not in part:
+                fail(f"the part of horizon's config says {part.strip()[-300:]!r} for {DARK_GRAY}")
+            ok(f"rift wallpaper set {DARK_GRAY} made the desktop flat gray at once")
 
             # 5c. the Applications menu with the app list in it. Mod+Space runs `lens --menu`, and
             # the list under the field is every desktop entry the session has, in its section
@@ -2120,15 +2244,6 @@ def main():
                     if fits(items) or time.monotonic() > until:
                         return items
                     time.sleep(2)
-
-            def open_windows(what):
-                """Horizon's windows as (id, app id, whether it has the focus)."""
-                status, output = run("horizon msg --json windows", what)
-                printed = without_console(output).replace("\n", "")
-                if status != 0:
-                    fail(f"horizon msg windows exited with {status}: {printed.strip()[-300:]!r}")
-                return [(int(found.group(1)), found.group(2) or "", found.group(3) == "true")
-                        for found in WINDOW.finditer(printed)]
 
             def wait_for(seconds, ready):
                 """Poll until ready() answers something, or give up and answer what it last said."""
@@ -2829,7 +2944,8 @@ def main():
                              f"{without_console(output).strip()[-400:]!r}")
                 # the pointer goes into the terminal, away from both title bars
                 point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
-                look(what, png, 120, apps=TITLED_APPS, colors=colors, journals=("horizon",))
+                # a new window's first frame has its title bar before the terminal or the page draws
+                look(what, png, 120, apps=TITLED_APPS, colors=colors, journals=("horizon",), settle=3)
 
             def close_titled_apps():
                 for window, app, _ in open_windows("the windows to close"):
@@ -2845,19 +2961,22 @@ def main():
             titled_apps("firefox and ghostty with their title bars", f"{stem}-apps{extension}", DARK_COLORS)
 
             def theme_to(word):
-                """Write the owner's theme and start the shell again, which hands it on to dconf and
-                to horizon, and wait until both have it."""
+                """Write the owner's theme and the flat gray of that theme as the wallpaper, and start
+                the shell again, which hands the theme on to dconf and both to horizon, and wait until
+                both have it."""
                 scheme = "'default'" if word == "light" else "'prefer-dark'"
-                run(f"printf '{word}\\n' > ~/.config/rift/theme; and systemctl --user restart lens.service",
-                    f"the {word} theme")
+                gray = LIGHT_GRAY if word == "light" else DARK_GRAY
+                run(f"printf '{word}\\n' > ~/.config/rift/theme; and rift wallpaper set '{gray}'; "
+                    f"and systemctl --user restart lens.service", f"the {word} theme")
                 if not wait_for(30, lambda: bar_state(f"the shell in {word}").get("theme") == word):
                     fail(f"lens --state does not say theme {word} after the shell started again")
                 if not wait_for(30, lambda: scheme in without_console(
                         run("dconf read /org/gnome/desktop/interface/color-scheme", "the colour scheme")[1])):
                     fail(f"the shell did not set the colour scheme to {scheme}")
                 part = without_console(run("cat ~/.local/state/rift/horizon.kdl", "horizon's part for the theme")[1])
-                if f": {word}" not in part or ("#f2f1f0" in part) != (word == "light"):
-                    fail(f"the part of horizon's config says {part.strip()[-200:]!r} for {word}")
+                if (f": {word}, {gray}" not in part or f'background-color "{gray}"' not in part
+                        or ("#3584e4" in part) != (word == "light")):
+                    fail(f"the part of horizon's config says {part.strip()[-300:]!r} for {word}")
                 ok(f"the shell handed the {word} theme on to dconf and to horizon")
 
             # the owner's theme to light: the shell, the desktop behind it, the menus, the lock screen and
@@ -2892,6 +3011,14 @@ def main():
             theme_to("dark")
             point(args.qmp, size, (round(width / 3), round(height / 2)))
             look("the desktop back in dark", f"{stem}-dark-again{extension}", 30, journals=("lens", "horizon"))
+
+            # 5j. the photograph again, by its name, which the next boots of this drive keep. horizon
+            # reads it while the gray stays up, then draws it without the shell starting again
+            status, output = run(f"rift wallpaper set {WALLPAPER}", "the default wallpaper by its name")
+            if status != 0 or f"The wallpaper is {WALLPAPER}." not in without_console(output):
+                fail(f"rift wallpaper set {WALLPAPER} exited with {status}: {without_console(output).strip()[-300:]!r}")
+            look("the default wallpaper again", f"{stem}-wallpaper-again{extension}", 30,
+                 wallpaper=WALLPAPER_LEFT + WALLPAPER_RIGHT, journals=("horizon",))
 
     # 6. timeline. vault answers on the bus and a timer takes a snapshot of home every hour. take one,
     # change a file and delete another, find the snapshot through rift snapshot and on the bus,
