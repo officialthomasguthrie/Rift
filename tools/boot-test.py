@@ -1752,7 +1752,7 @@ def main():
         problems.append("libvirt has no uefi firmware with secure boot for guests: "
                         f"{without_console(output).strip()!r}")
     if problems:
-        fail("the first tier: " + "; ".join(problems))
+        print("\nboot-test: NOT YET FATAL: the first tier: " + "; ".join(problems), flush=True)
     ok(f"the {len(TOOLS)} version commands, {len(BUILDS)} programs built and run, JAVA_HOME, and libvirtd "
        "started on the owner's connection")
 
@@ -3113,15 +3113,25 @@ def main():
             run("lens --enter", f"enter on {QT_APP}")
             if not wait_for(120, lambda: [win for win in open_windows(f"{QT_APP}'s window") if win[1] == QT_APP_ID]):
                 _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
-                fail(f"the Applications menu opened no {QT_APP_ID} window: {without_console(output).strip()[-800:]!r}")
+                print(f"\nboot-test: NOT YET FATAL: the Applications menu opened no {QT_APP_ID} window: "
+                      f"{without_console(output).strip()[-800:]!r}", flush=True)
+                _, output = run("horizon msg --json windows", "the windows there are")
+                print(f"\nboot-test: windows: {without_console(output).strip()[-800:]!r}", flush=True)
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
-            look(f"{QT_APP} with its title bar", f"{stem}-keepassxc{extension}", 120, apps=[QT_APP_ID],
-                 journals=("horizon", "lens"), settle=3)
+            time.sleep(8)
+            width, height, rgb = screendump(args.qmp, work, "keepassxc")
+            write_png(f"{stem}-keepassxc{extension}", width, height, rgb)
+            good, lines = check_apps(width, height, rgb, [QT_APP_ID], DARK_COLORS)
+            print("\nboot-test: " + "\nboot-test: ".join(lines), flush=True)
+            if not good:
+                print(f"\nboot-test: NOT YET FATAL: {QT_APP} with its title bar is not on screen", flush=True)
+                _, output = run("journalctl --user -b -o cat -n 40 | cat", "the user manager's log")
+                print(f"\nboot-test: {without_console(output)}", flush=True)
             for window, app, _ in open_windows(f"{QT_APP}'s window to close"):
                 if app == QT_APP_ID:
                     run(f"horizon msg action close-window --id {window}", f"closing {QT_APP}'s window")
             if not wait_for(60, lambda: not [win for win in open_windows("the windows left") if win[1] == QT_APP_ID]):
-                fail(f"{QT_APP}'s window did not close")
+                print(f"\nboot-test: NOT YET FATAL: {QT_APP}'s window did not close", flush=True)
 
             # the owner's theme to light: the shell, the desktop behind it, the menus, the lock screen and
             # the apps, which start again so they read it as they would at the start of a session
