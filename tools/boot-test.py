@@ -405,7 +405,7 @@ TOOLS = [
     ("lldb --version", r"^lldb version \d"),
     ("valgrind --version", r"^valgrind-\d"),
     ("strace -V", r"^strace -- version \d"),
-    ("ltrace -V", r"^ltrace version \d"),
+    ("ltrace -V", r"^ltrace 0\.\d+"),
     ("perf --version", r"^perf version \d"),
     ("fzf --version", r"^\d+\.\d+"),
     ("bat --version", r"^bat \d"),
@@ -417,7 +417,7 @@ TOOLS = [
     ("sensors -v", r"^sensors version \d"),
     ("smartctl --version", r"^smartctl \d"),
     ("powertop --version", r"PowerTOP version"),
-    ("iotop --version", r"^iotop(-c)? .*\b1\.\d+"),
+    ("iotop --version", r"iotop-c 1\.\d+"),
     ("nvtop --version", r"^nvtop version \d"),
     ("rustc --version", r"^rustc 1\.\d+"),
     ("cargo --version", r"^cargo 1\.\d+"),
@@ -444,7 +444,8 @@ TOOLS = [
     ("javac -version 2>&1", r"^javac 25"),
 ]
 # a program for each compiler of the first tier: the command line that writes, builds and runs it in the
-# folder the test makes, and the line it prints. fish's printf with %s writes each word as a line
+# folder the test makes, and the line it prints. fish's printf with %s writes each word as a line. zig
+# draws its progress on a terminal, so its output goes through cat, which is not one
 BUILDS = [
     ("gcc", r'''printf '%s\n' '#include <stdio.h>' 'int main(void) { puts("c runs"); return 0; }' > hello.c; '''
             r'''and gcc -o hello-gcc hello.c; and ./hello-gcc''', "c runs"),
@@ -458,7 +459,7 @@ BUILDS = [
                         r'''and cmake -G Ninja -S . -B build; and cmake --build build; and ./build/hello''', "c runs"),
     ("make", r'''printf 'hello-make: hello.c\n\tcc -o hello-make hello.c\n' > Makefile; '''
              r'''and make hello-make; and ./hello-make''', "c runs"),
-    ("zig cc", r'''zig cc -o hello-zig hello.c; and ./hello-zig''', "c runs"),
+    ("zig cc", r'''zig cc -o hello-zig hello.c 2>&1 | cat; and ./hello-zig''', "c runs"),
     ("rustc", r'''printf '%s\n' 'fn main() { println!("rust runs"); }' > hello.rs; '''
               r'''and rustc -o hello-rs hello.rs; and ./hello-rs''', "rust runs"),
     ("go", r'''printf '%s\n' 'package main' 'import "fmt"' 'func main() { fmt.Println("go runs") }' > hello.go; '''
@@ -1734,7 +1735,8 @@ def main():
         started = time.monotonic()
         status, output = run(command, f"a program built with {name}")
         printed = "\n".join(printed_line.strip() for printed_line in without_console(output).splitlines())
-        if status != 0 or line not in printed.splitlines():
+        # a line can start with what is left of a program's own terminal codes
+        if status != 0 or not any(printed_line.endswith(line) for printed_line in printed.splitlines()):
             problems.append(f"the program built with {name} exited with {status} and printed "
                             f"{printed.strip()[-600:]!r}")
         else:
