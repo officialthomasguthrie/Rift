@@ -16,6 +16,8 @@ path = "src/main.rs"
 # the text on the screen, in the Noto Sans the system has
 ab_glyph = "0.2.32"
 fontdb = "0.23.0"
+# dark or light, from the owner's setting
+librift.workspace = true
 # logind's Lock signal for the session, on the system bus
 zbus = { version = "5.18", default-features = false, features = ["async-io", "blocking-api"] }
 

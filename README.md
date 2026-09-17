@@ -67,6 +67,7 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 - Lens, the desktop shell, draws a top bar with a clock menu that holds a calendar, the notifications received so far and a Do not disturb switch, and a system menu for sound, brightness, wired and Wi-Fi networks, Bluetooth, the battery and the session; an applications menu that lists installed applications by category, with a search field that also runs system commands, evaluates Nushell pipelines and passes requests written in plain language to the local assistant; and a dock that holds pinned and running applications and the workspaces.
 - Lens is the notification server of the session, following the freedesktop.org notification specification, and shows the level when a volume or brightness key is pressed.
 - A drop-down terminal and a lock screen are built into the compositor.
+- The desktop is dark by default and can be switched to light. GTK, libadwaita and Qt applications follow the same setting in the Adwaita style with a blue accent, Noto Sans and the Adwaita icons and cursor, and draw their own title bars.
 - Firefox, Ghostty, Zed, Helix, zellij, fish and Podman are included in the image.
 - Flatpak is integrated with xdg-desktop-portal for applications installed from Flathub.
 

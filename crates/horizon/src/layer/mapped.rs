@@ -8,7 +8,7 @@ use smithay::wayland::compositor::{remove_pre_commit_hook, HookId};
 use smithay::wayland::shell::wlr_layer::{ExclusiveZone, Layer};
 
 use super::ResolvedLayerRules;
-use crate::animation::Clock;
+use crate::animation::{Animation, Clock};
 use crate::layout::shadow::Shadow;
 use crate::niri_render_elements;
 use crate::render_helpers::background_effect::BackgroundEffectElement;
@@ -53,6 +53,9 @@ pub struct MappedLayer {
 
     /// Clock for driving animations.
     clock: Clock,
+
+    /// The fade in after the surface mapped, when its rules ask for one.
+    open_animation: Option<Animation>,
 }
 
 niri_render_elements! {
@@ -79,6 +82,10 @@ impl MappedLayer {
         shadow_config.on = false;
         shadow_config.merge_with(&rules.shadow);
 
+        let open_animation = rules
+            .animate_open
+            .then(|| Animation::new(clock.clone(), 0., 1., 0., config.animations.layer_open.0));
+
         Self {
             surface,
             pre_commit_hook,
@@ -90,6 +97,7 @@ impl MappedLayer {
             shadow: Shadow::new(shadow_config),
             blur_config: config.blur,
             clock,
+            open_animation,
         }
     }
 
@@ -121,13 +129,25 @@ impl MappedLayer {
         self.block_out_buffer.resize(size);
 
         let radius = self.rules.geometry_corner_radius.unwrap_or_default();
+        let alpha = self.open_alpha();
         // FIXME: is_active based on keyboard focus?
         self.shadow
-            .update_render_elements(size, true, radius, self.scale, 1.);
+            .update_render_elements(size, true, radius, self.scale, alpha);
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
         self.rules.baba_is_float
+            || self
+                .open_animation
+                .as_ref()
+                .is_some_and(|anim| !anim.is_done())
+    }
+
+    /// How opaque the surface is while it fades in, and 1 after that.
+    fn open_alpha(&self) -> f32 {
+        self.open_animation
+            .as_ref()
+            .map_or(1., |anim| anim.clamped_value().clamp(0., 1.) as f32)
     }
 
     pub fn surface(&self) -> &LayerSurface {
@@ -193,7 +213,7 @@ impl MappedLayer {
         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
-        let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.);
+        let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.) * self.open_alpha();
 
         let bob_offset = self.bob_offset();
         let location = location + bob_offset;
@@ -268,7 +288,7 @@ impl MappedLayer {
         }
 
         let scale = Scale::from(self.scale);
-        let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.);
+        let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.) * self.open_alpha();
 
         let bob_offset = self.bob_offset();
         let location = location + bob_offset;

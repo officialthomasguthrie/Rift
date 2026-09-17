@@ -1,5 +1,6 @@
 //! What the lock screen draws, in software, into a `wl_shm` buffer: the gray ground, the owner's
-//! name, the password field with a dot for each character typed, and the sentence under it.
+//! name, the password field with a dot for each character typed, and the sentence under it, in the
+//! dark or the light colours of the shell.
 //!
 //! Positions and colour channels are worked out as floats and clamped to the buffer before they
 //! become integers again, which is what the casts below rely on.
@@ -11,6 +12,7 @@
 )]
 
 use ab_glyph::{Font, FontVec, GlyphId, PxScale, ScaleFont, VariableFont, point};
+use librift::appearance::Theme;
 
 use crate::entry::Status;
 
@@ -18,18 +20,51 @@ use crate::entry::Status;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
-/// The ground, the dark gray of the boot screen.
-pub const BACKGROUND: Rgb = Rgb(0x1e, 0x1e, 0x1e);
-/// The inside of the field, the gray of lens's field.
-pub const FIELD: Rgb = Rgb(0x2e, 0x2e, 0x2e);
-/// The owner's name and the dots.
-pub const TEXT: Rgb = Rgb(0xe6, 0xe6, 0xe6);
-/// The placeholder, and the sentence while PAM checks.
-pub const DIM: Rgb = Rgb(0x8c, 0x8c, 0x8c);
-/// The focus ring around the field, the one accent on the screen.
-pub const ACCENT: Rgb = Rgb(0x78, 0xae, 0xed);
-/// The sentence for a password that was refused.
-pub const ERROR: Rgb = Rgb(0xe0, 0x6d, 0x6d);
+/// The colours of one theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    /// The ground, the gray of the shell's bar.
+    pub ground: Rgb,
+    /// The inside of the field.
+    pub field: Rgb,
+    /// The owner's name and the dots.
+    pub text: Rgb,
+    /// The placeholder, and the sentence while PAM checks.
+    pub dim: Rgb,
+    /// The focus ring around the field, the one accent on the screen.
+    pub accent: Rgb,
+    /// The sentence for a password that was refused.
+    pub error: Rgb,
+}
+
+/// Dark: the field is lighter than the ground, the way a dark entry sits on a dark window.
+pub const DARK: Palette = Palette {
+    ground: Rgb(0x1e, 0x1e, 0x1e),
+    field: Rgb(0x2e, 0x2e, 0x2e),
+    text: Rgb(0xe6, 0xe6, 0xe6),
+    dim: Rgb(0x8c, 0x8c, 0x8c),
+    accent: Rgb(0x78, 0xae, 0xed),
+    error: Rgb(0xe0, 0x6d, 0x6d),
+};
+
+/// Light: a white field on the light gray of the bar, with the darker blue.
+pub const LIGHT: Palette = Palette {
+    ground: Rgb(0xeb, 0xeb, 0xeb),
+    field: Rgb(0xff, 0xff, 0xff),
+    text: Rgb(0x1f, 0x1f, 0x1f),
+    dim: Rgb(0x6b, 0x6b, 0x6b),
+    accent: Rgb(0x35, 0x84, 0xe4),
+    error: Rgb(0xc0, 0x1c, 0x28),
+};
+
+/// The colours of a theme.
+#[must_use]
+pub const fn palette(theme: Theme) -> Palette {
+    match theme {
+        Theme::Dark => DARK,
+        Theme::Light => LIGHT,
+    }
+}
 
 // sizes in logical pixels, like lens's panel
 const TEXT_SIZE: f32 = 14.0;
@@ -276,11 +311,14 @@ pub struct View<'a> {
     pub typed: usize,
     /// What the line under the field says.
     pub status: Status,
+    /// The colours to draw it in.
+    pub colors: Palette,
 }
 
 /// Draws the lock screen for one output onto `canvas` at an integer `scale`.
 pub fn paint(canvas: &mut Canvas<'_>, fonts: &Fonts, view: &View<'_>, scale: u32) {
-    canvas.fill(BACKGROUND);
+    let colors = view.colors;
+    canvas.fill(colors.ground);
     let layout = layout(canvas.width as u32, canvas.height as u32, scale);
     let scale = scale.max(1) as f32;
     let size = TEXT_SIZE * scale;
@@ -288,11 +326,17 @@ pub fn paint(canvas: &mut Canvas<'_>, fonts: &Fonts, view: &View<'_>, scale: u32
 
     if let Some(bold) = &fonts.bold {
         let x = (center - text_width(bold, size, view.name) / 2.0).round();
-        canvas.text(bold, size, x, layout.name, TEXT, view.name);
+        canvas.text(bold, size, x, layout.name, colors.text, view.name);
     }
 
     let field = layout.field;
-    canvas.field(field, RADIUS * scale, FIELD, ACCENT, RING * scale);
+    canvas.field(
+        field,
+        RADIUS * scale,
+        colors.field,
+        colors.accent,
+        RING * scale,
+    );
     let middle = field.y + field.height / 2.0;
     if view.typed == 0 {
         if let Some(regular) = &fonts.regular {
@@ -302,7 +346,7 @@ pub fn paint(canvas: &mut Canvas<'_>, fonts: &Fonts, view: &View<'_>, scale: u32
                 size,
                 field.x + PADDING * scale,
                 baseline,
-                DIM,
+                colors.dim,
                 "Password",
             );
         }
@@ -310,12 +354,16 @@ pub fn paint(canvas: &mut Canvas<'_>, fonts: &Fonts, view: &View<'_>, scale: u32
         let room = ((field.width - 2.0 * PADDING * scale) / (DOT_STEP * scale)) as usize;
         for i in 0..view.typed.min(room) {
             let cx = field.x + (PADDING + DOT + i as f32 * DOT_STEP) * scale;
-            canvas.dot(cx, middle, DOT * scale, TEXT);
+            canvas.dot(cx, middle, DOT * scale, colors.text);
         }
     }
 
     if let (Some(sentence), Some(regular)) = (view.status.sentence(), &fonts.regular) {
-        let color = if view.status.is_error() { ERROR } else { DIM };
+        let color = if view.status.is_error() {
+            colors.error
+        } else {
+            colors.dim
+        };
         let x = (center - text_width(regular, size, sentence) / 2.0).round();
         canvas.text(regular, size, x, layout.sentence, color, sentence);
     }
@@ -326,11 +374,16 @@ mod tests {
     use super::*;
 
     fn painted(width: u32, height: u32, typed: usize, scale: u32) -> Vec<u8> {
+        painted_in(DARK, width, height, typed, scale)
+    }
+
+    fn painted_in(colors: Palette, width: u32, height: u32, typed: usize, scale: u32) -> Vec<u8> {
         let mut pixels = vec![0; width as usize * height as usize * 4];
         let view = View {
             name: "Rift owner",
             typed,
             status: Status::Typing,
+            colors,
         };
         paint(
             &mut Canvas::new(&mut pixels, width, height),
@@ -381,29 +434,41 @@ mod tests {
 
     #[test]
     fn the_ground_the_field_and_its_ring() {
-        let mut pixels = painted(1280, 800, 0, 1);
-        let canvas = Canvas::new(&mut pixels, 1280, 800);
-        assert_eq!(canvas.pixel(0, 0), Some(BACKGROUND));
-        assert_eq!(canvas.pixel(1279, 799), Some(BACKGROUND));
-        assert_eq!(canvas.pixel(640, 400), Some(FIELD));
-        assert_eq!(canvas.pixel(640, 384), Some(ACCENT));
-        assert_eq!(canvas.pixel(640, 415), Some(ACCENT));
-        assert_eq!(canvas.pixel(640, 383), Some(BACKGROUND));
-        // the inside of the field minus the ring, and the ring along its straight edges
-        let field = count(&mut pixels, 1280, 800, FIELD);
-        assert!(
-            (276 * 28 - 100..=276 * 28).contains(&field),
-            "{field} field pixels"
-        );
-        let ring = count(&mut pixels, 1280, 800, ACCENT);
-        assert!((1000..=1250).contains(&ring), "{ring} ring pixels");
+        for colors in [DARK, LIGHT] {
+            let mut pixels = painted_in(colors, 1280, 800, 0, 1);
+            let canvas = Canvas::new(&mut pixels, 1280, 800);
+            assert_eq!(canvas.pixel(0, 0), Some(colors.ground));
+            assert_eq!(canvas.pixel(1279, 799), Some(colors.ground));
+            assert_eq!(canvas.pixel(640, 400), Some(colors.field));
+            assert_eq!(canvas.pixel(640, 384), Some(colors.accent));
+            assert_eq!(canvas.pixel(640, 415), Some(colors.accent));
+            assert_eq!(canvas.pixel(640, 383), Some(colors.ground));
+            // the inside of the field minus the ring, and the ring along its straight edges
+            let field = count(&mut pixels, 1280, 800, colors.field);
+            assert!(
+                (276 * 28 - 100..=276 * 28).contains(&field),
+                "{field} field pixels"
+            );
+            let ring = count(&mut pixels, 1280, 800, colors.accent);
+            assert!((1000..=1250).contains(&ring), "{ring} ring pixels");
+        }
+    }
+
+    #[test]
+    fn each_theme_has_its_palette() {
+        assert_eq!(palette(Theme::Dark), DARK);
+        assert_eq!(palette(Theme::Light), LIGHT);
+        // the boot test tells the lock screen from the desktop by the ground: #242424 on dark and
+        // #f2f1f0 on light
+        assert_ne!(DARK.ground, Rgb(0x24, 0x24, 0x24));
+        assert!(LIGHT.ground.0.abs_diff(0xf2) >= 6 && LIGHT.ground.2.abs_diff(0xf0) >= 4);
     }
 
     #[test]
     fn a_dot_for_each_character_until_the_field_is_full() {
         let dots = |typed| {
             let mut pixels = painted(1280, 800, typed, 1);
-            count(&mut pixels, 1280, 800, TEXT)
+            count(&mut pixels, 1280, 800, DARK.text)
         };
         assert_eq!(dots(0), 0);
         let one = dots(1);
@@ -419,6 +484,7 @@ mod tests {
             name: "",
             typed: 5,
             status: Status::Refused,
+            colors: DARK,
         };
         paint(
             &mut Canvas::new(&mut pixels, 1280, 800),
@@ -428,7 +494,7 @@ mod tests {
         );
         assert_eq!(
             Canvas::new(&mut pixels, 1280, 800).pixel(0, 9),
-            Some(BACKGROUND)
+            Some(DARK.ground)
         );
     }
 }

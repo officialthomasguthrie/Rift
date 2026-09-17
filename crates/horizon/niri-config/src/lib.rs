@@ -1670,6 +1670,17 @@ mod tests {
                         ),
                     },
                 ),
+                layer_open: LayerOpenAnim(
+                    Animation {
+                        off: false,
+                        kind: Easing(
+                            EasingParams {
+                                duration_ms: 150,
+                                curve: EaseOutQuad,
+                            },
+                        ),
+                    },
+                ),
             },
             blur: Blur {
                 off: false,
@@ -1961,6 +1972,7 @@ mod tests {
                     geometry_corner_radius: None,
                     place_within_backdrop: None,
                     baba_is_float: None,
+                    animate_open: None,
                     background_effect: BackgroundEffectRule {
                         xray: None,
                         blur: None,
