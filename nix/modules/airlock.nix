@@ -57,8 +57,22 @@ in
           pkgs.bubblewrap
           pkgs.nftables
         ];
-        # host disks are never auto-mounted. orbit mounts them read-only on request
-        services.udisks2.enable = lib.mkForce false;
+        # host disks are never auto-mounted, and nothing in the session writes to one. udisks runs,
+        # so the disk utility can show every disk and its counters, and every action it offers on a
+        # disk the host boots from is refused here, swap on one with it. orbit mounts a host disk
+        # read-only on request, and that is the one way in
+        security.polkit.extraConfig = ''
+          polkit.addRule(function (action, subject) {
+            var id = action.id;
+            if (id.indexOf("org.freedesktop.udisks2.") != 0) {
+              return;
+            }
+            if (id.lastIndexOf("-system") == id.length - 7
+                || id == "org.freedesktop.udisks2.manage-swapspace") {
+              return polkit.Result.NO;
+            }
+          });
+        '';
         services.dbus.packages = [ policy ];
 
         systemd.services.airlock = {
