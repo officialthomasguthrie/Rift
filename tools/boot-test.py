@@ -400,19 +400,21 @@ TITLED_APPS = ["firefox", "com.mitchellh.ghostty"]
 QT_APP = "KeePassXC"
 QT_APP_ID = "keepassxc"
 # the everyday apps, each started from the Applications menu by the name the list shows: the name to
-# type, what the app id of its window has in it whatever case it is in, and what its screendump is
-# called. an app id is the application's own name for most of them and the program's name for the
-# disk utility, so these are the part they share
+# type, what the app id of its window has in it whatever case it is in, what its screendump is called,
+# and how much of its title bar one gray covers. an app id is the application's own name for most of
+# them and the program's name for the disk utility, so these are the part they share
 BASIC_APPS = [
-    ("Image Viewer", "loupe", "loupe"),
-    ("Document Viewer", "papers", "papers"),
-    ("Video Player", "showtime", "showtime"),
-    ("Audio Player", "decibels", "decibels"),
-    ("Calculator", "calculator", "calculator"),
-    ("File Roller", "roller", "file-roller"),
-    ("Disks", "disk", "disks"),
-    ("Disk Usage Analyzer", "baobab", "baobab"),
-    ("Characters", "characters", "characters"),
+    ("Image Viewer", "loupe", "loupe", 0.4),
+    ("Document Viewer", "papers", "papers", 0.4),
+    ("Video Player", "showtime", "showtime", 0.4),
+    ("Audio Player", "decibels", "decibels", 0.4),
+    ("Calculator", "calculator", "calculator", 0.4),
+    ("File Roller", "roller", "file-roller", 0.4),
+    # the disk utility is the one of the nine still written for gtk 3, whose title bar is a gradient
+    # of grays next to a flat one over the sidebar, so no single gray covers much of it
+    ("Disks", "disk", "disks", 0.2),
+    ("Disk Usage Analyzer", "baobab", "baobab", 0.4),
+    ("Characters", "characters", "characters", 0.4),
 ]
 # the app a file of each kind opens with, as `xdg-mime query default` prints it
 DEFAULT_APPS = [
@@ -1057,12 +1059,12 @@ def most_common(rgb, width, left, right, top, bottom):
     return tuple(color), found / sum(counts.values())
 
 
-def check_apps(width, height, rgb, apps, colors=DARK_COLORS):
+def check_apps(width, height, rgb, apps, colors=DARK_COLORS, share_wanted=0.4):
     """Find windows side by side between the bar and the dock, one for each of apps from left to right,
     each with a title bar it draws itself: a band along its top in one neutral gray of the theme that
-    is not the desktop's, with something drawn in the right end of it, where the close button is. The
-    desktop's gray is matched exactly: the dark window gray of GTK and Firefox, #222226, is two steps
-    from it. Returns (ok, lines to print)."""
+    is not the desktop's, over share_wanted of the band, with something drawn in the right end of it,
+    where the close button is. The desktop's gray is matched exactly: the dark window gray of GTK and
+    Firefox, #222226, is two steps from it. Returns (ok, lines to print)."""
     bar_rows, dock_rows = bar_and_dock(width, height, bar_gray_rows(width, height, rgb, colors))
     scale = bar_rows / BAR_HEIGHT if bar_rows else 1
     ink = ink_in(width, rgb, 0, bar_rows, colors)
@@ -1121,7 +1123,7 @@ def check_apps(width, height, rgb, apps, colors=DARK_COLORS):
                     close += 1
         checks += [
             (f"{app}'s title bar is one gray of the theme along the top of its window",
-             neutral and shade and share >= 0.4 and not near(fill, colors.desktop, 1),
+             neutral and shade and share >= share_wanted and not near(fill, colors.desktop, 1),
              f"from x {left} to {right}, top {top}: #{bytes(fill).hex()} over {share:.0%} of its first rows"),
             (f"{app}'s title bar has its close button at the right", close >= 12 * scale * scale,
              f"{close} pixels drawn in its right end"),
@@ -2140,7 +2142,7 @@ def main():
             fail(f"greetd.service is {state}, expected active")
 
         def look(what, png, seconds, console=False, lock=None, apps=None, colors=DARK_COLORS, journals=(),
-                 settle=0, **shape):
+                 settle=0, share=0.4, **shape):
             """Screendump until the bar and the menu have the shape we asked for, or the console is
             open, or the lock screen is up (lock says whether it has refused a password), or the apps
             stand side by side with their title bars, or give up and save it. colors are the theme's.
@@ -2159,7 +2161,7 @@ def main():
                 elif console:
                     good, lines = check_console(width, height, rgb)
                 elif apps:
-                    good, lines = check_apps(width, height, rgb, apps, colors)
+                    good, lines = check_apps(width, height, rgb, apps, colors, share)
                 else:
                     good, lines = check_desktop(width, height, rgb, lens=args.lens, colors=colors, **shape)
                 passes = passes + 1 if good else 0
@@ -3198,11 +3200,11 @@ def main():
                 if not wait_for(60, lambda: not app_windows(app_id, "the windows left")):
                     fail(f"{name}'s window did not close")
 
-            for name, app_id, png in BASIC_APPS:
+            for name, app_id, png, share in BASIC_APPS:
                 open_from_menu(name, app_id)
                 point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
                 look(f"{name} with its title bar", f"{stem}-{png}{extension}", 120, apps=[app_id],
-                     journals=("horizon", "lens"), settle=3)
+                     journals=("horizon", "lens"), settle=3, share=share)
                 close_app(name, app_id)
             ok(f"the Applications menu opened {len(BASIC_APPS)} everyday apps, each with the title bar it "
                "draws itself, and each closed again")
