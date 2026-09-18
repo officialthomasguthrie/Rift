@@ -65,7 +65,4 @@
     "vm.watermark_scale_factor" = 125;
     "vm.page-cluster" = 0;
   };
-
-  # never touch the host's firmware
-  services.fwupd.enable = false;
 }

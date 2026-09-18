@@ -76,11 +76,18 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 The image includes the following software, so a new drive is usable without a network connection.
 
 - Firefox, Ghostty, Zed, Helix, Neovim, KeePassXC and virt-manager, with fish, bash, Nushell and zellij.
-- GNOME's viewers and utilities for everyday files: Loupe for pictures, Papers for documents, Showtime for video, Decibels for sound, Calculator, File Roller for archives, Disks, Disk Usage Analyzer and Characters.
+- GNOME's viewers and utilities for everyday files: Loupe for pictures, Papers for documents, Showtime for video, Decibels for sound, Calculator, File Roller for archives, Disks, Disk Usage Analyzer, Characters, Camera and Document Scanner.
 - Rootless Podman, which also answers to `docker`, and QEMU with KVM through libvirt, with UEFI firmware and a software TPM for guests.
 - Compilers and runtimes for Rust, C and C++ (GCC, Clang and LLVM, with CMake, Ninja and Make), Python, Node.js, Bun, Go, Zig and Java.
 - gdb, LLDB, Valgrind, strace, ltrace and perf for debugging, and git, the GitHub CLI, ripgrep, fd, fzf and bat.
 - nmap, OpenSSH, WireGuard tools, GnuPG and age for networks and encryption, and lm_sensors, smartmontools, PowerTOP, iotop, nvtop and btop for the hardware.
+
+### Printers, scanners and firmware
+
+- Printing is driverless. CUPS prints to IPP Everywhere and AirPrint printers, which describe their own capabilities, and no printer manufacturer's software is installed. Printers on the local network are found with Avahi.
+- Scanning uses SANE, including the driverless eSCL and WSD backends for scanners on the network.
+- Rift asks the local network for printers and scanners and announces nothing about itself on it.
+- fwupd reports the firmware of the machine: each device that has firmware, its version, and whether Secure Boot, the TPM and the IOMMU are in use. Firmware is never written, because the computer Rift is running on may not belong to its owner.
 
 ### Per-machine configuration
 
