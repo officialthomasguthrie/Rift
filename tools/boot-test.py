@@ -415,6 +415,10 @@ BASIC_APPS = [
     ("Disks", "disk", "disks", 0.2),
     ("Disk Usage Analyzer", "baobab", "baobab", 0.4),
     ("Characters", "characters", "characters", 0.4),
+    # the camera and the scanner have no hardware to find in a virtual machine, so each draws the
+    # page it draws when there is none, with its title bar above it
+    ("Camera", "snapshot", "camera", 0.4),
+    ("Document Scanner", "scan", "scanner", 0.4),
 ]
 # the app a file of each kind opens with, as `xdg-mime query default` prints it
 DEFAULT_APPS = [
@@ -1805,6 +1809,60 @@ def main():
         fail("the first tier: " + "; ".join(problems))
     ok(f"the {len(TOOLS)} version commands, {len(BUILDS)} programs built and run, JAVA_HOME, and libvirtd "
        "started on the owner's connection")
+
+    # 2g. the hardware a desktop talks to, none of which a virtual machine has: printers, scanners
+    # and the firmware of the machine. what this can check is that the services are there and
+    # answer, and that the two rules hold: rift asks the network for printers and never announces
+    # itself on it, and the firmware of a machine that may be borrowed is read and never written
+    problems = []
+    status, output = run("lpstat -r", "the print scheduler")
+    printed = without_console(output)
+    if status != 0 or "scheduler is running" not in printed:
+        problems.append(f"lpstat -r exited with {status} and printed {printed.strip()[-200:]!r}")
+    # the driverless driver itself: cups builds the queue for an ipp everywhere printer out of what
+    # the printer says about itself, and that is the only kind of printer rift prints to
+    _, output = run("sudo lpinfo -m | grep -c -i everywhere", "the drivers cups offers")
+    found = re.search(r"^\s*(\d+)\s*$", without_console(output), re.M)
+    if not found or int(found.group(1)) < 1:
+        problems.append(f"cups offers no driverless driver: {without_console(output).strip()[-200:]!r}")
+    for unit in ("cups", "avahi-daemon", "cups-browsed"):
+        _, output = run(f"systemctl is-active {unit} | cat", f"the {unit} unit")
+        if without_console(output).strip().splitlines()[-1:] != ["active"]:
+            _, journal = run(f"journalctl -b -u {unit} -o cat -n 20 | cat", f"{unit}'s log")
+            problems.append(f"{unit} is not active: {without_console(journal).strip()[-400:]!r}")
+    _, output = run("grep '^disable-publishing' /etc/avahi/avahi-daemon.conf", "what avahi publishes")
+    if "disable-publishing=yes" not in without_console(output):
+        problems.append(f"avahi publishes: {without_console(output).strip()[-200:]!r}")
+    _, output = run("scanimage -L", "the scanners sane can see")
+    printed = without_console(output)
+    if "No scanners were identified" not in printed and "device" not in printed:
+        problems.append(f"scanimage -L printed {printed.strip()[-300:]!r}")
+    # fwupdmgr draws a progress bar over its own output while the daemon reads the devices, and
+    # busctl pages, so both go through cat
+    status, output = run("fwupdmgr --version | cat", "the firmware service's version")
+    printed = without_console(output)
+    if status != 0 or not re.search(r"\d+\.\d+\.\d+", printed):
+        problems.append(f"fwupdmgr --version exited with {status} and printed {printed.strip()[-300:]!r}")
+    _, output = run("busctl --system get-property org.freedesktop.fwupd /org/freedesktop/fwupd "
+                    "org.freedesktop.fwupd DaemonVersion | cat", "the firmware daemon on the bus")
+    if not re.search(r's\s+"\d+\.\d+\.\d+"', without_console(output)):
+        problems.append(f"the fwupd daemon did not answer on the bus: {without_console(output).strip()[-300:]!r}")
+    # nothing is ever installed, so there is no metadata to download from a vendor once a day
+    _, output = run("grep '^Enabled' /etc/fwupd/remotes.d/lvfs.conf", "the vendor remote")
+    if "Enabled=false" not in without_console(output):
+        problems.append(f"the vendor remote is not disabled: {without_console(output).strip()[-200:]!r}")
+    # and every action that would write a firmware is refused outright, with nothing to authenticate
+    for action, refused in (("update-internal", True), ("device-unlock", True), ("get-remotes", False)):
+        _, output = run(f"pkcheck --action-id org.freedesktop.fwupd.{action} --process $fish_pid",
+                        f"whether the owner may {action}")
+        said = without_console(output)
+        if refused != ("Not authorized." in said):
+            problems.append(f"polkit answers {said.strip()[-200:]!r} for {action}, expected "
+                            f"{'a refusal with nothing to authenticate' if refused else 'no refusal'}")
+    if problems:
+        fail("the hardware services: " + "; ".join(problems))
+    ok("the print scheduler is running with avahi and cups-browsed beside it, avahi announces nothing, "
+       "sane answers, the firmware daemon names its version, and every firmware write is refused")
 
     # 3. orbit: the profile it wrote into @hosts, and the same answers on the system bus.
     # fish puts a bare \r before a command's output, so these anchor on the whitespace after the
