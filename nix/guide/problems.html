@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>If something goes wrong - Rift guide</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><div><a href="index.html">Rift guide</a></div></header>
+<main>
+<h1>If something goes wrong</h1>
+
+<h2>Check the drive and the services first</h2>
+<pre><code>rift doctor</code></pre>
+<p>It looks at the drive, the slot you booted from, the free space on your volume, and each of the
+system's own services, and prints a line for each.</p>
+
+<h2>Read the log</h2>
+<pre><code>journalctl -b -p warning
+journalctl --user -b -u lens</code></pre>
+<p>The first is what the system said this boot, warnings and worse. The second is the desktop shell
+by itself.</p>
+
+<h2>The desktop is stuck</h2>
+<p>The shell brings itself back a second after it stops, so a bar or a dock that has gone is usually
+back before you have read this. If the session itself is stuck, Ctrl, Alt and Delete ends it and
+starts it again, and anything you had open is closed with it.</p>
+
+<h2>The machine does not start from the drive</h2>
+<p>Check that Secure Boot is off in the firmware settings, and that the firmware is set to UEFI
+rather than legacy boot. A drive that starts on one machine and not on another is almost always one
+of those two.</p>
+
+<h2>Reporting it</h2>
+<p>Problems are tracked at
+<a href="https://github.com/officialthomasguthrie/Rift/issues">github.com/officialthomasguthrie/Rift/issues</a>.
+A report of how Rift runs on a particular machine is worth as much as a bug: say which machine, what
+worked and what did not.</p>
+</main>
+</body>
+</html>

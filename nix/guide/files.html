@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Files, disks and printers - Rift guide</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><div><a href="index.html">Rift guide</a></div></header>
+<main>
+<h1>Files, disks and printers</h1>
+
+<h2>Your files</h2>
+<p>Your home folder is on the encrypted part of the drive, with the usual folders in it: Documents,
+Downloads, Pictures, Videos, Music. Screenshots go in Pictures and screen recordings in Videos.</p>
+<p>Everything in home is snapshotted every hour, so a file you have just ruined is usually still
+there. See <a href="your-data.html">Snapshots, backups and a second drive</a>.</p>
+
+<h2>Other disks</h2>
+<p>Disks shows every disk in the machine, its partitions and what its own health counters say. You
+can read all of that.</p>
+<p>What you cannot do is write to a disk that belongs to the computer. Mounting, formatting,
+partitioning and unlocking one are refused, and no disk of the machine is mounted by itself. That is
+the rule the whole system is built on: the computer you borrowed is the same when you take the drive
+out.</p>
+<p>A memory stick or an external disk you plug in is yours to use. If your drive was written with an
+exchange partition, that is the plain place to put a file for another computer to read.</p>
+
+<h2>Printing</h2>
+<p>Rift prints to printers that describe themselves over the network, which is every printer sold in
+the last few years. There are no drivers to install and none can be installed. A printer that only
+works with software from its maker is not one Rift prints to.</p>
+<p>A printer on the network is found by itself and appears in the print dialog of an app. Rift asks
+the network what is there and announces nothing about the machine it is running on.</p>
+
+<h2>Scanning</h2>
+<p>Document Scanner reads from a scanner over USB or over the network and saves a PDF, a JPEG or a
+PNG. Network scanners are found the same way printers are.</p>
+
+<h2>The camera and the firmware</h2>
+<p>Camera takes a picture or a video from the camera of the machine. The first time an app asks for
+the camera, a window asks whether to allow it, and the answer is kept.</p>
+<p>The firmware of the machine is read and never written. To see what each device runs:</p>
+<pre><code>fwupdmgr get-devices
+fwupdmgr security</code></pre>
+<p>The second command says whether Secure Boot, the TPM and the IOMMU are in use on this machine. A
+firmware update from Rift is refused, because the machine it would be written to is whichever one
+the drive is plugged into.</p>
+</main>
+</body>
+</html>

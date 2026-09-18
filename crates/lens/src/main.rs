@@ -9,8 +9,12 @@
 //! `lens --escape` type into the field of the shell that is already running, `lens --menu` opens
 //! and closes the Applications menu, and `lens --state` prints what the bar shows. `lens --volume
 //! up|down|mute` and `lens --brightness up|down` are what the keys for them run: they make the
-//! change and the shell shows the level in the key popup.
+//! change and the shell shows the level in the key popup. `lens --record`, `lens --screen-reader`
+//! and `lens --keyboard` are the keys for the screen recorder, the screen reader and the on-screen
+//! keyboard: each starts its program, and stops it again when it is already running.
 
+#[cfg(target_os = "linux")]
+mod access;
 mod answer;
 #[cfg(target_os = "linux")]
 mod banner;
@@ -82,9 +86,15 @@ fn main() -> ExitCode {
         Some("--volume") => key(keys::volume(args.get(1).map_or("", String::as_str))),
         #[cfg(target_os = "linux")]
         Some("--brightness") => key(keys::brightness(args.get(1).map_or("", String::as_str))),
+        #[cfg(target_os = "linux")]
+        Some("--record") => turn(access::Tool::Recorder),
+        #[cfg(target_os = "linux")]
+        Some("--screen-reader") => turn(access::Tool::Reader),
+        #[cfg(target_os = "linux")]
+        Some("--keyboard") => turn(access::Tool::Keyboard),
         Some(other) => {
             eprintln!(
-                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --state | --volume up|down|mute | --brightness up|down]"
+                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --state | --volume up|down|mute | --brightness up|down | --record | --screen-reader | --keyboard]"
             );
             ExitCode::from(2)
         }
@@ -97,6 +107,22 @@ fn show() -> ExitCode {
     match control::ask(&control::Command::State) {
         Ok(lines) => {
             print!("{lines}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The screen recorder, the screen reader or the on-screen keyboard: it starts, or stops when it
+/// is already running, and the line says which.
+#[cfg(target_os = "linux")]
+fn turn(tool: access::Tool) -> ExitCode {
+    match access::toggle(tool) {
+        Ok(said) => {
+            println!("{said}");
             ExitCode::SUCCESS
         }
         Err(why) => {

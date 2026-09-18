@@ -120,6 +120,7 @@ let
         skip-at-startup
     }
 
+    // screen recordings are written beside these, in ~/Videos, by lens
     screenshot-path "~/Pictures/Screenshot %Y-%m-%d %H-%M-%S.png"
 
     binds {
@@ -170,6 +171,14 @@ let
         Print hotkey-overlay-title="Take a screenshot" { screenshot; }
         Ctrl+Print { screenshot-screen; }
         Alt+Print { screenshot-window; }
+        // lens starts and stops the recorder, marks the bar while it runs and names the file it
+        // wrote when it stops. the same keys gnome uses
+        Ctrl+Alt+Shift+R hotkey-overlay-title="Start or stop a screen recording" { spawn "lens" "--record"; }
+
+        // the screen reader on gnome's own keys, and the on-screen keyboard beside it. lens starts
+        // and stops both, and the Applications menu has a row for each
+        Mod+Alt+S hotkey-overlay-title="Turn the screen reader on or off" { spawn "lens" "--screen-reader"; }
+        Mod+Alt+K hotkey-overlay-title="Show or hide the on-screen keyboard" { spawn "lens" "--keyboard"; }
 
         // lens makes the change with wpctl or brightnessctl and shows the level in its key popup
         XF86AudioRaiseVolume allow-when-locked=true { spawn "lens" "--volume" "up"; }

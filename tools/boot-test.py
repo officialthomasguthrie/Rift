@@ -360,7 +360,8 @@ WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(
 # the words lens --state prints, and how the bar writes the time
 STATE_KEYS = ("clock", "theme", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
-              "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup")
+              "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
+              "recording", "screen-reader", "keyboard")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -608,6 +609,24 @@ def bar_and_dock(width, height, rows):
     while bar + dock < height and rows[height - 1 - dock] > width / 2:
         dock += 1
     return bar, dock
+
+
+def keyboard_rows(width, height, rgb, colors=DARK_COLORS):
+    """The top and bottom rows the on-screen keyboard covers, or None when it is not on the screen.
+    Its keys are drawn in the gray of a menu, it takes the bottom of the screen, and nothing else
+    down there is that gray, so the rows of the bottom half where it covers a third of the width
+    are the keyboard's."""
+    found = []
+    for y in range(height // 2, height):
+        row = y * width * 3
+        keys = 0
+        for x in range(0, width, 4):
+            px = rgb[row + x * 3 : row + x * 3 + 3]
+            if near(px, colors.menu, 3):
+                keys += 1
+        if keys * 4 > width / 3:
+            found.append(y)
+    return (found[0], found[-1]) if found else None
 
 
 def ink_in(width, rgb, top, bottom, colors=DARK_COLORS):
@@ -3399,13 +3418,147 @@ def main():
             point(args.qmp, size, (round(width / 3), round(height / 2)))
             look("the desktop back in dark", f"{stem}-dark-again{extension}", 30, journals=("lens", "horizon"))
 
-            # 5k. the photograph again, by its name, which the next boots of this drive keep. horizon
+            # 5k. the last of the everyday basics, each one a surface a person sees: the screen
+            # recorder on its key, the screen reader, the on-screen keyboard, and the guide in the
+            # browser. the vm has no camera, no sound and no printer, but a recording of the desktop
+            # needs none of those, so this is the part of P1.19 that runs end to end
+            def access_state(key, what):
+                """What `lens --state` says about the recorder, the screen reader or the keyboard."""
+                return bar_state(what).get(key, "")
+
+            def recording_file():
+                """The file the recorder is writing, while it is running."""
+                said = access_state("recording", "what the recorder is writing")
+                return said if said not in ("", "off") else None
+
+            press(["ctrl", "alt", "shift", "r"], what="the screen recording key")
+            recording = wait_for(30, recording_file)
+            if not recording:
+                _, output = run("journalctl --user -b -o cat -n 20 | cat", "the user manager's log")
+                fail(f"the screen recording key started nothing: {without_console(output).strip()[-500:]!r}")
+            # the recorder asks the compositor for a frame when the screen changes, so a still
+            # desktop records almost nothing. the menu opening and closing is the change
+            run("lens --menu", "the Applications menu while the screen is recorded")
+            run('lens --type "Image"', "words in the field while the screen is recorded")
+            run("lens --escape", "escape, which clears the field")
+            run("lens --escape", "escape again, which closes the menu")
+            look("the bar while the screen is recorded", f"{stem}-recording{extension}", 30,
+                 journals=("lens", "horizon"))
+            press(["ctrl", "alt", "shift", "r"], what="the screen recording key again")
+            if not wait_for(60, lambda: access_state("recording", "the recorder after the second key") == "off"):
+                fail(f"the screen recording key did not stop the recorder, still writing {recording}")
+            _, output = run(f'stat -c %s "{recording}"', "the size of the recording")
+            written = re.search(r"^(\d+)\s*$", without_console(output), re.M)
+            if not written or int(written.group(1)) < 1000:
+                fail(f"the recording {recording} is {without_console(output).strip()[-100:]!r} bytes")
+            status, output = run(f'ffprobe -v error -show_entries format=duration -of csv=p=0 "{recording}" | cat',
+                                 "the length of the recording")
+            length = re.search(r"(\d+\.\d+)", without_console(output))
+            if status != 0 or not length or float(length.group(1)) <= 0:
+                fail(f"ffprobe reads no length for {recording}: {without_console(output).strip()[-200:]!r}")
+            said = bar_state("the notification about the recording").get("latest", "")
+            if said != "Screen recording saved":
+                fail(f"the newest notification is {said!r}, expected the one that names the recording")
+            ok(f"the key recorded the screen for {length.group(1)}s into {int(written.group(1))} bytes, "
+               "the bar carried the mark while it ran, and a notification named the file")
+            # home goes into the backup, the snapshots and the clone, and the backup disk is 256M
+            run(f'rm -f "{recording}"', "the recording, which home does not keep")
+
+            # the screen reader. it draws nothing on the screen: what says it is running is its name
+            # on the session bus, and what says it can speak is the voice writing a file
+            def orca_on_the_bus(what):
+                _, output = run("busctl --user --no-pager list | grep org.gnome.Orca | cat", what)
+                return "org.gnome.Orca.Service" in without_console(output)
+
+            press(["meta_l", "alt", "s"], what="the screen reader key")
+            if not wait_for(30, lambda: access_state("screen-reader", "the screen reader after the key") == "on"):
+                _, output = run("journalctl --user -b -o cat -n 20 | cat", "the user manager's log")
+                fail(f"the screen reader key started nothing: {without_console(output).strip()[-500:]!r}")
+            if not wait_for(180, lambda: orca_on_the_bus("the screen reader on the session bus")):
+                _, output = run("journalctl --user -b -o cat -n 40 | cat", "the user manager's log")
+                fail("the screen reader did not take org.gnome.Orca.Service on the session bus: "
+                     f"{without_console(output).strip()[-800:]!r}")
+            wav = "/tmp/rift-speech.wav"
+            _, output = run(f'espeak-ng -w {wav} "The screen reader is on"; and stat -c %s {wav}',
+                            "the voice writing a file")
+            spoken = re.search(r"^(\d+)\s*$", without_console(output), re.M)
+            if not spoken or int(spoken.group(1)) < 1000:
+                fail(f"the voice wrote {without_console(output).strip()[-200:]!r}, expected a wav of some size")
+            run(f"rm -f {wav}", "the wav the voice wrote")
+            press(["meta_l", "alt", "s"], what="the screen reader key again")
+            if not wait_for(30, lambda: access_state("screen-reader", "the screen reader after the second key") == "off"):
+                fail("the screen reader key did not stop it")
+            if not wait_for(60, lambda: not orca_on_the_bus("the screen reader after it was stopped")):
+                fail("the screen reader kept its name on the session bus after it was stopped")
+            ok(f"the key started and stopped the screen reader, and its voice wrote {int(spoken.group(1))} "
+               "bytes of speech with no sound hardware in the machine")
+
+            # the on-screen keyboard. it is a layer surface along the bottom, in the shell's own
+            # colours, and a key pressed on it with the pointer types into whatever has the keyboard
+            def keyboard_band():
+                """Where the on-screen keyboard is drawn, or None when it is not on the screen."""
+                wide, tall, shown = screendump(args.qmp, work, "keyboard")
+                return keyboard_rows(wide, tall, shown)
+
+            press(["meta_l", "alt", "k"], what="the on-screen keyboard key")
+            if not wait_for(30, lambda: access_state("keyboard", "the keyboard after the key") == "on"):
+                _, output = run("journalctl --user -b -o cat -n 20 | cat", "the user manager's log")
+                fail(f"the on-screen keyboard key started nothing: {without_console(output).strip()[-500:]!r}")
+            band = wait_for(30, keyboard_band)
+            if not band:
+                fail("the on-screen keyboard drew nothing along the bottom of the screen")
+            shot(f"{stem}-keyboard{extension}", "keyboard")
+            run("lens --menu", "the Applications menu for the keyboard to type into")
+            if not wait_for(20, lambda: bar_state("the menu for the keyboard").get("menu") == "open"):
+                fail("the Applications menu did not open for the on-screen keyboard")
+            # the second row of the keyboard is letters the whole way across, and a third of the way
+            # in is one of them. a press on the keyboard leaves the menu its keyboard focus, since
+            # the keyboard asked for none of its own
+            top, bottom = band
+            click(args.qmp, size, (round(width * 0.35), round(top + (bottom - top) * 0.375)))
+
+            def typed_letter():
+                said = bar_state("the field after a key on the on-screen keyboard").get("field", "")
+                return said if re.fullmatch(r"[a-z]", said) else None
+
+            typed = wait_for(30, typed_letter)
+            if not typed:
+                fail("a key pressed on the on-screen keyboard typed nothing into the field: "
+                     f"{bar_state('the field').get('field', '')!r}")
+            run("lens --escape", "escape, which clears the field")
+            run("lens --escape", "escape again, which closes the menu")
+            press(["meta_l", "alt", "k"], what="the on-screen keyboard key again")
+            if not wait_for(30, lambda: access_state("keyboard", "the keyboard after the second key") == "off"):
+                fail("the on-screen keyboard key did not hide it")
+            if not wait_for(30, lambda: keyboard_band() is None):
+                fail("the on-screen keyboard is still drawn after the key that hides it")
+            ok(f"the on-screen keyboard drew itself over rows {top} to {bottom} and typed {typed!r} "
+               "into the field of the shell")
+
+            # the guide, which is on the drive and opens in the browser with no network at all
+            status, output = run("rift guide list", "the pages of the guide")
+            printed = without_console(output)
+            listed = [line.split()[0] for line in printed.splitlines() if line.strip()]
+            if status != 0 or "the-desktop" not in listed:
+                fail(f"rift guide list exited with {status} and printed {printed.strip()[-300:]!r}")
+            run("systemd-run --user --quiet --collect rift guide", "the guide in the browser")
+            if not wait_for(180, lambda: app_windows("firefox", "the browser with the guide")):
+                _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"rift guide opened no window: {without_console(output).strip()[-800:]!r}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look("the guide in the browser", f"{stem}-guide{extension}", 180, apps=["firefox"],
+                 journals=("horizon", "lens"), settle=3)
+            ok(f"the guide has {len(listed)} pages on the drive and opens in the browser")
+            close_app("the guide", "firefox")
+
+            # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again
             status, output = run(f"rift wallpaper set {WALLPAPER}", "the default wallpaper by its name")
             if status != 0 or f"The wallpaper is {WALLPAPER}." not in without_console(output):
                 fail(f"rift wallpaper set {WALLPAPER} exited with {status}: {without_console(output).strip()[-300:]!r}")
             look("the default wallpaper again", f"{stem}-wallpaper-again{extension}", 30,
                  wallpaper=WALLPAPER_LEFT + WALLPAPER_RIGHT, journals=("horizon",))
+
 
     # 6. timeline. vault answers on the bus and a timer takes a snapshot of home every hour. take one,
     # change a file and delete another, find the snapshot through rift snapshot and on the bus,

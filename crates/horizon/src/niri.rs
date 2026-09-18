@@ -6180,9 +6180,8 @@ impl Niri {
 
     pub fn focus_layer_surface_if_on_demand(&mut self, surface: Option<LayerSurface>) {
         if let Some(surface) = surface {
-            if surface.cached_state().keyboard_interactivity
-                == wlr_layer::KeyboardInteractivity::OnDemand
-            {
+            let interactivity = surface.cached_state().keyboard_interactivity;
+            if interactivity == wlr_layer::KeyboardInteractivity::OnDemand {
                 if self.layer_shell_on_demand_focus.as_ref() != Some(&surface) {
                     self.layer_shell_on_demand_focus = Some(surface);
 
@@ -6190,6 +6189,12 @@ impl Niri {
                     self.queue_redraw_all();
                 }
 
+                return;
+            }
+
+            // A surface that asked for no keyboard focus never takes it, so a press on one leaves
+            // the focus where it was: the on-screen keyboard types into the menu that is open.
+            if interactivity == wlr_layer::KeyboardInteractivity::None {
                 return;
             }
         }

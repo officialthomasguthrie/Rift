@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Updates - Rift guide</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><div><a href="index.html">Rift guide</a></div></header>
+<main>
+<h1>Updates</h1>
+<p>The drive has room for two versions of the system. The one you are running is never written to
+while it runs: a new version goes into the other slot, and the drive starts it at the next boot.</p>
+
+<h2>If a new version does not start</h2>
+<p>The boot loader counts the attempts. A version that fails to start three times is put behind the
+one that worked, and the machine comes back up on the version you had before. Nothing of yours is
+touched by any of this: your files are on the encrypted volume, which no update writes to.</p>
+
+<h2>Which version is running</h2>
+<pre><code>rift --version
+rift doctor</code></pre>
+<p><code>rift doctor</code> also says which slot you booted from, how much room is left on your
+volume, and whether each of the system's services is running.</p>
+
+<h2>Getting a new version</h2>
+<p>Rift does not download updates for itself yet, and there is no release to download. When there is
+one, this page will say how to ask for it.</p>
+</main>
+</body>
+</html>

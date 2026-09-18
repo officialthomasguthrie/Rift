@@ -30,6 +30,46 @@ pub enum Command {
     State,
     /// Show the key popup with this level: a volume or a brightness key was pressed.
     Popup(Level),
+    /// A screen recording started, or stopped and left a file behind.
+    Record(Recording),
+}
+
+/// What the screen recorder did, for the mark in the bar and the notification that names the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recording {
+    /// It started, and is writing this file.
+    On(String),
+    /// It stopped, and the file it wrote is this one.
+    Off(String),
+}
+
+impl Recording {
+    /// The words after `record` on the socket: `on <file>` or `off <file>`.
+    #[must_use]
+    pub fn words(&self) -> String {
+        match self {
+            Self::On(file) => format!("on {file}"),
+            Self::Off(file) => format!("off {file}"),
+        }
+    }
+
+    /// Read those words back.
+    #[must_use]
+    pub fn read(words: &str) -> Option<Self> {
+        match words.split_once(' ') {
+            Some(("on", file)) => Some(Self::On(file.to_string())),
+            Some(("off", file)) => Some(Self::Off(file.to_string())),
+            _ => None,
+        }
+    }
+
+    /// The file it is writing, or wrote.
+    #[must_use]
+    pub fn file(&self) -> &str {
+        match self {
+            Self::On(file) | Self::Off(file) => file,
+        }
+    }
 }
 
 /// What a volume or a brightness key left behind, for the popup.
@@ -91,11 +131,12 @@ impl Command {
             Self::Menu => "menu".to_string(),
             Self::State => "state".to_string(),
             Self::Popup(level) => format!("popup {}", level.words()),
+            Self::Record(recording) => format!("record {}", recording.words()),
         }
     }
 }
 
-/// Read one line of the protocol. `None` when it is not one of the six.
+/// Read one line of the protocol. `None` when it is not one of the seven.
 #[must_use]
 pub fn parse(line: &str) -> Option<Command> {
     let line = line.trim_end_matches(['\r', '\n']);
@@ -107,6 +148,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "menu" => Some(Command::Menu),
         "state" => Some(Command::State),
         "popup" => Level::read(rest).map(Command::Popup),
+        "record" => Recording::read(rest).map(Command::Record),
         _ => None,
     }
 }
@@ -204,6 +246,29 @@ mod tests {
         assert_eq!(parse("popup volume loud"), None);
         assert_eq!(parse("popup brightness 40 muted"), None);
         assert_eq!(parse("popup battery 40"), None);
+        assert_eq!(parse("record"), None);
+        assert_eq!(parse("record on"), None);
+        assert_eq!(parse("record stopped /home/rift/Videos/a.mp4"), None);
+    }
+
+    #[test]
+    fn a_recording_carries_its_file() {
+        assert_eq!(
+            parse("record on /home/rift/Videos/Screencast 2026-09-19 10-11-12.mp4\n"),
+            Some(Command::Record(Recording::On(
+                "/home/rift/Videos/Screencast 2026-09-19 10-11-12.mp4".into()
+            )))
+        );
+        assert_eq!(
+            parse("record off /home/rift/Videos/a.mp4"),
+            Some(Command::Record(Recording::Off(
+                "/home/rift/Videos/a.mp4".into()
+            )))
+        );
+        assert_eq!(
+            Recording::Off("/home/rift/Videos/a.mp4".into()).file(),
+            "/home/rift/Videos/a.mp4"
+        );
     }
 
     #[test]
@@ -241,6 +306,8 @@ mod tests {
                 muted: true,
             }),
             Command::Popup(Level::Brightness(5)),
+            Command::Record(Recording::On("/home/rift/Videos/a.mp4".into())),
+            Command::Record(Recording::Off("/home/rift/Videos/a b.mp4".into())),
         ] {
             assert_eq!(parse(&command.line()), Some(command));
         }

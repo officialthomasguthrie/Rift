@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apps - Rift guide</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><div><a href="index.html">Rift guide</a></div></header>
+<main>
+<h1>Apps</h1>
+
+<h2>What comes with Rift</h2>
+<p>A new drive is usable with no network at all. In the image are Firefox, the Ghostty terminal, the
+Zed and Helix editors, KeePassXC for passwords, and virt-manager for virtual machines.</p>
+<p>For everyday files there are GNOME's own apps: Image Viewer, Document Viewer, Video Player, Audio
+Player, Calculator, File Roller for archives, Disks, Disk Usage Analyzer, Characters, Camera and
+Document Scanner.</p>
+<p>For work on the machine itself there are compilers and runtimes for Rust, C and C++, Python,
+Node.js, Go, Zig and Java, the usual debuggers, Podman for containers, and the tools you would
+expect at a prompt.</p>
+
+<h2>Installing more</h2>
+<p>Apps you install come from Flathub as Flatpaks, and they are stored on your side of the drive, so
+they follow you from machine to machine. Until Rift has a window for that, install one at a prompt.
+The first line is needed once, on a new drive:</p>
+<pre><code>flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install flathub org.videolan.VLC</code></pre>
+<p>A Flatpak app runs in a sandbox of its own and reaches the desktop through portals, so when it
+asks for a file or the camera you see the question and answer it.</p>
+
+<h2>Running something in a sandbox</h2>
+<p>Any command can be run inside a sandbox, with only the folders you name:</p>
+<pre><code>rift run --sandbox --folder ~/work cargo test</code></pre>
+<p>The network can be taken away from a sandboxed app by name, and given back the same way:</p>
+<pre><code>rift net off vlc
+rift net on vlc</code></pre>
+
+<h2>Which app opens a file</h2>
+<p>Pictures open in Image Viewer, documents in Document Viewer, video in Video Player, sound in Audio
+Player, archives in File Roller and web pages in Firefox. To see or change what opens a kind of
+file:</p>
+<pre><code>xdg-mime query default image/jpeg
+xdg-mime default org.gnome.Loupe.desktop image/jpeg</code></pre>
+</main>
+</body>
+</html>

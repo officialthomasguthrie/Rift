@@ -67,6 +67,8 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 - Lens, the desktop shell, draws a top bar with a clock menu that holds a calendar, the notifications received so far and a Do not disturb switch, and a system menu for sound, brightness, wired and Wi-Fi networks, Bluetooth, the battery and the session; an applications menu that lists installed applications by category, with a search field that also runs system commands, evaluates Nushell pipelines and passes requests written in plain language to the local assistant; and a dock that holds pinned and running applications and the workspaces.
 - Lens is the notification server of the session, following the freedesktop.org notification specification, and shows the level when a volume or brightness key is pressed.
 - A drop-down terminal and a lock screen are built into the compositor.
+- The Print key takes a screenshot, and Ctrl, Alt, Shift and R start and stop a screen recording. Recordings are encoded in software and written as MP4 files, so they do not depend on the graphics hardware of the machine.
+- Orca, the GNOME screen reader, and an on-screen keyboard are included, each turned on from the keyboard or from the applications menu. Speech is synthesised on the machine with eSpeak NG, and the accessibility bus is enabled for every application.
 - The desktop is dark by default and can be switched to light. GTK, libadwaita and Qt applications follow the same setting in the Adwaita style with a blue accent, Noto Sans and the Adwaita icons and cursor, and draw their own title bars.
 - The wallpaper is one of nine NASA photographs included in the image, each with its source and license in a text file beside it, or any JPEG or PNG picture, or a flat colour. Horizon scales it to fill each display. The default is a photograph of the night side of Earth taken from the Orion spacecraft on Artemis II.
 - Flatpak is integrated with xdg-desktop-portal for applications installed from Flathub.
@@ -81,6 +83,7 @@ The image includes the following software, so a new drive is usable without a ne
 - Compilers and runtimes for Rust, C and C++ (GCC, Clang and LLVM, with CMake, Ninja and Make), Python, Node.js, Bun, Go, Zig and Java.
 - gdb, LLDB, Valgrind, strace, ltrace and perf for debugging, and git, the GitHub CLI, ripgrep, fd, fzf and bat.
 - nmap, OpenSSH, WireGuard tools, GnuPG and age for networks and encryption, and lm_sensors, smartmontools, PowerTOP, iotop, nvtop and btop for the hardware.
+- A user guide is part of the image, as pages that open in the browser with no network connection, and `rift guide` opens it from a terminal.
 
 ### Printers, scanners and firmware
 
@@ -144,6 +147,7 @@ The `rift` command reaches the same services as the desktop.
 | `rift run --sandbox` | Run a command inside a sandbox |
 | `rift net` | Turn network access off or on for a sandboxed application |
 | `rift wallpaper` | List the wallpapers, or set a photograph, a picture or a colour |
+| `rift guide` | Open the user guide that comes with the system |
 
 ## System requirements
 

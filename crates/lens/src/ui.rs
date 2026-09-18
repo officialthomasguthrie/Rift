@@ -21,12 +21,13 @@ use librift::battery::Battery;
 use librift::os::{self, Action};
 use librift::{bluetooth, network, quasar, session};
 
+use crate::access;
 use crate::answer;
 use crate::banner;
 use crate::bar;
 use crate::calendar::{Day, Month, Weekday};
 use crate::clock;
-use crate::control::{self, Command, Level};
+use crate::control::{self, Command, Level, Recording};
 use crate::datemenu;
 use crate::dialog::{self, Ask, Dialog};
 use crate::dock::{self, Dock};
@@ -98,6 +99,8 @@ struct Lens {
     outbox: Option<Outbox>,
     /// The key popup, while it is up.
     popup: Option<Popup>,
+    /// The file the screen recorder is writing, while it is running. The bar is marked for it.
+    recording: Option<String>,
     /// Counts the keys the popup showed, so only the last one's second closes it.
     keys: u64,
     /// The menu the compositor closed by taking the keyboard away, and when.
@@ -514,6 +517,7 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
         notices: Notices::new(notice::quiet()),
         outbox: None,
         popup: None,
+        recording: access::running(access::Tool::Recorder).and_then(|(_, file)| file),
         keys: 0,
         dismissed: None,
         volume: Latest::new(|level| report(status::set_volume(level))),
@@ -572,18 +576,16 @@ fn terminal() -> Subscription<Message> {
     Subscription::run(|| {
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
-            if let Err(why) =
-                control::serve(|command| {
-                    if command == Command::State {
-                        return Some(kept().lock().map_or_else(
-                            |_| "the shell is busy".to_string(),
-                            |lines| lines.clone(),
-                        ));
-                    }
-                    let _ = sender.unbounded_send(Message::Typed(command));
-                    None
-                })
-            {
+            if let Err(why) = control::serve(|command| {
+                if command == Command::State {
+                    return Some(kept().lock().map_or_else(
+                        |_| "the shell is busy".to_string(),
+                        |lines| lines.clone() + &access::lines(),
+                    ));
+                }
+                let _ = sender.unbounded_send(Message::Typed(command));
+                None
+            }) {
                 eprintln!("lens: {why}");
             }
         });
@@ -1430,8 +1432,36 @@ fn typed(state: &mut Lens, command: Command) -> Task<Message> {
         Command::Escape => escape(state),
         Command::Menu => toggle(state),
         Command::Popup(level) => show_popup(state, level),
+        Command::Record(recording) => record(state, &recording),
         // answered on the socket's own thread, from the lines remember() keeps
         Command::State => Task::none(),
+    }
+}
+
+/// The screen recorder started or stopped. While it runs the bar carries the mark every desktop
+/// puts up for it; when it stops, a notification names the file it left behind, and a second
+/// recording's notification takes the place of the first.
+fn record(state: &mut Lens, recording: &Recording) -> Task<Message> {
+    match recording {
+        Recording::On(file) => {
+            state.recording = Some(file.clone());
+            Task::none()
+        }
+        Recording::Off(file) => {
+            state.recording = None;
+            Task::done(Message::Notified(Notification {
+                id: u32::MAX,
+                app: "Lens".to_string(),
+                icon: Some(bar::RECORDING.to_string()),
+                entry: None,
+                summary: "Screen recording saved".to_string(),
+                body: file.clone(),
+                actions: Vec::new(),
+                default: false,
+                urgency: notice::Urgency::Normal,
+                transient: false,
+            }))
+        }
     }
 }
 
@@ -1766,6 +1796,7 @@ fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
             system: state.system.is_some(),
         },
         state.notices.quiet,
+        state.recording.is_some(),
     ))
     .width(Length::Fill)
     .height(Length::Fill)

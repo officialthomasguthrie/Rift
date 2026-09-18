@@ -2,13 +2,37 @@
 # archives, the disks, where the space went, the characters, the camera and the scanner. gnome's
 # own, gtk 4 and libadwaita, so they take the dark and light theme from dconf the way the rest of
 # the session does. the browser, the editors, the terminal and the password manager are in apps.nix.
-# the hardware a desktop talks to is here too: printers, scanners and the firmware of the machine
+# the hardware a desktop talks to is here too: printers, scanners and the firmware of the machine,
+# and so are the screen recorder, the screen reader, the on-screen keyboard and the guide
 {
   config,
   lib,
   pkgs,
   ...
 }:
+let
+  # the voice the screen reader speaks with. mbrola is 645 MiB of voice data for voices espeak only
+  # uses when it is asked for one of them by name, and the voices it speaks with by default are its
+  # own, so it is built without them
+  voice = pkgs.espeak-ng.override { mbrolaSupport = false; };
+
+  # a row in the Applications menu for something with no entry of its own
+  row =
+    {
+      id,
+      name,
+      what,
+      exec,
+      icon,
+      categories,
+    }:
+    pkgs.makeDesktopItem {
+      name = id;
+      desktopName = name;
+      comment = what;
+      inherit exec icon categories;
+    };
+in
 {
   environment.systemPackages = with pkgs; [
     # pictures. loupe reads a file in a sandbox of its own, one process per format
@@ -34,7 +58,70 @@
     simple-scan
     # xdg-open and xdg-mime, which apps call to hand a file or a link to the app that owns it
     xdg-utils
+    # the screen recorder the key runs. it reads the screen over wlr-screencopy, the protocol the
+    # screenshot key uses, and encodes with ffmpeg on the processor, so a machine with no video
+    # encoder of its own records all the same
+    wf-recorder
+    # ffmpeg itself, to cut a recording or turn it into another format. its libraries were in the
+    # image already, so this is the commands and nothing more
+    ffmpeg
+    # the screen reader, the voice it speaks with and the on-screen keyboard. lens turns each of
+    # them on and off, from a key and from the row below
+    orca
+    voice
+    wvkbd
+    (row {
+      id = "dev.rift.ScreenReader";
+      name = "Screen reader";
+      what = "Read the screen aloud";
+      exec = "lens --screen-reader";
+      icon = "orca";
+      categories = [
+        "Utility"
+        "Accessibility"
+      ];
+    })
+    (row {
+      id = "dev.rift.Keyboard";
+      name = "On-screen keyboard";
+      what = "Type with the pointer or a touch screen";
+      exec = "lens --keyboard";
+      icon = "input-keyboard";
+      categories = [
+        "Utility"
+        "Accessibility"
+      ];
+    })
+    (row {
+      id = "dev.rift.Guide";
+      name = "Rift guide";
+      what = "How Rift works, on the drive itself";
+      exec = "rift guide";
+      icon = "help-browser-symbolic";
+      categories = [
+        "System"
+        "Documentation"
+      ];
+    })
   ];
+
+  # the accessibility bus the screen reader reads the session through: at-spi2-core's registry,
+  # which the session bus starts when something asks for it. without it nixos sets NO_AT_BRIDGE and
+  # GTK_A11Y=none for every app, and no app says anything about what it is showing
+  services.gnome.at-spi2-core.enable = true;
+
+  # the speech the screen reader asks for. speech-dispatcher takes the words and hands them to
+  # espeak, which is a voice of a few megabytes rather than a recorded one, so it is on the drive
+  # and needs no network. it starts from its own socket in the session, and only when something
+  # speaks
+  services.speechd = {
+    enable = true;
+    package = pkgs.speechd.override { espeak = voice; };
+  };
+
+  # the guide, as pages on the drive itself. `rift guide` and the row in the Applications menu open
+  # them in the browser, so a person reads them on a machine with no network
+  environment.etc."rift/guide".source = ../guide;
 
   # the disks, their partitions and their smart counters. gnome disks asks udisks over the system
   # bus, which starts when it does
@@ -186,11 +273,20 @@
         "application/x-bzip2"
         "application/x-7z-compressed"
       ];
+      # a page, and a link an app hands over. the guide is a page like any other, so this is what
+      # opens it
+      web = [
+        "text/html"
+        "application/xhtml+xml"
+        "x-scheme-handler/http"
+        "x-scheme-handler/https"
+      ];
       opens = app: types: builtins.listToAttrs (map (type: lib.nameValuePair type app) types);
     in
     opens "org.gnome.Loupe.desktop" pictures
     // opens "org.gnome.Papers.desktop" documents
     // opens "org.gnome.Showtime.desktop" video
     // opens "org.gnome.Decibels.desktop" sound
-    // opens "org.gnome.FileRoller.desktop" archives;
+    // opens "org.gnome.FileRoller.desktop" archives
+    // opens "firefox.desktop" web;
 }

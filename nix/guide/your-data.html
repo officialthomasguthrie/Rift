@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snapshots, backups and a second drive - Rift guide</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><div><a href="index.html">Rift guide</a></div></header>
+<main>
+<h1>Snapshots, backups and a second drive</h1>
+<p>Three different things keep your files: snapshots on the drive itself, backups on another disk,
+and a second drive that boots on its own.</p>
+
+<h2>Snapshots</h2>
+<p>A snapshot of your home folder is taken every hour, on the drive, and the first of each hour, day
+and week is kept for a while. A snapshot costs almost nothing until a file changes.</p>
+<pre><code>rift snapshot list
+rift snapshot restore 2026-09-19T08:00:00Z Documents/notes.md</code></pre>
+<p>The file comes back beside the one that is there now, so nothing is overwritten unless you ask for
+that with <code>--replace</code>. Snapshots are on the same drive as the files, so they are for a
+mistake, not for a lost drive.</p>
+
+<h2>Backups</h2>
+<p>A backup is your home folder, encrypted and deduplicated, in a folder on another disk. Plug the
+disk in and Rift mounts it by itself.</p>
+<pre><code>rift backup now
+rift backup list
+rift backup restore 8a1c9f2e Documents/notes.md</code></pre>
+<p>The name of a backup comes from <code>rift backup list</code>. To choose which disk backups go
+to, mount it and run <code>sudo vault target &lt;folder&gt;</code>.</p>
+<p>The backup has a key of its own, which is printed once when the disk is set up. Keep it somewhere
+other than the drive: without it the backup cannot be read.</p>
+
+<h2>A second drive</h2>
+<p>A clone is a whole second Rift: the system, your files, and a key of its own, so losing one drive
+does not lock you out of the other.</p>
+<pre><code>sudo rift clone</code></pre>
+<p>It only offers drives that are removable and not in use, and it asks you to type the serial number
+of the drive you mean before it writes anything.</p>
+</main>
+</body>
+</html>

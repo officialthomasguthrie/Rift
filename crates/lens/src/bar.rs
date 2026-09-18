@@ -31,6 +31,9 @@ const ICON_GAP: f32 = 8.0;
 
 /// The button at the left, and the menu it opens.
 pub const APPLICATIONS: &str = "Applications";
+/// The mark the bar carries while the screen is being recorded, and the icon of the notification
+/// that names the file afterwards.
+pub const RECORDING: &str = "media-record-symbolic";
 
 /// Which of the bar's menus are showing, which marks their buttons.
 #[derive(Debug, Clone, Copy, Default)]
@@ -43,18 +46,20 @@ pub struct Open {
     pub system: bool,
 }
 
-/// The bar. With Do not disturb on, its icon is at the left of the clock.
+/// The bar. With Do not disturb on, its icon is at the left of the clock; while the screen is
+/// being recorded, the mark for that is the first of the status icons.
 pub fn view<'a>(
     look: Palette,
     clock: &'a str,
     status: &Status,
     open: Open,
     quiet: bool,
+    recording: bool,
 ) -> Element<'a, Message> {
     let items = row![
         applications(look, open.applications),
         space().width(Length::Fill),
-        status_button(look, status, open.system),
+        status_button(look, status, open.system, recording),
     ]
     .align_y(iced::Center)
     .height(Length::Fill);
@@ -110,13 +115,22 @@ fn clock_button(look: Palette, clock: &str, open: bool, quiet: bool) -> Element<
         .into()
 }
 
-/// The status icons, in the order every desktop puts them: the network, Bluetooth while a device is
-/// connected, the volume, then the battery. An icon is there only when the system has something
-/// to say. Together they are one button, which opens the system menu and is marked while it is
-/// open.
-fn status_button(look: Palette, status: &Status, open: bool) -> Element<'static, Message> {
+/// The status icons, in the order every desktop puts them: the mark for a screen recording while
+/// one is running, then the network, Bluetooth while a device is connected, the volume, then the
+/// battery. An icon is there only when the system has something to say. Together they are one
+/// button, which opens the system menu and is marked while it is open.
+fn status_button(
+    look: Palette,
+    status: &Status,
+    open: bool,
+    recording: bool,
+) -> Element<'static, Message> {
     let mut line = row![].spacing(ICON_GAP).align_y(iced::Center);
-    for name in status.icons() {
+    let names = recording
+        .then(|| RECORDING.to_string())
+        .into_iter()
+        .chain(status.icons());
+    for name in names {
         if icons::find(&name).is_some() {
             line = line.push(icons::symbolic(look.text, &name, ICON));
         }
