@@ -1819,12 +1819,13 @@ def main():
     printed = without_console(output)
     if status != 0 or "scheduler is running" not in printed:
         problems.append(f"lpstat -r exited with {status} and printed {printed.strip()[-200:]!r}")
-    # the driverless driver itself: cups builds the queue for an ipp everywhere printer out of what
-    # the printer says about itself, and that is the only kind of printer rift prints to
-    _, output = run("sudo lpinfo -m | grep -c -i everywhere", "the drivers cups offers")
+    # and it reaches a printer the driverless way: the ipp backend, which is what a queue made from
+    # what the printer says about itself prints through. asking cups for its backends runs each of
+    # them in the mode where it names itself, so the answer comes from the backend that would print
+    _, output = run("sudo lpinfo --timeout 10 -v | grep -c -E '^network ipps?'", "the backends cups has")
     found = re.search(r"^\s*(\d+)\s*$", without_console(output), re.M)
     if not found or int(found.group(1)) < 1:
-        problems.append(f"cups offers no driverless driver: {without_console(output).strip()[-200:]!r}")
+        problems.append(f"cups has no ipp backend: {without_console(output).strip()[-200:]!r}")
     for unit in ("cups", "avahi-daemon", "cups-browsed"):
         _, output = run(f"systemctl is-active {unit} | cat", f"the {unit} unit")
         if without_console(output).strip().splitlines()[-1:] != ["active"]:
