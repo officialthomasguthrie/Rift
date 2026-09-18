@@ -119,9 +119,9 @@ stand side by side between the bar and the dock, each with the title bar it draw
 button at its right. KeePassXC, the first Qt app, started from the Applications menu, stands there with
 the Adwaita title bar Qt draws for it in dark. The everyday apps follow, one at a time from the same menu:
 pictures, documents, video, sound, the calculator, archives, the disks, where the space went and the
-characters, each with the title bar it draws itself. A file of each kind names the app that owns it, and
-the image viewer, given a photograph, draws it in colour between the bars. The owner's theme set to light
-and the shell started again
+characters, each with the title bar it draws itself. polkit refuses every action of the disk utility on a
+disk the machine boots from, a file of each kind names the app that owns it, and the image viewer, given a
+photograph, draws it in colour between the bars. The owner's theme set to light and the shell started again
 make the bar, the dock, the desktop, the Applications menu, the lock screen and both apps light, and dark
 again after that.
 With --models as
@@ -276,8 +276,6 @@ DESKTOP = (36, 36, 36)
 # 1280x800 the way horizon does it. the dark of space and the lit side of the earth, at the left of
 # the screen and at its right, where a window at the left leaves it showing
 WALLPAPER = "dark-side-of-earth"
-# the photograph the image viewer opens, the one with the most colour in it of the shipped set
-PICTURE = "aurora"
 WALLPAPER_SIZE = (1280, 800)
 WALLPAPER_SQUARE = 24
 WALLPAPER_TOLERANCE = 8
@@ -393,6 +391,8 @@ DARK_COLORS = Colors(bar=BAR, line=BAR_LINE, menu=MENU, field=FIELD, desktop=DES
 LIGHT_COLORS = Colors(bar=(235, 235, 235), line=(208, 208, 208), menu=(250, 250, 250), field=(255, 255, 255),
                       desktop=(242, 241, 240), lock=(235, 235, 235), lock_field=(255, 255, 255),
                       accent=(53, 132, 228), refused=(192, 28, 40))
+# the photograph the image viewer opens, the one with the most colour in it of the shipped set
+PICTURE = "aurora"
 # the apps whose title bars the test looks at, the first two in the dock, from left to right on screen
 TITLED_APPS = ["firefox", "com.mitchellh.ghostty"]
 # the image's first qt app, which the test starts from the Applications menu: its name in the list, and
@@ -3220,7 +3220,8 @@ def main():
                "a removable one")
             # and the whole way through: mounting a partition of the drive the vm boots from is refused
             if args.exchange:
-                status, output = run("udisksctl mount -b (realpath /dev/disk/by-partlabel/exchange)",
+                status, output = run("udisksctl mount --no-user-interaction "
+                                     "-b (realpath /dev/disk/by-partlabel/exchange)",
                                      "mounting a partition of the disk the machine boots from")
                 refusal = without_console(output)
                 if status == 0 or "Not authorized" not in refusal:

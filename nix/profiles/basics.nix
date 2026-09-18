@@ -28,9 +28,32 @@
   ];
 
   # the disks, their partitions and their smart counters. gnome disks asks udisks over the system
-  # bus, which starts when it does. what udisks refuses on a host disk is in airlock.nix
+  # bus, which starts when it does
   programs.gnome-disks.enable = true;
   services.udisks2.enable = true;
+
+  # udisks answers questions, and asks polkit before it writes anything, so the disk utility shows
+  # every disk and its counters while the drive the machine boots from stays as it is. the ids that
+  # end in -system are the ones udisks asks for when the device is internal to the machine:
+  # mounting, unlocking, formatting, partitioning, opening the raw device, standby and eject. swap
+  # is refused with them, and so are the three that erase a whole drive, which have no id of their
+  # own for an internal device; formatting a removable disk is another action, and the owner keeps
+  # that. a host disk is still mounted read-only through orbit, and nowhere else
+  security.polkit.extraConfig = ''
+    polkit.addRule(function (action, subject) {
+      var id = action.id;
+      if (id.indexOf("org.freedesktop.udisks2.") != 0) {
+        return;
+      }
+      if (id.lastIndexOf("-system") == id.length - 7
+          || id == "org.freedesktop.udisks2.manage-swapspace"
+          || id == "org.freedesktop.udisks2.ata-secure-erase"
+          || id == "org.freedesktop.udisks2.nvme-sanitize"
+          || id == "org.freedesktop.udisks2.nvme-format-namespace") {
+        return polkit.Result.NO;
+      }
+    });
+  '';
 
   # the emoji the character picker shows, and the ones every other app draws. the image had letters
   # alone until now, so an emoji in a page or a message was an empty box

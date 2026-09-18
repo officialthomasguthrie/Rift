@@ -57,29 +57,6 @@ in
           pkgs.bubblewrap
           pkgs.nftables
         ];
-        # host disks are never auto-mounted, and nothing in the session writes to one. udisks runs,
-        # so the disk utility can show every disk and its counters, and every action it offers on a
-        # disk the host boots from is refused here, swap on one with it. orbit mounts a host disk
-        # read-only on request, and that is the one way in.
-        # the ids that end in -system are the ones udisks asks for when the device is internal to the
-        # machine. the three named after them erase a whole drive and have no such id of their own,
-        # so they are refused whatever the drive is: formatting a removable disk is a different
-        # action, and the owner keeps that
-        security.polkit.extraConfig = ''
-          polkit.addRule(function (action, subject) {
-            var id = action.id;
-            if (id.indexOf("org.freedesktop.udisks2.") != 0) {
-              return;
-            }
-            if (id.lastIndexOf("-system") == id.length - 7
-                || id == "org.freedesktop.udisks2.manage-swapspace"
-                || id == "org.freedesktop.udisks2.ata-secure-erase"
-                || id == "org.freedesktop.udisks2.nvme-sanitize"
-                || id == "org.freedesktop.udisks2.nvme-format-namespace") {
-              return polkit.Result.NO;
-            }
-          });
-        '';
         services.dbus.packages = [ policy ];
 
         systemd.services.airlock = {
