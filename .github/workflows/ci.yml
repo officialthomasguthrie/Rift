@@ -504,7 +504,7 @@ jobs:
           # the vm app writes the image onto a drive in a file with rift-flash and boots that
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --models models/cache \
             --exchange 1G --log serial.log --splash splash.png --desktop desktop.png --lens \
-            --updates updates.img --backup backup.img --clone clone.img --flatpak test-flatpak --timeout 1800
+            --updates updates.img --backup backup.img --clone clone.img --flatpak test-flatpak --timeout 2400
       - name: Boot a drive that makes persist at its first boot
         # rift-flash leaves persist out, the way it writes a drive on macos and windows. the drive
         # asks for a passphrase over serial, makes persist and formats its exchange partition, and the

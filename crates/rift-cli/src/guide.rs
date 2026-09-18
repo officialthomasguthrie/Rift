@@ -49,7 +49,12 @@ fn pages(folder: &Path) -> Vec<(String, String)> {
         let Some(name) = link.strip_suffix(".html") else {
             continue;
         };
-        if name.contains('/') || pages.iter().any(|(had, _): &(String, String)| had == name) {
+        // every page has the contents at the top of it, this one too, and the contents is not one
+        // of the pages it lists
+        if name == FIRST
+            || name.contains('/')
+            || pages.iter().any(|(had, _): &(String, String)| had == name)
+        {
             continue;
         }
         let page = folder.join(link);
@@ -149,5 +154,53 @@ mod tests {
     #[test]
     fn a_folder_with_no_guide_in_it_has_no_pages() {
         assert!(pages(Path::new("/nowhere-at-all")).is_empty());
+    }
+
+    /// The guide the image carries: every page is in the contents, every link in it goes to a page
+    /// that is there, and every page has a title and a heading. An 80 minute image build is a slow
+    /// way to find a link with a typo in it.
+    #[test]
+    fn the_guide_hangs_together() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nix/guide");
+        let listed = pages(&folder);
+        assert!(listed.len() > 5, "the guide has {} pages", listed.len());
+        let mut files: Vec<String> = fs::read_dir(&folder)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                Path::new(name).extension().is_some_and(|end| end == "html") && name != "index.html"
+            })
+            .collect();
+        files.sort();
+        let mut named: Vec<String> = listed
+            .iter()
+            .map(|(name, _)| format!("{name}.html"))
+            .collect();
+        named.sort();
+        assert_eq!(files, named, "a page of the guide is not in the contents");
+        for (name, heading) in &listed {
+            assert!(!heading.is_empty(), "{name} has no heading");
+        }
+        for name in files.iter().chain(["index.html".to_string()].iter()) {
+            let text = fs::read_to_string(folder.join(name)).unwrap();
+            assert!(text.contains("<title>"), "{name} has no title");
+            assert!(text.contains("<h1>"), "{name} has no heading");
+            assert!(
+                text.is_ascii(),
+                "{name} has something other than ascii in it"
+            );
+            for link in text.split("href=\"").skip(1) {
+                let link = link.split('"').next().unwrap_or_default();
+                if link.starts_with("http") {
+                    continue;
+                }
+                let target = link.split('#').next().unwrap_or_default();
+                assert!(
+                    folder.join(target).is_file(),
+                    "{name} links to {link}, which is not there"
+                );
+            }
+        }
     }
 }
