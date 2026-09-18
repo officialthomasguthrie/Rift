@@ -401,25 +401,31 @@ QT_APP = "KeePassXC"
 QT_APP_ID = "keepassxc"
 # the everyday apps, each started from the Applications menu by the name the list shows: the name to
 # type, what the app id of its window has in it whatever case it is in, what its screendump is called,
-# and how much of its title bar one gray covers. an app id is the application's own name for most of
-# them and the program's name for the disk utility, so these are the part they share
+# how much of its title bar one gray covers, and whether it asks a portal for permission before it
+# draws. an app id is the application's own name for most of them and the program's name for the disk
+# utility, so these are the part they share
 BASIC_APPS = [
-    ("Image Viewer", "loupe", "loupe", 0.4),
-    ("Document Viewer", "papers", "papers", 0.4),
-    ("Video Player", "showtime", "showtime", 0.4),
-    ("Audio Player", "decibels", "decibels", 0.4),
-    ("Calculator", "calculator", "calculator", 0.4),
-    ("File Roller", "roller", "file-roller", 0.4),
+    ("Image Viewer", "loupe", "loupe", 0.4, False),
+    ("Document Viewer", "papers", "papers", 0.4, False),
+    ("Video Player", "showtime", "showtime", 0.4, False),
+    ("Audio Player", "decibels", "decibels", 0.4, False),
+    ("Calculator", "calculator", "calculator", 0.4, False),
+    ("File Roller", "roller", "file-roller", 0.4, False),
     # the disk utility is the one of the nine still written for gtk 3, whose title bar is a gradient
     # of grays next to a flat one over the sidebar, so no single gray covers much of it
-    ("Disks", "disk", "disks", 0.2),
-    ("Disk Usage Analyzer", "baobab", "baobab", 0.4),
-    ("Characters", "characters", "characters", 0.4),
+    ("Disks", "disk", "disks", 0.2, False),
+    ("Disk Usage Analyzer", "baobab", "baobab", 0.4, False),
+    ("Characters", "characters", "characters", 0.4, False),
     # the camera and the scanner have no hardware to find in a virtual machine, so each draws the
-    # page it draws when there is none, with its title bar above it
-    ("Camera", "snapshot", "camera", 0.4),
-    ("Document Scanner", "scan", "scanner", 0.4),
+    # page it draws when there is none, with its title bar above it. the camera asks the portal for
+    # the camera before it looks for one, and the portal asks the owner in a window of its own
+    ("Camera", "snapshot", "camera", 0.4, True),
+    ("Document Scanner", "scan", "scanner", 0.4, False),
 ]
+# a window a portal asks a question in, with the rectangle horizon gave it. the size comes before the
+# position in the window list, and both are the logical pixels the pointer moves in
+PORTAL_WINDOW = re.compile(r'"app_id":"[^"]*portal[^"]*".{0,400}?"window_size":\[(\d+),(\d+)\],'
+                           r'"tile_pos_in_workspace_view":\[([\d.]+),([\d.]+)\]')
 # the app a file of each kind opens with, as `xdg-mime query default` prints it
 DEFAULT_APPS = [
     ("image/jpeg", "org.gnome.Loupe.desktop"),
@@ -3268,8 +3274,34 @@ def main():
                 if not wait_for(60, lambda: not app_windows(app_id, "the windows left")):
                     fail(f"{name}'s window did not close")
 
-            for name, app_id, png, share in BASIC_APPS:
+            def portal_question(what):
+                """The rectangle a portal is asking a question in, as (width, height, left, top),
+                or None when no portal has a window up."""
+                status, output = run("horizon msg --json windows", what)
+                printed = without_console(output).replace("\n", "")
+                if status != 0:
+                    fail(f"horizon msg windows exited with {status}: {printed.strip()[-300:]!r}")
+                found = PORTAL_WINDOW.search(printed)
+                return found and (int(found.group(1)), int(found.group(2)),
+                                  float(found.group(3)), float(found.group(4)))
+
+            def grant_the_camera(name):
+                """Answer the portal's question about the camera the way a person would, when there is
+                one. Its buttons are along the bottom of its window, deny at the left and grant at the
+                right, and a drive whose owner has answered once is not asked again."""
+                if not wait_for(60, lambda: portal_question(f"the portal's question for {name}")):
+                    print(f"\nboot-test: the portal did not ask before {name} took the camera", flush=True)
+                    return
+                asked = portal_question("the question's window")
+                click(args.qmp, size, (asked[2] + asked[0] * 0.75, asked[3] + asked[1] - round(20 * scale)))
+                if not wait_for(60, lambda: not portal_question("the question after the answer")):
+                    fail(f"the portal kept asking for the camera after {name} was granted it")
+                ok(f"the portal asked before {name} took the camera, and took the owner's answer")
+
+            for name, app_id, png, share, asks in BASIC_APPS:
                 open_from_menu(name, app_id)
+                if asks:
+                    grant_the_camera(name)
                 point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
                 look(f"{name} with its title bar", f"{stem}-{png}{extension}", 120, apps=[app_id],
                      journals=("horizon", "lens"), settle=3, share=share)
