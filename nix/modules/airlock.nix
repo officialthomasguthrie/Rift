@@ -57,8 +57,6 @@ in
           pkgs.bubblewrap
           pkgs.nftables
         ];
-        # host disks are never auto-mounted. orbit mounts them read-only on request
-        services.udisks2.enable = lib.mkForce false;
         services.dbus.packages = [ policy ];
 
         systemd.services.airlock = {

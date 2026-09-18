@@ -117,7 +117,11 @@ volume key sent over qmp turns the sink up and shows the key popup over the dock
 brings it back, since it is a user unit that restarts. Then Firefox and Ghostty, started from the dock,
 stand side by side between the bar and the dock, each with the title bar it draws itself and a close
 button at its right. KeePassXC, the first Qt app, started from the Applications menu, stands there with
-the Adwaita title bar Qt draws for it in dark. The owner's theme set to light and the shell started again
+the Adwaita title bar Qt draws for it in dark. The everyday apps follow, one at a time from the same menu:
+pictures, documents, video, sound, the calculator, archives, the disks, where the space went and the
+characters, each with the title bar it draws itself. polkit refuses every action of the disk utility on a
+disk the machine boots from, a file of each kind names the app that owns it, and the image viewer, given a
+photograph, draws it in colour between the bars. The owner's theme set to light and the shell started again
 make the bar, the dock, the desktop, the Applications menu, the lock screen and both apps light, and dark
 again after that.
 With --models as
@@ -387,12 +391,39 @@ DARK_COLORS = Colors(bar=BAR, line=BAR_LINE, menu=MENU, field=FIELD, desktop=DES
 LIGHT_COLORS = Colors(bar=(235, 235, 235), line=(208, 208, 208), menu=(250, 250, 250), field=(255, 255, 255),
                       desktop=(242, 241, 240), lock=(235, 235, 235), lock_field=(255, 255, 255),
                       accent=(53, 132, 228), refused=(192, 28, 40))
+# the photograph the image viewer opens, the one with the most colour in it of the shipped set
+PICTURE = "aurora"
 # the apps whose title bars the test looks at, the first two in the dock, from left to right on screen
 TITLED_APPS = ["firefox", "com.mitchellh.ghostty"]
 # the image's first qt app, which the test starts from the Applications menu: its name in the list, and
 # what the app id of its window has in it whatever case it is in
 QT_APP = "KeePassXC"
 QT_APP_ID = "keepassxc"
+# the everyday apps, each started from the Applications menu by the name the list shows: the name to
+# type, what the app id of its window has in it whatever case it is in, what its screendump is called,
+# and how much of its title bar one gray covers. an app id is the application's own name for most of
+# them and the program's name for the disk utility, so these are the part they share
+BASIC_APPS = [
+    ("Image Viewer", "loupe", "loupe", 0.4),
+    ("Document Viewer", "papers", "papers", 0.4),
+    ("Video Player", "showtime", "showtime", 0.4),
+    ("Audio Player", "decibels", "decibels", 0.4),
+    ("Calculator", "calculator", "calculator", 0.4),
+    ("File Roller", "roller", "file-roller", 0.4),
+    # the disk utility is the one of the nine still written for gtk 3, whose title bar is a gradient
+    # of grays next to a flat one over the sidebar, so no single gray covers much of it
+    ("Disks", "disk", "disks", 0.2),
+    ("Disk Usage Analyzer", "baobab", "baobab", 0.4),
+    ("Characters", "characters", "characters", 0.4),
+]
+# the app a file of each kind opens with, as `xdg-mime query default` prints it
+DEFAULT_APPS = [
+    ("image/jpeg", "org.gnome.Loupe.desktop"),
+    ("application/pdf", "org.gnome.Papers.desktop"),
+    ("video/mp4", "org.gnome.Showtime.desktop"),
+    ("audio/flac", "org.gnome.Decibels.desktop"),
+    ("application/zip", "org.gnome.FileRoller.desktop"),
+]
 # the apps, tools and languages of the image's first tier, each with the command that prints its
 # version and what that has to print. the commands run in fish, as the owner
 TOOLS = [
@@ -579,6 +610,22 @@ def ink_in(width, rgb, top, bottom, colors=DARK_COLORS):
             if not near(px, colors.bar, 3) and not near(px, colors.line, 3):
                 found[min(2, x * 3 // width)] += 1
     return found
+
+
+def coloured_in(width, rgb, top, bottom):
+    """How many of the pixels in these rows have a colour, of the pixels looked at. The bars, the
+    windows and their title bars are neutral grays, so a count near zero means nothing on screen
+    is drawn from a photograph."""
+    found = 0
+    looked = 0
+    for y in range(top, bottom, 4):
+        row = y * width * 3
+        for x in range(0, width, 4):
+            px = rgb[row + x * 3 : row + x * 3 + 3]
+            looked += 1
+            if max(px) - min(px) > 20:
+                found += 1
+    return found, looked
 
 
 def wallpaper_squares(width, height, rgb, squares):
@@ -1012,12 +1059,12 @@ def most_common(rgb, width, left, right, top, bottom):
     return tuple(color), found / sum(counts.values())
 
 
-def check_apps(width, height, rgb, apps, colors=DARK_COLORS):
+def check_apps(width, height, rgb, apps, colors=DARK_COLORS, share_wanted=0.4):
     """Find windows side by side between the bar and the dock, one for each of apps from left to right,
     each with a title bar it draws itself: a band along its top in one neutral gray of the theme that
-    is not the desktop's, with something drawn in the right end of it, where the close button is. The
-    desktop's gray is matched exactly: the dark window gray of GTK and Firefox, #222226, is two steps
-    from it. Returns (ok, lines to print)."""
+    is not the desktop's, over share_wanted of the band, with something drawn in the right end of it,
+    where the close button is. The desktop's gray is matched exactly: the dark window gray of GTK and
+    Firefox, #222226, is two steps from it. Returns (ok, lines to print)."""
     bar_rows, dock_rows = bar_and_dock(width, height, bar_gray_rows(width, height, rgb, colors))
     scale = bar_rows / BAR_HEIGHT if bar_rows else 1
     ink = ink_in(width, rgb, 0, bar_rows, colors)
@@ -1076,7 +1123,7 @@ def check_apps(width, height, rgb, apps, colors=DARK_COLORS):
                     close += 1
         checks += [
             (f"{app}'s title bar is one gray of the theme along the top of its window",
-             neutral and shade and share >= 0.4 and not near(fill, colors.desktop, 1),
+             neutral and shade and share >= share_wanted and not near(fill, colors.desktop, 1),
              f"from x {left} to {right}, top {top}: #{bytes(fill).hex()} over {share:.0%} of its first rows"),
             (f"{app}'s title bar has its close button at the right", close >= 12 * scale * scale,
              f"{close} pixels drawn in its right end"),
@@ -2095,7 +2142,7 @@ def main():
             fail(f"greetd.service is {state}, expected active")
 
         def look(what, png, seconds, console=False, lock=None, apps=None, colors=DARK_COLORS, journals=(),
-                 settle=0, **shape):
+                 settle=0, share=0.4, **shape):
             """Screendump until the bar and the menu have the shape we asked for, or the console is
             open, or the lock screen is up (lock says whether it has refused a password), or the apps
             stand side by side with their title bars, or give up and save it. colors are the theme's.
@@ -2114,7 +2161,7 @@ def main():
                 elif console:
                     good, lines = check_console(width, height, rgb)
                 elif apps:
-                    good, lines = check_apps(width, height, rgb, apps, colors)
+                    good, lines = check_apps(width, height, rgb, apps, colors, share)
                 else:
                     good, lines = check_desktop(width, height, rgb, lens=args.lens, colors=colors, **shape)
                 passes = passes + 1 if good else 0
@@ -3129,6 +3176,97 @@ def main():
             if not wait_for(60, lambda: not qt_windows("the windows left")):
                 fail(f"{QT_APP}'s window did not close")
 
+            # 5j. the everyday apps, one at a time from the Applications menu by the name the list shows:
+            # pictures, documents, video, sound, the calculator, archives, the disks, where the space went
+            # and the characters. each opens a window horizon lists, with the title bar gtk draws for it in
+            # a gray of the theme, and closes again
+            def app_windows(app_id, what):
+                """Horizon's windows whose app id has app_id in it."""
+                return [win for win in open_windows(what) if app_id in win[1].lower()]
+
+            def open_from_menu(name, app_id):
+                """Type an app's name into the Applications menu and press enter, and wait for its window."""
+                run("lens --menu", f"the Applications menu for {name}")
+                run(f'lens --type "{name}"', f"{name} typed into the field")
+                run("lens --enter", f"enter on {name}")
+                if not wait_for(180, lambda: app_windows(app_id, f"{name}'s window")):
+                    _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                    fail(f"the Applications menu opened no {app_id} window: "
+                         f"{without_console(output).strip()[-800:]!r}")
+
+            def close_app(name, app_id):
+                for window, _, _ in app_windows(app_id, f"{name}'s window to close"):
+                    run(f"horizon msg action close-window --id {window}", f"closing {name}'s window")
+                if not wait_for(60, lambda: not app_windows(app_id, "the windows left")):
+                    fail(f"{name}'s window did not close")
+
+            for name, app_id, png, share in BASIC_APPS:
+                open_from_menu(name, app_id)
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                look(f"{name} with its title bar", f"{stem}-{png}{extension}", 120, apps=[app_id],
+                     journals=("horizon", "lens"), settle=3, share=share)
+                close_app(name, app_id)
+            ok(f"the Applications menu opened {len(BASIC_APPS)} everyday apps, each with the title bar it "
+               "draws itself, and each closed again")
+
+            # the disk utility reads udisks, and udisks asks polkit before it writes anything. an action
+            # on a disk internal to the machine, which is what a host's disk is, is refused outright and
+            # has nothing to authenticate; the same action on a removable disk is not refused here. that
+            # is the rule that leaves host disks as they are, and it is the reason udisks may run at all
+            for action, refused in (("filesystem-mount-system", True), ("filesystem-mount", False)):
+                _, output = run(f"pkcheck --action-id org.freedesktop.udisks2.{action} --process $fish_pid",
+                                f"whether the owner may {action}")
+                said = without_console(output)
+                if refused != ("Not authorized." in said):
+                    fail(f"polkit answers {said.strip()[-200:]!r} for {action}, expected "
+                         f"{'a refusal with nothing to authenticate' if refused else 'no refusal'}")
+            ok("polkit refuses every udisks action on a disk the machine boots from, and refuses none on "
+               "a removable one")
+            # and the whole way through: mounting a partition of the drive the vm boots from is refused
+            if args.exchange:
+                status, output = run("udisksctl mount --no-user-interaction "
+                                     "-b (realpath /dev/disk/by-partlabel/exchange)",
+                                     "mounting a partition of the disk the machine boots from")
+                refusal = without_console(output)
+                if status == 0 or "Not authorized" not in refusal:
+                    fail(f"udisks did not refuse the mount: it exited with {status} and said "
+                         f"{refusal.strip()[-300:]!r}")
+                ok("udisks refuses to mount a partition of the disk the machine boots from")
+
+            # a file opens with the app that owns its kind, and the image viewer draws a real photograph:
+            # it reads the file in a sandbox of its own, one loader per format, so a picture on screen says
+            # that sandbox works
+            wrong = []
+            for kind, desktop in DEFAULT_APPS:
+                _, output = run(f"xdg-mime query default {kind}", f"what opens {kind}")
+                if desktop not in without_console(output):
+                    wrong.append(f"{kind} opens with {without_console(output).strip()[-60:]!r}, "
+                                 f"expected {desktop}")
+            if wrong:
+                fail("; ".join(wrong))
+            ok(f"a file of each of {len(DEFAULT_APPS)} kinds opens with the app that owns it")
+
+            photograph = f"/run/current-system/sw/share/backgrounds/rift/{PICTURE}.jpg"
+            run(f"systemd-run --user --quiet --collect loupe {photograph}",
+                "the image viewer on a photograph")
+            if not wait_for(180, lambda: app_windows("loupe", "the image viewer's window")):
+                _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"loupe {photograph} opened no window: {without_console(output).strip()[-800:]!r}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look("the photograph in the image viewer", f"{stem}-picture{extension}", 120,
+                 apps=["loupe"], journals=("horizon", "lens"), settle=3)
+            _, _, shown = screendump(args.qmp, work, "picture")
+            top_rows, bottom_rows = bar_and_dock(width, height, bar_gray_rows(width, height, shown))
+            found, looked = coloured_in(width, shown, top_rows + 8, height - bottom_rows - 8)
+            if found < looked / 20:
+                fail(f"the image viewer draws no photograph: {found} of {looked} pixels between the bars "
+                     f"have a colour, see {stem}-picture{extension}")
+            ok(f"the image viewer drew {PICTURE}, {found} of {looked} pixels between the bars in colour")
+            close_app("the image viewer", "loupe")
+            # the thumbnails and the plugin list the apps wrote are in home, where the backup, the
+            # snapshots and the clone after them would carry them
+            run("rm -rf ~/.cache/thumbnails ~/.cache/gstreamer-1.0", "what the apps left in the cache")
+
             # the owner's theme to light: the shell, the desktop behind it, the menus, the lock screen and
             # the apps, which start again so they read it as they would at the start of a session
             theme_to("light")
@@ -3161,7 +3299,7 @@ def main():
             point(args.qmp, size, (round(width / 3), round(height / 2)))
             look("the desktop back in dark", f"{stem}-dark-again{extension}", 30, journals=("lens", "horizon"))
 
-            # 5j. the photograph again, by its name, which the next boots of this drive keep. horizon
+            # 5k. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again
             status, output = run(f"rift wallpaper set {WALLPAPER}", "the default wallpaper by its name")
             if status != 0 or f"The wallpaper is {WALLPAPER}." not in without_console(output):

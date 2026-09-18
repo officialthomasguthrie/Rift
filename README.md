@@ -76,6 +76,7 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 The image includes the following software, so a new drive is usable without a network connection.
 
 - Firefox, Ghostty, Zed, Helix, Neovim, KeePassXC and virt-manager, with fish, bash, Nushell and zellij.
+- GNOME's viewers and utilities for everyday files: Loupe for pictures, Papers for documents, Showtime for video, Decibels for sound, Calculator, File Roller for archives, Disks, Disk Usage Analyzer and Characters.
 - Rootless Podman, which also answers to `docker`, and QEMU with KVM through libvirt, with UEFI firmware and a software TPM for guests.
 - Compilers and runtimes for Rust, C and C++ (GCC, Clang and LLVM, with CMake, Ninja and Make), Python, Node.js, Bun, Go, Zig and Java.
 - gdb, LLDB, Valgrind, strace, ltrace and perf for debugging, and git, the GitHub CLI, ripgrep, fd, fzf and bat.
