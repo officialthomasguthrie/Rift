@@ -1831,9 +1831,15 @@ def main():
         if without_console(output).strip().splitlines()[-1:] != ["active"]:
             _, journal = run(f"journalctl -b -u {unit} -o cat -n 20 | cat", f"{unit}'s log")
             problems.append(f"{unit} is not active: {without_console(journal).strip()[-400:]!r}")
-    _, output = run("grep '^disable-publishing' /etc/avahi/avahi-daemon.conf", "what avahi publishes")
-    if "disable-publishing=yes" not in without_console(output):
-        problems.append(f"avahi publishes: {without_console(output).strip()[-200:]!r}")
+    # asked to announce a name and an address on the link, avahi says no: publishing is off, and the
+    # daemon refuses the entry group itself. the config it was started with is in the store, not in
+    # /etc, so this asks the daemon rather than reading a file. avahi-publish-address stays up while
+    # a name is registered, so a timeout means it published
+    status, output = run("timeout 10 avahi-publish-address rift-test.local 192.0.2.1",
+                         "avahi asked to announce a name")
+    if status in (0, 124):
+        problems.append(f"avahi announced rift-test.local, it exited with {status} and printed "
+                        f"{without_console(output).strip()[-200:]!r}")
     _, output = run("scanimage -L", "the scanners sane can see")
     printed = without_console(output)
     if "No scanners were identified" not in printed and "device" not in printed:
@@ -1844,7 +1850,8 @@ def main():
     printed = without_console(output)
     if status != 0 or not re.search(r"\d+\.\d+\.\d+", printed):
         problems.append(f"fwupdmgr --version exited with {status} and printed {printed.strip()[-300:]!r}")
-    _, output = run("busctl --system get-property org.freedesktop.fwupd /org/freedesktop/fwupd "
+    # fwupd hangs its interface off the root of its bus name, not off a path of its own
+    _, output = run("busctl --system get-property org.freedesktop.fwupd / "
                     "org.freedesktop.fwupd DaemonVersion | cat", "the firmware daemon on the bus")
     if not re.search(r's\s+"\d+\.\d+\.\d+"', without_console(output)):
         problems.append(f"the fwupd daemon did not answer on the bus: {without_console(output).strip()[-300:]!r}")
