@@ -1833,13 +1833,15 @@ def main():
             problems.append(f"{unit} is not active: {without_console(journal).strip()[-400:]!r}")
     # asked to announce a name and an address on the link, avahi says no: publishing is off, and the
     # daemon refuses the entry group itself. the config it was started with is in the store, not in
-    # /etc, so this asks the daemon rather than reading a file. avahi-publish-address stays up while
-    # a name is registered, so a timeout means it published
+    # /etc, so this asks the daemon rather than reading a file. avahi-publish-address says what the
+    # daemon answered and then exits 0 either way, and it stays up while a name is registered, so
+    # the refusal is the message, and a timeout means it published
     status, output = run("timeout 10 avahi-publish-address rift-test.local 192.0.2.1",
                          "avahi asked to announce a name")
-    if status in (0, 124):
-        problems.append(f"avahi announced rift-test.local, it exited with {status} and printed "
-                        f"{without_console(output).strip()[-200:]!r}")
+    said = without_console(output)
+    if status == 124 or "Not permitted" not in said:
+        problems.append(f"avahi did not refuse to announce rift-test.local: it exited with {status} "
+                        f"and printed {said.strip()[-200:]!r}")
     _, output = run("scanimage -L", "the scanners sane can see")
     printed = without_console(output)
     if "No scanners were identified" not in printed and "device" not in printed:
