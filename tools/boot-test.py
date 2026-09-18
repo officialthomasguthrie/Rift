@@ -400,17 +400,19 @@ TITLED_APPS = ["firefox", "com.mitchellh.ghostty"]
 QT_APP = "KeePassXC"
 QT_APP_ID = "keepassxc"
 # the everyday apps, each started from the Applications menu by the name the list shows: the name to
-# type, the app id of the window it opens, and what its screendump is called
+# type, what the app id of its window has in it whatever case it is in, and what its screendump is
+# called. an app id is the application's own name for most of them and the program's name for the
+# disk utility, so these are the part they share
 BASIC_APPS = [
-    ("Image Viewer", "org.gnome.Loupe", "loupe"),
-    ("Document Viewer", "org.gnome.Papers", "papers"),
-    ("Video Player", "org.gnome.Showtime", "showtime"),
-    ("Audio Player", "org.gnome.Decibels", "decibels"),
-    ("Calculator", "org.gnome.Calculator", "calculator"),
-    ("File Roller", "org.gnome.FileRoller", "file-roller"),
-    ("Disks", "org.gnome.DiskUtility", "disks"),
-    ("Disk Usage Analyzer", "org.gnome.baobab", "baobab"),
-    ("Characters", "org.gnome.Characters", "characters"),
+    ("Image Viewer", "loupe", "loupe"),
+    ("Document Viewer", "papers", "papers"),
+    ("Video Player", "showtime", "showtime"),
+    ("Audio Player", "decibels", "decibels"),
+    ("Calculator", "calculator", "calculator"),
+    ("File Roller", "roller", "file-roller"),
+    ("Disks", "disk", "disks"),
+    ("Disk Usage Analyzer", "baobab", "baobab"),
+    ("Characters", "characters", "characters"),
 ]
 # the app a file of each kind opens with, as `xdg-mime query default` prints it
 DEFAULT_APPS = [
@@ -3177,8 +3179,8 @@ def main():
             # and the characters. each opens a window horizon lists, with the title bar gtk draws for it in
             # a gray of the theme, and closes again
             def app_windows(app_id, what):
-                """Horizon's windows of one app."""
-                return [win for win in open_windows(what) if win[1].lower() == app_id.lower()]
+                """Horizon's windows whose app id has app_id in it."""
+                return [win for win in open_windows(what) if app_id in win[1].lower()]
 
             def open_from_menu(name, app_id):
                 """Type an app's name into the Applications menu and press enter, and wait for its window."""
@@ -3245,12 +3247,12 @@ def main():
             photograph = f"/run/current-system/sw/share/backgrounds/rift/{PICTURE}.jpg"
             run(f"systemd-run --user --quiet --collect loupe {photograph}",
                 "the image viewer on a photograph")
-            if not wait_for(180, lambda: app_windows("org.gnome.Loupe", "the image viewer's window")):
+            if not wait_for(180, lambda: app_windows("loupe", "the image viewer's window")):
                 _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
                 fail(f"loupe {photograph} opened no window: {without_console(output).strip()[-800:]!r}")
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             look("the photograph in the image viewer", f"{stem}-picture{extension}", 120,
-                 apps=["org.gnome.Loupe"], journals=("horizon", "lens"), settle=3)
+                 apps=["loupe"], journals=("horizon", "lens"), settle=3)
             _, _, shown = screendump(args.qmp, work, "picture")
             top_rows, bottom_rows = bar_and_dock(width, height, bar_gray_rows(width, height, shown))
             found, looked = coloured_in(width, shown, top_rows + 8, height - bottom_rows - 8)
@@ -3258,7 +3260,7 @@ def main():
                 fail(f"the image viewer draws no photograph: {found} of {looked} pixels between the bars "
                      f"have a colour, see {stem}-picture{extension}")
             ok(f"the image viewer drew {PICTURE}, {found} of {looked} pixels between the bars in colour")
-            close_app("the image viewer", "org.gnome.Loupe")
+            close_app("the image viewer", "loupe")
             # the thumbnails and the plugin list the apps wrote are in home, where the backup, the
             # snapshots and the clone after them would carry them
             run("rm -rf ~/.cache/thumbnails ~/.cache/gstreamer-1.0", "what the apps left in the cache")
