@@ -3434,8 +3434,13 @@ def main():
             press(["ctrl", "alt", "shift", "r"], what="the screen recording key")
             recording = wait_for(30, recording_file)
             if not recording:
+                # horizon starts what a key runs with its output thrown away, so the same command
+                # from the terminal is the only way to see what it had to say
+                _, output = run("lens --record", "the recorder from the terminal, to read its error")
+                said = without_console(output).strip()[-300:]
                 _, output = run("journalctl --user -b -o cat -n 20 | cat", "the user manager's log")
-                fail(f"the screen recording key started nothing: {without_console(output).strip()[-500:]!r}")
+                fail(f"the screen recording key started nothing: {said!r}, "
+                     f"{without_console(output).strip()[-500:]!r}")
             # the recorder asks the compositor for a frame when the screen changes, so a still
             # desktop records almost nothing. the menu opening and closing is the change
             run("lens --menu", "the Applications menu while the screen is recorded")
@@ -3472,12 +3477,19 @@ def main():
 
             press(["meta_l", "alt", "s"], what="the screen reader key")
             if not wait_for(30, lambda: access_state("screen-reader", "the screen reader after the key") == "on"):
+                _, output = run("lens --screen-reader", "the screen reader from the terminal")
+                said = without_console(output).strip()[-300:]
                 _, output = run("journalctl --user -b -o cat -n 20 | cat", "the user manager's log")
-                fail(f"the screen reader key started nothing: {without_console(output).strip()[-500:]!r}")
+                fail(f"the screen reader key started nothing: {said!r}, "
+                     f"{without_console(output).strip()[-500:]!r}")
             if not wait_for(180, lambda: orca_on_the_bus("the screen reader on the session bus")):
-                _, output = run("journalctl --user -b -o cat -n 40 | cat", "the user manager's log")
-                fail("the screen reader did not take org.gnome.Orca.Service on the session bus: "
-                     f"{without_console(output).strip()[-800:]!r}")
+                # again with its output kept, so a failure to start says why
+                run("systemd-run --user --quiet --collect --unit=orca-probe orca --replace",
+                    "the screen reader in a unit of its own")
+                run("sleep 30", "a moment for it to say what is wrong")
+                _, output = run("journalctl --user -u orca-probe -b -o cat -n 40 | cat", "what it said")
+                said = without_console(output).strip()[-800:]
+                fail(f"the screen reader did not take org.gnome.Orca.Service on the session bus: {said!r}")
             wav = "/tmp/rift-speech.wav"
             _, output = run(f'espeak-ng -w {wav} "The screen reader is on"; and stat -c %s {wav}',
                             "the voice writing a file")
@@ -3502,11 +3514,17 @@ def main():
 
             press(["meta_l", "alt", "k"], what="the on-screen keyboard key")
             if not wait_for(30, lambda: access_state("keyboard", "the keyboard after the key") == "on"):
+                _, output = run("lens --keyboard", "the on-screen keyboard from the terminal")
+                said = without_console(output).strip()[-300:]
                 _, output = run("journalctl --user -b -o cat -n 20 | cat", "the user manager's log")
-                fail(f"the on-screen keyboard key started nothing: {without_console(output).strip()[-500:]!r}")
+                fail(f"the on-screen keyboard key started nothing: {said!r}, "
+                     f"{without_console(output).strip()[-500:]!r}")
             band = wait_for(30, keyboard_band)
             if not band:
-                fail("the on-screen keyboard drew nothing along the bottom of the screen")
+                _, output = run("pgrep -a wvkbd | cat", "whether the keyboard is running at all")
+                shot(f"{stem}-keyboard{extension}", "keyboard")
+                fail("the on-screen keyboard drew nothing along the bottom of the screen: "
+                     f"{without_console(output).strip()[-300:]!r}")
             shot(f"{stem}-keyboard{extension}", "keyboard")
             run("lens --menu", "the Applications menu for the keyboard to type into")
             if not wait_for(20, lambda: bar_state("the menu for the keyboard").get("menu") == "open"):
@@ -3523,8 +3541,9 @@ def main():
 
             typed = wait_for(30, typed_letter)
             if not typed:
+                shot(f"{stem}-keyboard-typing{extension}", "keyboard")
                 fail("a key pressed on the on-screen keyboard typed nothing into the field: "
-                     f"{bar_state('the field').get('field', '')!r}")
+                     f"{bar_state('the field').get('field', '')!r}, see {stem}-keyboard-typing{extension}")
             run("lens --escape", "escape, which clears the field")
             run("lens --escape", "escape again, which closes the menu")
             press(["meta_l", "alt", "k"], what="the on-screen keyboard key again")
