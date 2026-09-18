@@ -3205,6 +3205,29 @@ def main():
             ok(f"the Applications menu opened {len(BASIC_APPS)} everyday apps, each with the title bar it "
                "draws itself, and each closed again")
 
+            # the disk utility reads udisks, and udisks asks polkit before it writes anything. an action
+            # on a disk internal to the machine, which is what a host's disk is, is refused outright and
+            # has nothing to authenticate; the same action on a removable disk is not refused here. that
+            # is the rule that leaves host disks as they are, and it is the reason udisks may run at all
+            for action, refused in (("filesystem-mount-system", True), ("filesystem-mount", False)):
+                _, output = run(f"pkcheck --action-id org.freedesktop.udisks2.{action} --process $fish_pid",
+                                f"whether the owner may {action}")
+                said = without_console(output)
+                if refused != ("Not authorized." in said):
+                    fail(f"polkit answers {said.strip()[-200:]!r} for {action}, expected "
+                         f"{'a refusal with nothing to authenticate' if refused else 'no refusal'}")
+            ok("polkit refuses every udisks action on a disk the machine boots from, and refuses none on "
+               "a removable one")
+            # and the whole way through: mounting a partition of the drive the vm boots from is refused
+            if args.exchange:
+                status, output = run("udisksctl mount -b (realpath /dev/disk/by-partlabel/exchange)",
+                                     "mounting a partition of the disk the machine boots from")
+                refusal = without_console(output)
+                if status == 0 or "Not authorized" not in refusal:
+                    fail(f"udisks did not refuse the mount: it exited with {status} and said "
+                         f"{refusal.strip()[-300:]!r}")
+                ok("udisks refuses to mount a partition of the disk the machine boots from")
+
             # a file opens with the app that owns its kind, and the image viewer draws a real photograph:
             # it reads the file in a sandbox of its own, one loader per format, so a picture on screen says
             # that sandbox works
