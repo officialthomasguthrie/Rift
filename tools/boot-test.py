@@ -358,7 +358,7 @@ FLATPAK_APP = "Rift test app"
 WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
 # the words lens --state prints, and how the bar writes the time
-STATE_KEYS = ("clock", "theme", "accent", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
+STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
               "recording", "screen-reader", "keyboard")
@@ -432,7 +432,20 @@ SETTINGS_PAGES = 23
 SETTINGS_ACCENT = ("blue", "#78aeed")
 SETTINGS_OTHER = ("teal", "#68b4c1")
 # what rift-settings --state prints, one word each
-SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "greeting")
+SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text", "terminal",
+                 "greeting")
+# the interface text size the Appearance page is set to and put back to, in per cent, with the
+# factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
+# size, so the bar and the dock on screen are their own heights times it
+SETTINGS_TEXT = (150, 100)
+SETTINGS_FACTOR = "1.5"
+# the terminal colour schemes it is set to and put back to, from crates/librift/src/appearance.rs:
+# the word and the colour the terminal is drawn on. Rift's own is the near black of the console
+SETTINGS_SCHEME = ("solarized-dark", (0, 43, 54))
+SETTINGS_OWN_SCHEME = ("rift", CONSOLE)
+# how many pixels of that colour mean the terminal window is drawn on it. the window stands beside
+# the Settings window, so it is a quarter to a half of the screen with text over part of it
+TERMINAL_PIXELS = 60_000
 # a window a portal asks a question in, with the rectangle horizon gave it. the size comes before the
 # position in the window list, and both are the logical pixels the pointer moves in
 PORTAL_WINDOW = re.compile(r'"app_id":"[^"]*portal[^"]*".{0,400}?"window_size":\[(\d+),(\d+)\],'
@@ -3718,6 +3731,88 @@ def main():
             run(f"rift-settings --set accent {SETTINGS_ACCENT[0]}", "the accent back to blue")
             if not wait_for(30, lambda: bar_state("the shell's accent").get("accent") == SETTINGS_ACCENT[0]):
                 fail(f"lens --state does not say accent {SETTINGS_ACCENT[0]} after it was put back")
+
+            # the interface text size. dconf carries it to the apps, and the shell follows it by
+            # asking for every surface at that much of its size and drawing it at the same scale,
+            # so the bar and the dock on screen are their own heights times the factor
+            def bars(name):
+                """The rows the bar and the dock cover on screen."""
+                wide, tall, pixels = screendump(args.qmp, work, name)
+                return bar_and_dock(wide, tall, bar_gray_rows(wide, tall, pixels))
+
+            grown = (round(BAR_HEIGHT * SETTINGS_TEXT[0] / 100),
+                     round(DOCK_HEIGHT * SETTINGS_TEXT[0] / 100))
+            status, output = run(f"rift-settings --set text {SETTINGS_TEXT[0]}",
+                                 "the interface text size on the Appearance page")
+            if status != 0:
+                fail(f"rift-settings --set text exited with {status}: "
+                     f"{without_console(output).strip()[-300:]!r}")
+            if not wait_for(30, lambda: bar_state("the shell's text size").get("text") == str(SETTINGS_TEXT[0])):
+                fail(f"lens --state does not say text {SETTINGS_TEXT[0]} after the page set it")
+            _, output = run("dconf read /org/gnome/desktop/interface/text-scaling-factor",
+                            "the text size apps read")
+            if SETTINGS_FACTOR not in without_console(output):
+                fail(f"dconf reads the text scaling factor as {without_console(output).strip()!r}, "
+                     f"expected {SETTINGS_FACTOR}")
+            bigger = wait_for(60, lambda: next(
+                (found for found in [bars("text-size")] if found == grown), None))
+            shot(f"{stem}-settings-text{extension}", "text-size")
+            if not bigger:
+                fail(f"the bar and the dock are {bars('text-size')} rows at {SETTINGS_TEXT[0]} per cent, "
+                     f"expected {grown}, see {stem}-settings-text{extension}")
+            ok(f"the Appearance page set the interface text size to {SETTINGS_TEXT[0]} per cent: dconf "
+               f"reads {SETTINGS_FACTOR}, the shell says so and its bar and dock are {grown[0]} and "
+               f"{grown[1]} rows")
+
+            # and back, so the rest of the test and the next boots see the sizes they know
+            run(f"rift-settings --set text {SETTINGS_TEXT[1]}", "the text size back")
+            if not wait_for(30, lambda: bar_state("the shell's text size").get("text") == str(SETTINGS_TEXT[1])):
+                fail(f"lens --state does not say text {SETTINGS_TEXT[1]} after it was put back")
+            if not wait_for(60, lambda: next(
+                    (found for found in [bars("text-size-back")]
+                     if found == (BAR_HEIGHT, DOCK_HEIGHT)), None)):
+                fail(f"the bar and the dock are {bars('text-size-back')} rows again, expected "
+                     f"{(BAR_HEIGHT, DOCK_HEIGHT)}")
+
+            # the terminal colour scheme. the page writes a file the image's ghostty config reads
+            # after itself, and signals the terminals that are open, so a window that is already
+            # up changes colour
+            def terminal_pixels(name, colour):
+                """How many pixels of the screen are the colour a terminal is drawn on."""
+                wide, tall, pixels = screendump(args.qmp, work, name)
+                return sum(1 for at in range(0, wide * tall * 3, 3)
+                           if near(pixels[at:at + 3], colour, 3))
+
+            open_from_menu(MENU_APP, MENU_APP_ID)
+            own = wait_for(60, lambda: terminal_pixels("terminal-own", SETTINGS_OWN_SCHEME[1]) > TERMINAL_PIXELS)
+            if not own:
+                fail(f"a terminal window is not drawn on {SETTINGS_OWN_SCHEME[1]}: "
+                     f"{terminal_pixels('terminal-own', SETTINGS_OWN_SCHEME[1])} pixels of it")
+            status, output = run(f"rift-settings --set terminal {SETTINGS_SCHEME[0]}",
+                                 "the terminal colours on the Appearance page")
+            if status != 0:
+                fail(f"rift-settings --set terminal exited with {status}: "
+                     f"{without_console(output).strip()[-300:]!r}")
+            written = without_console(run("cat ~/.config/rift/terminal; cat ~/.config/rift/terminal.ghostty",
+                                          "the colours the page wrote")[1])
+            if SETTINGS_SCHEME[0] not in written or "background = #002b36" not in written:
+                fail(f"the terminal colours the page wrote say {written.strip()[-300:]!r}")
+            changed = wait_for(60, lambda: terminal_pixels("terminal-scheme", SETTINGS_SCHEME[1]) > TERMINAL_PIXELS)
+            shot(f"{stem}-settings-terminal{extension}", "terminal-scheme")
+            if not changed:
+                # the page signals the terminals by the name the kernel keeps for them, so a window
+                # that did not change colour is answered by what the terminals are called here
+                _, names = run("ps -eo comm | sort -u | grep -i ghost", "what a terminal is called")
+                fail(f"the terminal window is not drawn on {SETTINGS_SCHEME[1]} after the page set "
+                     f"{SETTINGS_SCHEME[0]}: {terminal_pixels('terminal-scheme', SETTINGS_SCHEME[1])} "
+                     f"pixels of it, running terminals are {without_console(names).strip()[-200:]!r}, "
+                     f"see {stem}-settings-terminal{extension}")
+            ok(f"the Appearance page set the terminal colours to {SETTINGS_SCHEME[0]} and the window "
+               f"that was open took them")
+            run(f"rift-settings --set terminal {SETTINGS_OWN_SCHEME[0]}", "the terminal colours back")
+            if not wait_for(60, lambda: terminal_pixels("terminal-back", SETTINGS_OWN_SCHEME[1]) > TERMINAL_PIXELS):
+                fail(f"the terminal window is not drawn on {SETTINGS_OWN_SCHEME[1]} again")
+            close_app(MENU_APP, MENU_APP_ID)
 
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
