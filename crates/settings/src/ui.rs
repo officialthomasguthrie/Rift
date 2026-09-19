@@ -20,6 +20,10 @@ use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
 use crate::{about, appearance, icons};
 
+/// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
+/// the boot test all know it by.
+const APP_ID: &str = "dev.rift.Settings";
+
 /// How wide the sidebar is.
 const SIDEBAR: f32 = 208.0;
 /// How tall the header bar is. It is the title bar of the window, which the app draws itself.
@@ -110,21 +114,33 @@ pub fn run(start: Start) -> iced::Result {
         .subscription(subscription)
         .default_font(FONT)
         .settings(iced::Settings {
-            id: Some("dev.rift.Settings".to_string()),
+            id: Some(APP_ID.to_string()),
             default_font: FONT,
             default_text_size: TEXT_SIZE.into(),
             ..iced::Settings::default()
         })
-        .window(window::Settings {
-            size: Size::new(920.0, 660.0),
-            min_size: Some(Size::new(600.0, 420.0)),
-            exit_on_close_request: false,
-            // the app draws its own title bar, the way the GTK apps of the session do. left to
-            // itself winit draws an Adwaita frame of its own around the window, in its own colours
-            decorations: false,
-            ..window::Settings::default()
-        })
+        .window(window())
         .run()
+}
+
+/// The window itself. On Wayland the app id comes from the platform settings and nowhere else, and
+/// it is the name of the desktop entry, which is how the dock and the compositor know the window.
+fn window() -> window::Settings {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut settings = window::Settings {
+        size: Size::new(920.0, 660.0),
+        min_size: Some(Size::new(600.0, 420.0)),
+        exit_on_close_request: false,
+        // the app draws its own title bar, the way the GTK apps of the session do. left to itself
+        // winit draws an Adwaita frame of its own around the window, in its own colours
+        decorations: false,
+        ..window::Settings::default()
+    };
+    #[cfg(target_os = "linux")]
+    {
+        settings.platform_specific.application_id = APP_ID.to_string();
+    }
+    settings
 }
 
 fn boot(start: &Start) -> (Settings, Task<Message>) {
