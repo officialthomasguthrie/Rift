@@ -3442,9 +3442,13 @@ def main():
                 fail(f"the screen recording key started nothing: {said!r}, "
                      f"{without_console(output).strip()[-500:]!r}")
             # the recorder asks the compositor for a frame when the screen changes, so a still
-            # desktop records almost nothing. the menu opening and closing is the change
+            # desktop records almost nothing: the menu opening, filling and closing is the change,
+            # and the waits between them are what gives the recording its length
+            run("sleep 3", "a moment for the recorder to take its first frame")
             run("lens --menu", "the Applications menu while the screen is recorded")
+            run("sleep 2", "a moment with the menu open")
             run('lens --type "Image"', "words in the field while the screen is recorded")
+            run("sleep 2", "a moment with the words in the field")
             run("lens --escape", "escape, which clears the field")
             run("lens --escape", "escape again, which closes the menu")
             look("the bar while the screen is recorded", f"{stem}-recording{extension}", 30,
@@ -3531,8 +3535,13 @@ def main():
                 fail("the Applications menu did not open for the on-screen keyboard")
             # the second row of the keyboard is letters the whole way across, and a third of the way
             # in is one of them. a press on the keyboard leaves the menu its keyboard focus, since
-            # the keyboard asked for none of its own
+            # the keyboard asked for none of its own.
+            # the pointer goes into the keyboard first and moves inside it before the press: wvkbd
+            # reads where the pointer is from the motion events alone and takes nothing from the
+            # enter, so a press after a jump onto a key lands nowhere
             top, bottom = band
+            point(args.qmp, size, (round(width * 0.35), round(top + (bottom - top) * 0.6)))
+            time.sleep(0.5)
             click(args.qmp, size, (round(width * 0.35), round(top + (bottom - top) * 0.375)))
 
             def typed_letter():
