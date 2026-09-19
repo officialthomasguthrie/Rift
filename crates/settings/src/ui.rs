@@ -304,9 +304,10 @@ fn subscription(_: &Settings) -> Subscription<Message> {
 }
 
 /// The socket in the runtime directory, read on a thread of its own. The state query is answered
-/// there, from the lines the window keeps up to date.
+/// there, from the lines the window keeps up to date. The subscription is named, because iced tells
+/// two of them apart by the type of the stream and the address of the function that makes it.
 fn terminal() -> Subscription<Message> {
-    Subscription::run(|| {
+    Subscription::run_with("terminal", |_| {
         let (sender, receiver) = mpsc::unbounded();
         thread::spawn(move || {
             if let Err(why) = control::serve(|command| {

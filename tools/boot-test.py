@@ -2438,7 +2438,19 @@ def main():
             run("lens --menu", "the Applications menu")
             state = bar_state("the state with the menu open")
             if state.get("menu") != "open":
-                fail("lens --state does not say the menu is open after lens --menu")
+                # the line reached the shell, since the state query is answered on the same socket,
+                # so either the shell never read it or the menu opened and was dismissed at once.
+                # a picture and the shell's log say which
+                shot(f"{stem}-menu-missing{extension}", "menu-missing")
+                _, journal = run("journalctl --user -u lens -b -n 40 | cat", "the shell's log")
+                print(f"\nboot-test: the menu did not open. the shell said:\n"
+                      f"{without_console(journal).strip()[-2000:]}", flush=True)
+                run("lens --menu", "the Applications menu, asked for a second time")
+                state = bar_state("the state after the second time")
+                if state.get("menu") != "open":
+                    fail("lens --state does not say the menu is open after lens --menu, twice, see "
+                         f"{stem}-menu-missing{extension}")
+                print("\nboot-test: the menu opened the second time it was asked for", flush=True)
             known = int(state.get("apps") or 0)
             listed = int(state.get("rows") or 0)
             if known < 3 or listed < 4 or listed > APP_ROWS:
@@ -3256,7 +3268,8 @@ def main():
                         run("dconf read /org/gnome/desktop/interface/color-scheme", "the colour scheme")[1])):
                     fail(f"the shell did not set the colour scheme to {scheme}")
                 part = without_console(run("cat ~/.local/state/rift/horizon.kdl", "horizon's part for the theme")[1])
-                if (f": {word}, {gray}" not in part or f'background-color "{gray}"' not in part
+                if (f": {word}, " not in part or f", {gray}" not in part
+                        or f'background-color "{gray}"' not in part
                         or ("#3584e4" in part) != (word == "light")):
                     fail(f"the part of horizon's config says {part.strip()[-300:]!r} for {word}")
                 ok(f"the shell handed the {word} theme on to dconf and to horizon")

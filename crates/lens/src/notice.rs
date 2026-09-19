@@ -299,7 +299,7 @@ impl Server {
 /// outbox for the signals, then every notification as it comes. A bus that will not give the name,
 /// because another server has it, is asked again every few seconds.
 pub fn serve() -> Subscription<Message> {
-    Subscription::run(|| {
+    Subscription::run_with("notifications", |_| {
         let (shell, receiver) = iced::futures::channel::mpsc::unbounded();
         thread::spawn(move || {
             let (outbox, signals) = mpsc::channel();

@@ -25,7 +25,7 @@ const RETRY: Duration = Duration::from_secs(5);
 
 /// `NetworkManager`'s picture, now and after every change.
 pub fn network() -> Subscription<Message> {
-    Subscription::run(|| {
+    Subscription::run_with("network", |_| {
         follow(
             |poke| listen(poke, |each| bus::signals(network::SERVICE, each)),
             || Message::Network(network::read()),
@@ -35,7 +35,7 @@ pub fn network() -> Subscription<Message> {
 
 /// The battery, now and after every change.
 pub fn battery() -> Subscription<Message> {
-    Subscription::run(|| {
+    Subscription::run_with("battery", |_| {
         follow(
             |poke| listen(poke, |each| bus::signals(battery::SERVICE, each)),
             || Message::Battery(battery::read().ok().flatten()),
@@ -46,7 +46,7 @@ pub fn battery() -> Subscription<Message> {
 /// Bluetooth, now and after every change, and when `BlueZ` starts or stops, which it does when an
 /// adapter is plugged in or taken out.
 pub fn bluetooth() -> Subscription<Message> {
-    Subscription::run(|| {
+    Subscription::run_with("bluetooth", |_| {
         follow(
             |poke| {
                 let owner = poke.clone();
@@ -60,7 +60,9 @@ pub fn bluetooth() -> Subscription<Message> {
 
 /// The volume, now and whenever a sink or a card changes.
 pub fn sound() -> Subscription<Message> {
-    Subscription::run(|| follow(monitor, || Message::Sound(status::volume())))
+    Subscription::run_with("sound", |_| {
+        follow(monitor, || Message::Sound(status::volume()))
+    })
 }
 
 /// Read a source now, and again after every change `start` pokes about, on threads of their own.

@@ -575,9 +575,14 @@ fn focus() -> Subscription<Message> {
 }
 
 // the socket in the runtime directory, read on a thread of its own. the state query is answered
-// there, from the lines the shell keeps up to date
+// there, from the lines the shell keeps up to date.
+//
+// every one of these is named: iced tells two subscriptions apart by the type of the stream they
+// make and the address of the function that makes it, and every one of ours makes the same kind of
+// stream, so two of them whose code the optimiser folds together would be one subscription and the
+// second would never be polled. the name is what tells them apart
 fn terminal() -> Subscription<Message> {
-    Subscription::run(|| {
+    Subscription::run_with("terminal", |_| {
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
             if let Err(why) = control::serve(|command| {
@@ -601,7 +606,7 @@ fn terminal() -> Subscription<Message> {
 // process. the volume is read in the same tick: pw-mon does not say when the default sink becomes
 // another one, and a minute is soon enough for that
 fn ticker() -> Subscription<Message> {
-    Subscription::run(|| {
+    Subscription::run_with("ticker", |_| {
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
             loop {
@@ -624,7 +629,7 @@ fn ticker() -> Subscription<Message> {
 // horizon's windows and workspaces, read on a thread of its own because the stream blocks until
 // the compositor has something to say. every event the dock draws from turns into one message
 fn windows() -> Subscription<Message> {
-    Subscription::run(|| {
+    Subscription::run_with("windows", |_| {
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
             horizon::watch(|open| {
