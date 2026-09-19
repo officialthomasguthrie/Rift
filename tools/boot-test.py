@@ -3441,14 +3441,12 @@ def main():
                 _, output = run("journalctl --user -b -o cat -n 20 | cat", "the user manager's log")
                 fail(f"the screen recording key started nothing: {said!r}, "
                      f"{without_console(output).strip()[-500:]!r}")
-            # the recorder asks the compositor for a frame when the screen changes, so a still
-            # desktop records almost nothing: the menu opening, filling and closing is the change,
-            # and the waits between them are what gives the recording its length
-            run("sleep 3", "a moment for the recorder to take its first frame")
+            # something happens on the screen while it records, and the recording is as long as the
+            # time it is taken over, since the recorder asks for every frame and not only the ones
+            # that change something
+            run("sleep 3", "a moment for the recorder to take its first frames")
             run("lens --menu", "the Applications menu while the screen is recorded")
-            run("sleep 2", "a moment with the menu open")
             run('lens --type "Image"', "words in the field while the screen is recorded")
-            run("sleep 2", "a moment with the words in the field")
             run("lens --escape", "escape, which clears the field")
             run("lens --escape", "escape again, which closes the menu")
             look("the bar while the screen is recorded", f"{stem}-recording{extension}", 30,
@@ -3463,7 +3461,7 @@ def main():
             status, output = run(f'ffprobe -v error -show_entries format=duration -of csv=p=0 "{recording}" | cat',
                                  "the length of the recording")
             length = re.search(r"(\d+\.\d+)", without_console(output))
-            if status != 0 or not length or float(length.group(1)) <= 0:
+            if status != 0 or not length or float(length.group(1)) < 1:
                 fail(f"ffprobe reads no length for {recording}: {without_console(output).strip()[-200:]!r}")
             said = bar_state("the notification about the recording").get("latest", "")
             if said != "Screen recording saved":

@@ -215,9 +215,12 @@ fn start(tool: Tool, file: Option<&str>) -> Result<u32, String> {
         // the screen is read frame by frame over wlr-screencopy, the protocol the screenshot key
         // uses, and encoded on the processor, so a machine with no video encoder of its own
         // records all the same. sound is not recorded: it would need a source to record from, and
-        // a screen recording with silence where the sound should be is worse than one with none
+        // a screen recording with silence where the sound should be is worse than one with none.
+        // -D asks for every frame rather than only the ones that change something: a recording is
+        // then as long as the time it was taken over, which is what a person expects of one, and
+        // the recorder is waiting on a frame rather than on nothing when it is asked to stop
         Tool::Recorder => {
-            command.args(["-f", file.unwrap_or_default()]);
+            command.args(["-D", "-f", file.unwrap_or_default()]);
         }
         // one screen reader at a time: --replace takes over from one that is already there, which
         // a plain start refuses to do
