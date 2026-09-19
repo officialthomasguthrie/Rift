@@ -3,6 +3,7 @@
 //! part, drawn with iced on the software renderer and placed by the layer-shell protocol, so it
 //! works on any machine the drive meets.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -67,6 +68,30 @@ fn kept() -> &'static Mutex<String> {
     KEPT.get_or_init(|| Mutex::new(String::new()))
 }
 
+/// How much bigger than its own sizes the shell draws itself, in per cent, from the owner's
+/// interface text size. Every surface is asked for at this much of its size in the pixels the
+/// compositor places it in, and iced is told the same factor, so the bar, the dock and the menus
+/// grow with the text in the apps and everything inside them keeps the numbers it is written with.
+/// It is one number for the whole process because the step that turns a message into a layer-shell
+/// action has no state to read.
+static SCALE: AtomicU32 = AtomicU32::new(appearance::TEXT_DEFAULT);
+
+/// A size of the shell's own, in the pixels the compositor places surfaces in.
+fn scaled(size: u32) -> u32 {
+    (size.saturating_mul(SCALE.load(Ordering::Relaxed)) + 50) / 100
+}
+
+/// The same for a margin, which the protocol takes as a whole number that may be negative.
+fn margin(size: u32) -> i32 {
+    i32::try_from(scaled(size)).unwrap_or(0)
+}
+
+/// What iced draws a surface at, so a bar asked for at half again its height holds the same rows
+/// half again as big.
+fn factor() -> f32 {
+    f32::from(u16::try_from(SCALE.load(Ordering::Relaxed)).unwrap_or(100)) / 100.0
+}
+
 /// How long after the compositor closed a menu a press of that menu's own button is the click that
 /// closed it, and not a click to open it again.
 const REOPEN: Duration = Duration::from_millis(400);
@@ -95,6 +120,9 @@ struct Lens {
     datemenu: Option<datemenu::Menu>,
     dialog: Option<Dialog>,
     dock: Dock,
+    /// The bar's own surface, once the compositor has opened it. It is the one surface the shell
+    /// does not open itself, so it has no id until then.
+    bar: Option<window::Id>,
     /// The notifications on screen and the ones kept.
     notices: Notices,
     /// Where the signals about them go out on the bus, once the server has the name.
@@ -216,6 +244,10 @@ pub enum Message {
     Place(window::Id, u32),
     /// A menu's surface has to grow or shrink to this width and height.
     Resize(window::Id, u32, u32),
+    /// A bar has to keep this much of the screen for itself.
+    Reserve(window::Id, u32),
+    /// A surface opened.
+    Opened(window::Id),
     /// Close a surface.
     Close(window::Id),
     /// A surface took or lost the keyboard.
@@ -293,7 +325,11 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
             )),
             Message::Resize(id, width, height) => Ok(Self::new(
                 Some(id),
-                LayerShellCustomAction::SizeChange((width, height)),
+                LayerShellCustomAction::SizeChange((scaled(width), scaled(height))),
+            )),
+            Message::Reserve(id, height) => Ok(Self::new(
+                Some(id),
+                LayerShellCustomAction::ExclusiveZoneChange(margin(height)),
             )),
             Message::Close(id) => Ok(Self::new(Some(id), LayerShellCustomAction::RemoveWindow)),
             other => Err(other),
@@ -306,11 +342,11 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
 /// gives it as it appears and takes away as soon as anything else is clicked.
 fn menu_surface(height: u32) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((menu::WIDTH, height)),
+        size: Some((scaled(menu::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Left,
         exclusive_zone: Some(0),
-        margin: Some((0, 0, 0, i32::try_from(menu::PAD).unwrap_or(0))),
+        margin: Some((0, 0, 0, margin(menu::PAD))),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -322,10 +358,10 @@ fn menu_surface(height: u32) -> NewLayerShellSettings {
 /// window sits over it and nothing is ever hidden behind it. A bar never takes the keyboard.
 fn dock_surface() -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((0, dock::HEIGHT)),
+        size: Some((0, scaled(dock::HEIGHT))),
         layer: Layer::Top,
         anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
-        exclusive_zone: Some(i32::try_from(dock::HEIGHT).unwrap_or(0)),
+        exclusive_zone: Some(margin(dock::HEIGHT)),
         margin: None,
         keyboard_interactivity: KeyboardInteractivity::None,
         output_option: OutputOption::Active,
@@ -340,11 +376,11 @@ fn dock_surface() -> NewLayerShellSettings {
 /// Applications menu does, so a click anywhere else closes it.
 fn item_menu_surface(height: u32, left: i32) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((dock::MENU_WIDTH, height)),
+        size: Some((scaled(dock::MENU_WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Bottom | Anchor::Left,
         exclusive_zone: Some(0),
-        margin: Some((0, 0, 0, left)),
+        margin: Some((0, 0, 0, margin(u32::try_from(left).unwrap_or(0)))),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -357,11 +393,11 @@ fn item_menu_surface(height: u32, left: i32) -> NewLayerShellSettings {
 /// does, so a click anywhere else closes it.
 fn system_surface(height: u32) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((system::WIDTH, height)),
+        size: Some((scaled(system::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Right,
         exclusive_zone: Some(0),
-        margin: Some((0, i32::try_from(system::PAD).unwrap_or(0), 0, 0)),
+        margin: Some((0, margin(system::PAD), 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -374,7 +410,7 @@ fn system_surface(height: u32) -> NewLayerShellSettings {
 /// typed into it.
 fn dialog_surface(height: u32) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((dialog::WIDTH, height)),
+        size: Some((scaled(dialog::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::empty(),
         exclusive_zone: Some(0),
@@ -391,7 +427,7 @@ fn dialog_surface(height: u32) -> NewLayerShellSettings {
 /// the way the other menus do, so a click anywhere else closes it.
 fn clock_surface(height: u32) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((datemenu::WIDTH, height)),
+        size: Some((scaled(datemenu::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top,
         exclusive_zone: Some(0),
@@ -407,7 +443,7 @@ fn clock_surface(height: u32) -> NewLayerShellSettings {
 /// under the bar. It never takes the keyboard, so it does not take it away from a window.
 fn banner_surface(height: u32, top: u32) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((banner::WIDTH, height)),
+        size: Some((scaled(banner::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Right,
         exclusive_zone: Some(0),
@@ -421,23 +457,18 @@ fn banner_surface(height: u32, top: u32) -> NewLayerShellSettings {
 
 /// The margins of a notification this far under the bar: top, right, bottom and left.
 fn banner_margin(top: u32) -> (i32, i32, i32, i32) {
-    (
-        i32::try_from(top).unwrap_or(0),
-        i32::try_from(notice::GAP).unwrap_or(0),
-        0,
-        0,
-    )
+    (margin(top), margin(notice::GAP), 0, 0)
 }
 
 /// The key popup's surface: on the overlay layer, anchored to the bottom alone so it is in the
 /// middle, standing above the dock. Clicks go through it to whatever is under it.
 fn popup_surface() -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((popup::WIDTH, popup::HEIGHT)),
+        size: Some((scaled(popup::WIDTH), scaled(popup::HEIGHT))),
         layer: Layer::Overlay,
         anchor: Anchor::Bottom,
         exclusive_zone: Some(0),
-        margin: Some((0, 0, i32::try_from(popup::ABOVE).unwrap_or(0), 0)),
+        margin: Some((0, 0, margin(popup::ABOVE), 0)),
         keyboard_interactivity: KeyboardInteractivity::None,
         output_option: OutputOption::Active,
         events_transparent: true,
@@ -452,6 +483,9 @@ fn popup_surface() -> NewLayerShellSettings {
 /// When there is no display or the compositor has no layer-shell.
 pub fn run(apps: Vec<App>) -> Result<(), iced_layershell::Error> {
     let chosen = appearance::Theme::read();
+    // the interface text size before the first surface is asked for, since the bar is asked for at
+    // its size as the daemon starts
+    SCALE.store(appearance::text(), Ordering::Relaxed);
     // apps and the compositor follow the same setting. dconf may have to be started on the bus
     // first, which the bar does not wait for
     thread::spawn(move || {
@@ -461,6 +495,7 @@ pub fn run(apps: Vec<App>) -> Result<(), iced_layershell::Error> {
     });
     iced_layershell::daemon(move || boot(chosen, apps.clone()), "lens", update, view)
         .theme(|state: &Lens, _| Theme::custom("Rift", palette(state.look)))
+        .scale_factor(|_: &Lens, _| factor())
         .style(|state: &Lens, _: &Theme| theme::Style {
             // every surface paints its own background over all of itself; this is what shows if
             // one ever does not, and a software-rendered surface has no transparency
@@ -475,8 +510,8 @@ pub fn run(apps: Vec<App>) -> Result<(), iced_layershell::Error> {
             layer_settings: LayerShellSettings {
                 anchor: Anchor::Top | Anchor::Left | Anchor::Right,
                 layer: Layer::Top,
-                exclusive_zone: i32::try_from(bar::HEIGHT).unwrap_or(0),
-                size: Some((0, bar::HEIGHT)),
+                exclusive_zone: margin(bar::HEIGHT),
+                size: Some((0, scaled(bar::HEIGHT))),
                 // a bar never takes the keyboard away from a window
                 keyboard_interactivity: KeyboardInteractivity::None,
                 ..LayerShellSettings::default()
@@ -518,6 +553,7 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
         datemenu: None,
         dialog: None,
         dock,
+        bar: None,
         notices: Notices::new(notice::quiet()),
         outbox: None,
         popup: None,
@@ -566,9 +602,8 @@ fn keys() -> Subscription<Message> {
 // before the keyboard reaches it, so the cursor goes in the field on either event
 fn focus() -> Subscription<Message> {
     event::listen_with(|event, _, id| match event {
-        iced::Event::Window(window::Event::Opened { .. } | window::Event::Focused) => {
-            Some(Message::Focus(id, true))
-        }
+        iced::Event::Window(window::Event::Opened { .. }) => Some(Message::Opened(id)),
+        iced::Event::Window(window::Event::Focused) => Some(Message::Focus(id, true)),
         iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(id, false)),
         _ => None,
     })
@@ -721,6 +756,15 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Focus(id, has) => focused(state, id, has),
+        // the bar is the one surface the shell does not open itself: the runtime makes it from the
+        // settings and names it when it maps, which is before anything can open a menu. its id is
+        // what a new interface text size is sent to
+        Message::Opened(id) => {
+            if state.bar.is_none() && id != state.dock.id {
+                state.bar = Some(id);
+            }
+            focused(state, id, true)
+        }
         // the runtime takes these before update ever sees them
         Message::Open(..)
         | Message::OpenDock(_)
@@ -732,6 +776,7 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
         | Message::OpenPopup(_)
         | Message::Place(..)
         | Message::Resize(..)
+        | Message::Reserve(..)
         | Message::Close(..) => Task::none(),
     };
     let grow = resize(state);
@@ -1455,7 +1500,21 @@ fn look(state: &mut Lens) -> Task<Message> {
     state.accent = appearance::Accent::read();
     state.look = crate::theme::palette(state.theme, state.accent);
     remember(state);
-    Task::none()
+    let text = appearance::text();
+    if SCALE.swap(text, Ordering::Relaxed) == text {
+        return Task::none();
+    }
+    // a menu is made when it opens and is asked for at the new size then; the bar and the dock are
+    // there all session, so each is told its height and how much of the screen it keeps
+    let mut work = vec![
+        Task::done(Message::Resize(state.dock.id, 0, dock::HEIGHT)),
+        Task::done(Message::Reserve(state.dock.id, dock::HEIGHT)),
+    ];
+    if let Some(id) = state.bar {
+        work.push(Task::done(Message::Resize(id, 0, bar::HEIGHT)));
+        work.push(Task::done(Message::Reserve(id, bar::HEIGHT)));
+    }
+    Task::batch(work)
 }
 
 /// The screen recorder started or stopped. While it runs the bar carries the mark every desktop
@@ -1541,6 +1600,7 @@ fn remember(state: &Lens) {
     line("clock", &state.clock);
     line("theme", state.theme.word());
     line("accent", state.accent.word());
+    line("text", &SCALE.load(Ordering::Relaxed).to_string());
     line("apps", &state.apps.len().to_string());
     line("network", &status::network_word(status.network.as_ref()));
     line(
