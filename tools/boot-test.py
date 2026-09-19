@@ -311,7 +311,7 @@ DOCK_MENU_WIDTH = 240
 DOCK_MENU_PAD = 8
 DOCK_MENU_ROW = 28
 # the apps the dock keeps when the owner has said nothing, in their order, from the same file
-DOCK_KEPT = ["firefox", "com.mitchellh.ghostty", "dev.zed.Zed"]
+DOCK_KEPT = ["firefox", "com.mitchellh.ghostty", "dev.zed.Zed", "dev.rift.Settings"]
 # lens's system menu, from crates/lens/src/{bar,system}.rs: the bar's padding at each end and the
 # status button's inside it, a status icon, and the menu's width, its margin from the right edge of
 # the screen, its padding, a row, the gap in a row and the space at the end of one, in logical pixels
@@ -358,7 +358,7 @@ FLATPAK_APP = "Rift test app"
 WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
 # the words lens --state prints, and how the bar writes the time
-STATE_KEYS = ("clock", "theme", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
+STATE_KEYS = ("clock", "theme", "accent", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
               "recording", "screen-reader", "keyboard")
@@ -423,10 +423,24 @@ BASIC_APPS = [
     ("Camera", "snapshot", "camera", 0.4, True),
     ("Document Scanner", "scan", "scanner", 0.4, False),
 ]
+# the settings app: the name typed into the Applications menu, what the app id of its window has in
+# it in lower case, how many pages its sidebar lists, and the two accents the Appearance page is set
+# to and put back to, in the colours crates/librift/src/appearance.rs gives them on dark
+SETTINGS_APP = "Settings"
+SETTINGS_APP_ID = "dev.rift.settings"
+SETTINGS_PAGES = 23
+SETTINGS_ACCENT = ("blue", "#78aeed")
+SETTINGS_OTHER = ("teal", "#68b4c1")
+# what rift-settings --state prints, one word each
+SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "greeting")
 # a window a portal asks a question in, with the rectangle horizon gave it. the size comes before the
 # position in the window list, and both are the logical pixels the pointer moves in
 PORTAL_WINDOW = re.compile(r'"app_id":"[^"]*portal[^"]*".{0,400}?"window_size":\[(\d+),(\d+)\],'
                            r'"tile_pos_in_workspace_view":\[([\d.]+),([\d.]+)\]')
+# how many light gray pixels on the screen mean a window is drawn in the light theme. the portal's
+# question is about 515 by 220, so a light one is over eighty thousand of them and the text of a dark
+# one is a few thousand at most
+PORTAL_LIGHT = 20000
 # the app a file of each kind opens with, as `xdg-mime query default` prints it
 DEFAULT_APPS = [
     ("image/jpeg", "org.gnome.Loupe.desktop"),
@@ -3293,6 +3307,19 @@ def main():
                 if not wait_for(60, lambda: not app_windows(app_id, "the windows left")):
                     fail(f"{name}'s window did not close")
 
+            def light_pixels(name):
+                """How many pixels of the screen are a light neutral gray, which is what a window
+                drawn in the light theme is made of. Every window of the session is dark, and the
+                desktop behind them is a dark gray or a dark photograph, so a window in the light
+                theme is tens of thousands of these and nothing else is more than a few."""
+                wide, tall, rgb = screendump(args.qmp, work, name)
+                count = 0
+                for at in range(0, wide * tall * 3, 3):
+                    red, green, blue = rgb[at], rgb[at + 1], rgb[at + 2]
+                    if red >= 180 and max(red, green, blue) - min(red, green, blue) <= 12:
+                        count += 1
+                return count
+
             def portal_question(what):
                 """The rectangle a portal is asking a question in, as (width, height, left, top),
                 or None when no portal has a window up."""
@@ -3312,6 +3339,25 @@ def main():
                     print(f"\nboot-test: the portal did not ask before {name} took the camera", flush=True)
                     return
                 asked = portal_question("the question's window")
+                # and it is drawn in the theme the session set. the portal's dialogs are gtk 3, which
+                # has no colour scheme and goes dark by the name of its theme, so the image carries an
+                # Adwaita-dark theme for gtk 3 to find. every window of the session is dark, so a
+                # light window on the screen is this one drawn in the wrong theme
+                light = light_pixels("portal-question")
+                if light > PORTAL_LIGHT:
+                    shot(f"{stem}-portal-question{extension}", "portal-question")
+                    _, env = run(r"cat /proc/(pgrep -f xdg-desktop-portal-gtk | head -1)/environ | "
+                                 r"tr '\0' '\n' | grep -E 'GIO_EXTRA_MODULES|XDG_DATA_DIRS|DCONF|GTK'",
+                                 "the portal's environment")
+                    _, said = run("gsettings get org.gnome.desktop.interface gtk-theme; "
+                                  "ls /run/current-system/sw/share/themes", "the theme gsettings gives")
+                    print(f"\nboot-test: the portal's environment:\n{without_console(env)}\n"
+                          f"the theme gsettings gives and the themes on the drive:\n{without_console(said)}",
+                          flush=True)
+                    fail(f"the portal's question is drawn in the light theme: {light} pixels of the "
+                         f"screen are a light gray, see {stem}-portal-question{extension}")
+                ok(f"the portal's question follows the dark theme of the session, {light} light pixels "
+                   "on the screen")
                 click(args.qmp, size, (asked[2] + asked[0] * 0.75, asked[3] + asked[1] - round(20 * scale)))
                 if not wait_for(60, lambda: not portal_question("the question after the answer")):
                     fail(f"the portal kept asking for the camera after {name} was granted it")
@@ -3576,6 +3622,104 @@ def main():
                  journals=("horizon", "lens"), settle=3)
             ok(f"the guide has {len(listed)} pages on the drive and opens in the browser")
             close_app("the guide", "firefox")
+
+            # 5m. Settings, the app for how the system looks and what it does. The Applications menu
+            # opens it, its window stands between the bars with the title bar it draws itself, and
+            # the Appearance page changes the accent: the ring horizon draws around the window in
+            # front and every mark the shell draws in the accent take the new colour while
+            # everything is running. The desktop is still the flat gray here, which is what the
+            # window check counts on; the photograph comes back in the step after this one
+            def settings_state(what):
+                """What `rift-settings --state` prints, as a dict of the words it knows. Empty while
+                the window is still opening and nothing answers on its socket yet."""
+                status, output = run("rift-settings --state", what)
+                if status != 0:
+                    return {}
+                state = {}
+                for printed_line in without_console(output).splitlines():
+                    key, _, value = printed_line.strip().partition(" ")
+                    if key in SETTINGS_KEYS:
+                        state[key] = value.strip()
+                return state
+
+            def accents_on_screen(name):
+                """How many pixels of the screen are each of the two accents, within a step or two
+                of the colour. One walk of the screendump counts both."""
+                wide, tall, rgb = screendump(args.qmp, work, name)
+                wanted = [tuple(int(colour[at:at + 2], 16) for at in (1, 3, 5))
+                          for _, colour in (SETTINGS_ACCENT, SETTINGS_OTHER)]
+                counts = [0, 0]
+                for at in range(0, wide * tall * 3, 3):
+                    pixel = rgb[at:at + 3]
+                    for which, want in enumerate(wanted):
+                        if near(pixel, want, 6):
+                            counts[which] += 1
+                return counts
+
+            open_from_menu(SETTINGS_APP, SETTINGS_APP_ID)
+            state = wait_for(60, lambda: settings_state("the page Settings opens on") or None)
+            if not state:
+                fail("rift-settings --state answers nothing after the Settings window opened")
+            if state.get("page") != "appearance" or state.get("accent") != SETTINGS_ACCENT[0]:
+                fail(f"Settings opened with {state}, expected the Appearance page and the "
+                     f"{SETTINGS_ACCENT[0]} accent")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} with its title bar", f"{stem}-settings{extension}", 120,
+                 apps=[SETTINGS_APP], journals=("horizon", "lens"), settle=3)
+            ok(f"the Applications menu opened Settings on the {state['page']} page, with the title bar "
+               "it draws itself")
+
+            # the Appearance page changes the accent, and the shell and the compositor follow it
+            # without either of them starting again
+            blue, teal = accents_on_screen("accent-before")
+            if blue < 3000 or teal > 2000:
+                fail(f"the screen has {blue} pixels of {SETTINGS_ACCENT[0]} and {teal} of "
+                     f"{SETTINGS_OTHER[0]} before the accent was changed")
+            status, output = run(f"rift-settings --set accent {SETTINGS_OTHER[0]}",
+                                 "the accent on the Appearance page")
+            if status != 0:
+                fail(f"rift-settings --set accent exited with {status}: "
+                     f"{without_console(output).strip()[-300:]!r}")
+            if not wait_for(30, lambda: bar_state("the shell's accent").get("accent") == SETTINGS_OTHER[0]):
+                fail(f"lens --state does not say accent {SETTINGS_OTHER[0]} after the page changed it")
+            written = without_console(run("cat ~/.config/rift/accent; cat ~/.local/state/rift/horizon.kdl",
+                                          "the accent the page wrote")[1])
+            if SETTINGS_OTHER[0] not in written or f'active-color "{SETTINGS_OTHER[1]}"' not in written:
+                fail(f"the accent the page wrote says {written.strip()[-300:]!r}")
+            blue, teal = accents_on_screen("accent-after")
+            if teal < 3000 or blue > 2000:
+                shot(f"{stem}-settings-accent{extension}", "accent-after")
+                fail(f"the screen has {teal} pixels of {SETTINGS_OTHER[0]} and {blue} of "
+                     f"{SETTINGS_ACCENT[0]} after the accent was changed, see "
+                     f"{stem}-settings-accent{extension}")
+            shot(f"{stem}-settings-accent{extension}", "accent-after")
+            ok(f"the Appearance page set the accent to {SETTINGS_OTHER[0]}: the shell says so and "
+               f"{teal} pixels of the screen are it, where {blue} are left of {SETTINGS_ACCENT[0]}")
+
+            # and back to the blue the rest of the test and the next boots of this drive have
+            run(f"rift-settings --set accent {SETTINGS_ACCENT[0]}", "the accent back to blue")
+            if not wait_for(30, lambda: bar_state("the shell's accent").get("accent") == SETTINGS_ACCENT[0]):
+                fail(f"lens --state does not say accent {SETTINGS_ACCENT[0]} after it was put back")
+
+            # the About page, which reads os-release and asks Orbit about this machine
+            run("rift-settings --page about", "the About page")
+            if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
+                fail("rift-settings --page about did not show the About page")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            # every page has a row in the sidebar, so the shape of the whole app is there from the start
+            for page in ("wifi", "updates", "backups"):
+                run(f"rift-settings --page {page}", f"the {page} page")
+                if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
+                    fail(f"rift-settings --page {page} did not show that page")
+            run("rift-settings --page appearance", "the Appearance page again")
+            status, output = run("rift-settings --page nowhere", "a page that is not one")
+            if status == 0 or "there is no page called nowhere" not in without_console(output):
+                fail(f"rift-settings --page nowhere exited with {status}: "
+                     f"{without_console(output).strip()[-200:]!r}")
+            ok(f"Settings shows the About page and every one of its {SETTINGS_PAGES} pages by name")
+            close_app(SETTINGS_APP, SETTINGS_APP_ID)
 
             # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again

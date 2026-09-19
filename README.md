@@ -69,7 +69,8 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 - A drop-down terminal and a lock screen are built into the compositor.
 - The Print key takes a screenshot, and Ctrl, Alt, Shift and R start and stop a screen recording. Recordings are encoded in software and written as MP4 files, so they do not depend on the graphics hardware of the machine.
 - Orca, the GNOME screen reader, and an on-screen keyboard are included, each turned on from the keyboard or from the applications menu. Speech is synthesised on the machine with eSpeak NG, and the accessibility bus is enabled for every application.
-- The desktop is dark by default and can be switched to light. GTK, libadwaita and Qt applications follow the same setting in the Adwaita style with a blue accent, Noto Sans and the Adwaita icons and cursor, and draw their own title bars.
+- The desktop is dark by default and can be switched to light. GTK, libadwaita and Qt applications follow the same setting in the Adwaita style with the accent colour chosen in Settings, Noto Sans and the Adwaita icons and cursor, and draw their own title bars.
+- Settings covers the system in one window with a sidebar of pages. Appearance sets the wallpaper, dark or light, one of nine accent colours, the gap between windows, the corner radius of a window and the terminal greeting, and a change takes effect at once. About shows the version of the system and what Rift has found out about the machine. The pages that are not written yet are listed and say so.
 - The wallpaper is one of nine NASA photographs included in the image, each with its source and license in a text file beside it, or any JPEG or PNG picture, or a flat colour. Horizon scales it to fill each display. The default is a photograph of the night side of Earth taken from the Orion spacecraft on Artemis II.
 - Flatpak is integrated with xdg-desktop-portal for applications installed from Flathub.
 
