@@ -21,6 +21,13 @@ pub const ACCENT: &str = ".config/rift/accent";
 pub const GAPS: &str = ".config/rift/gaps";
 /// Where the corner radius of a window lives, under home.
 pub const RADIUS: &str = ".config/rift/radius";
+/// Where the interface text size lives, under home, as a whole number of per cent.
+pub const TEXT: &str = ".config/rift/text";
+/// Where the terminal colour scheme lives, under home, as one word.
+pub const TERMINAL: &str = ".config/rift/terminal";
+/// Where the Ghostty configuration written from that scheme goes. The Ghostty config in the image
+/// includes this file, and one that is not there is no error to Ghostty.
+pub const TERMINAL_CONFIG: &str = ".config/rift/terminal.ghostty";
 /// Where the terminal greeting lives, under home. The fish function in the image reads it.
 pub const GREETING: &str = ".config/rift/greeting";
 /// Where the part of Horizon's config goes, under home. The system config includes it, and Horizon
@@ -40,11 +47,23 @@ pub const RADIUS_DEFAULT: u32 = 0;
 /// The largest corner radius Settings offers, from the design rules.
 pub const RADIUS_MOST: u32 = 12;
 
+/// The interface text size everything is drawn at by default, in per cent.
+pub const TEXT_DEFAULT: u32 = 100;
+/// The smallest interface text size Settings offers.
+pub const TEXT_LEAST: u32 = 100;
+/// The largest one.
+pub const TEXT_MOST: u32 = 200;
+/// The step between two sizes on the page.
+pub const TEXT_STEP: u32 = 5;
+
 /// The dconf keys the look sets, all in `org.gnome.desktop.interface`. libadwaita and GTK 4 follow
 /// the colour scheme and the accent; GTK 3 has no scheme and goes dark by the theme's name.
 const COLOR_SCHEME: &str = "/org/gnome/desktop/interface/color-scheme";
 const GTK_THEME: &str = "/org/gnome/desktop/interface/gtk-theme";
 const ACCENT_KEY: &str = "/org/gnome/desktop/interface/accent-color";
+/// The size of the text apps draw, as a factor of the usual. It is the key GNOME's large text
+/// switch writes, and GTK turns it into the dots per inch its text is laid out at.
+const TEXT_KEY: &str = "/org/gnome/desktop/interface/text-scaling-factor";
 
 /// The two themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -222,6 +241,188 @@ impl Accent {
     }
 }
 
+/// The colours a terminal is drawn in: Rift's own and a few well known ones. Each is a background,
+/// a foreground and, for all but Rift's, the sixteen colours a terminal program asks for by number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scheme {
+    /// Rift's own: the near black the logo was drawn on, with light gray text.
+    #[default]
+    Rift,
+    /// The same in reverse, for a light desktop.
+    RiftLight,
+    /// Solarized dark.
+    SolarizedDark,
+    /// Solarized light.
+    SolarizedLight,
+    /// Nord.
+    Nord,
+    /// Gruvbox dark.
+    GruvboxDark,
+}
+
+/// The palette GNOME Terminal draws with on a light background.
+const TANGO: [&str; 16] = [
+    "#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf",
+    "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec",
+];
+/// Both Solarized schemes have the same sixteen colours; only the two they are drawn on differ.
+const SOLARIZED: [&str; 16] = [
+    "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+    "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+];
+const NORD: [&str; 16] = [
+    "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+    "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
+];
+const GRUVBOX: [&str; 16] = [
+    "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+    "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+];
+
+impl Scheme {
+    /// Every scheme, in the order the page shows them.
+    pub const ALL: [Scheme; 6] = [
+        Self::Rift,
+        Self::RiftLight,
+        Self::SolarizedDark,
+        Self::SolarizedLight,
+        Self::Nord,
+        Self::GruvboxDark,
+    ];
+
+    /// The word for it, as the setting holds it.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Rift => "rift",
+            Self::RiftLight => "rift-light",
+            Self::SolarizedDark => "solarized-dark",
+            Self::SolarizedLight => "solarized-light",
+            Self::Nord => "nord",
+            Self::GruvboxDark => "gruvbox-dark",
+        }
+    }
+
+    /// The name of it on the page.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rift => "Rift",
+            Self::RiftLight => "Rift light",
+            Self::SolarizedDark => "Solarized dark",
+            Self::SolarizedLight => "Solarized light",
+            Self::Nord => "Nord",
+            Self::GruvboxDark => "Gruvbox dark",
+        }
+    }
+
+    /// What the terminal is drawn on.
+    #[must_use]
+    pub const fn background(self) -> &'static str {
+        match self {
+            Self::Rift => "#040406",
+            Self::RiftLight => "#ffffff",
+            Self::SolarizedDark => "#002b36",
+            Self::SolarizedLight => "#fdf6e3",
+            Self::Nord => "#2e3440",
+            Self::GruvboxDark => "#282828",
+        }
+    }
+
+    /// What it writes in.
+    #[must_use]
+    pub const fn foreground(self) -> &'static str {
+        match self {
+            Self::Rift => "#d4d4d4",
+            Self::RiftLight => "#1d1d1d",
+            Self::SolarizedDark => "#839496",
+            Self::SolarizedLight => "#657b83",
+            Self::Nord => "#d8dee9",
+            Self::GruvboxDark => "#ebdbb2",
+        }
+    }
+
+    /// The sixteen colours a terminal program asks for by number. Rift's own has none of its own,
+    /// so a terminal keeps the ones it ships with.
+    #[must_use]
+    pub const fn palette(self) -> Option<[&'static str; 16]> {
+        match self {
+            Self::Rift => None,
+            Self::RiftLight => Some(TANGO),
+            Self::SolarizedDark | Self::SolarizedLight => Some(SOLARIZED),
+            Self::Nord => Some(NORD),
+            Self::GruvboxDark => Some(GRUVBOX),
+        }
+    }
+
+    /// The scheme a setting names, or Rift's own for anything else.
+    #[must_use]
+    pub fn from_setting(text: &str) -> Self {
+        let word = text.trim();
+        Self::ALL
+            .into_iter()
+            .find(|scheme| word.eq_ignore_ascii_case(scheme.word()))
+            .unwrap_or_default()
+    }
+
+    /// The owner's scheme, or Rift's own when home has no setting.
+    #[must_use]
+    pub fn read() -> Self {
+        read_setting(TERMINAL).map_or_else(Self::default, |text| Self::from_setting(&text))
+    }
+
+    /// The Ghostty configuration for it. The config in the image reads this file after itself, so
+    /// these lines take the place of the ones it has.
+    #[must_use]
+    pub fn config(self) -> String {
+        let mut config = format!(
+            "# written from ~/{TERMINAL}: {}\nbackground = {}\nforeground = {}\n",
+            self.word(),
+            self.background(),
+            self.foreground()
+        );
+        if let Some(palette) = self.palette() {
+            for (at, colour) in palette.iter().enumerate() {
+                let _ = writeln!(config, "palette = {at}={colour}");
+            }
+        }
+        config
+    }
+}
+
+/// Tell every terminal that is open to read its configuration again. Ghostty reloads it when it is
+/// sent SIGUSR2. The name the kernel keeps for a running program is the file it was started from,
+/// cut to fifteen characters, and the one in the image is the file the GTK wrapper starts, so the
+/// name to look for is `ghostty` or `.ghostty-wrapp`.
+fn reload_terminals() {
+    let _ = Command::new("pkill")
+        .args(["-USR2", "-x", r"\.?ghostty.*"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// The owner's interface text size in per cent, or a hundred when home has no setting.
+#[must_use]
+pub fn text() -> u32 {
+    number(TEXT, TEXT_DEFAULT, TEXT_MOST).max(TEXT_LEAST)
+}
+
+/// An interface text size as dconf takes it: a factor with a point in it, since a whole number
+/// would go into the database as a whole number and the key holds a double. The shortest form is
+/// the one dconf prints back, so a key that already says it is left alone.
+#[must_use]
+pub fn text_factor(per_cent: u32) -> String {
+    let (whole, rest) = (per_cent / 100, per_cent % 100);
+    if rest == 0 {
+        format!("{whole}.0")
+    } else if rest % 10 == 0 {
+        format!("{whole}.{}", rest / 10)
+    } else {
+        format!("{whole}.{rest:02}")
+    }
+}
+
 /// Everything the desktop is drawn from, as the owner has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Look {
@@ -233,6 +434,10 @@ pub struct Look {
     pub gaps: u32,
     /// The corner radius of a window, in pixels.
     pub radius: u32,
+    /// The size of the text of the interface, in per cent of the usual.
+    pub text: u32,
+    /// The colours a terminal is drawn in.
+    pub terminal: Scheme,
     /// The picture or the colour behind the windows.
     pub wallpaper: Wallpaper,
 }
@@ -244,6 +449,8 @@ impl Default for Look {
             accent: Accent::default(),
             gaps: GAPS_DEFAULT,
             radius: RADIUS_DEFAULT,
+            text: TEXT_DEFAULT,
+            terminal: Scheme::default(),
             wallpaper: Wallpaper::read(),
         }
     }
@@ -258,6 +465,8 @@ impl Look {
             accent: Accent::read(),
             gaps: number(GAPS, GAPS_DEFAULT, GAPS_MOST),
             radius: number(RADIUS, RADIUS_DEFAULT, RADIUS_MOST),
+            text: text(),
+            terminal: Scheme::read(),
             wallpaper: Wallpaper::read(),
         }
     }
@@ -270,12 +479,30 @@ impl Look {
 
     /// The dconf keys for GTK and libadwaita apps, each with its value as dconf writes it.
     #[must_use]
-    pub fn gtk(&self) -> [(&'static str, String); 3] {
+    pub fn gtk(&self) -> [(&'static str, String); 4] {
         [
             (COLOR_SCHEME, format!("'{}'", self.theme.scheme())),
             (GTK_THEME, format!("'{}'", self.theme.gtk_theme())),
             (ACCENT_KEY, format!("'{}'", self.accent.word())),
+            (TEXT_KEY, text_factor(self.text)),
         ]
+    }
+
+    /// Write the Ghostty configuration for the terminal colour scheme, and tell the terminals that
+    /// are open to read it again. Ghostty reloads its configuration when it is sent SIGUSR2; a
+    /// window opened after this reads the file anyway.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when there is no home or the file could not be written.
+    pub fn write_terminal(&self) -> Result<(), String> {
+        let path = home()
+            .ok_or("There is no home to write the terminal colours into.")?
+            .join(TERMINAL_CONFIG);
+        if write_beside(&path, &self.terminal.config())? {
+            reload_terminals();
+        }
+        Ok(())
     }
 
     /// The part of Horizon's config for this look. The system config is dark with the blue accent
@@ -337,7 +564,7 @@ impl Look {
         let path = home()
             .ok_or("There is no home to write the compositor's part into.")?
             .join(HORIZON_PART);
-        write_beside(&path, &self.horizon())
+        write_beside(&path, &self.horizon()).map(|_| ())
     }
 
     /// Hand the look on to GTK and to Horizon. A key or a file that already says it is left alone,
@@ -349,6 +576,9 @@ impl Look {
     pub fn apply(&self) -> Result<(), String> {
         let mut failed = Vec::new();
         if let Err(why) = self.write_horizon() {
+            failed.push(why);
+        }
+        if let Err(why) = self.write_terminal() {
             failed.push(why);
         }
         for (key, value) in self.gtk() {
@@ -375,6 +605,8 @@ impl Look {
             (ACCENT, self.accent.word().to_string()),
             (GAPS, self.gaps.to_string()),
             (RADIUS, self.radius.to_string()),
+            (TEXT, self.text.to_string()),
+            (TERMINAL, self.terminal.word().to_string()),
             (wallpaper::SETTING, self.wallpaper.setting()),
         ] {
             if let Err(why) = write_home(setting, &format!("{value}\n")) {
@@ -445,7 +677,7 @@ fn write_home(setting: &str, text: &str) -> Result<(), String> {
     let path = home()
         .ok_or_else(|| format!("There is no home to keep {setting} in."))?
         .join(setting);
-    write_beside(&path, text)
+    write_beside(&path, text).map(|_| ())
 }
 
 /// Write the part of Horizon's config for a theme and a wallpaper, with the rest of the look as
@@ -464,10 +696,10 @@ pub fn write_horizon(theme: Theme, wallpaper: &Wallpaper) -> Result<(), String> 
 }
 
 /// Write a file beside itself and rename it over the old one, so nothing ever reads half of it. A
-/// file that already says it is left alone.
-pub(crate) fn write_beside(path: &Path, text: &str) -> Result<(), String> {
+/// file that already says it is left alone, and that answers false: nothing has to be told.
+pub(crate) fn write_beside(path: &Path, text: &str) -> Result<bool, String> {
     if fs::read_to_string(path).is_ok_and(|old| old == text) {
-        return Ok(());
+        return Ok(false);
     }
     if let Some(folder) = path.parent() {
         fs::create_dir_all(folder)
@@ -477,7 +709,8 @@ pub(crate) fn write_beside(path: &Path, text: &str) -> Result<(), String> {
     fresh.push(".new");
     let fresh = PathBuf::from(fresh);
     fs::write(&fresh, text).map_err(|e| format!("Could not write {}: {e}.", fresh.display()))?;
-    fs::rename(&fresh, path).map_err(|e| format!("Could not write {}: {e}.", path.display()))
+    fs::rename(&fresh, path).map_err(|e| format!("Could not write {}: {e}.", path.display()))?;
+    Ok(true)
 }
 
 /// Text as it goes between the quotes of a KDL string.
@@ -517,6 +750,52 @@ fn write_key(key: &str, value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_text_size_is_a_factor_with_a_point_in_it() {
+        assert_eq!(text_factor(100), "1.0");
+        assert_eq!(text_factor(105), "1.05");
+        assert_eq!(text_factor(125), "1.25");
+        assert_eq!(text_factor(150), "1.5");
+        assert_eq!(text_factor(200), "2.0");
+        // the page's slider starts at the size everything is drawn at and its steps reach the end
+        assert_eq!(TEXT_LEAST, TEXT_DEFAULT);
+        assert_eq!(TEXT_MOST % TEXT_STEP, TEXT_LEAST % TEXT_STEP);
+        for per_cent in (TEXT_LEAST..=TEXT_MOST).step_by(TEXT_STEP as usize) {
+            let factor = text_factor(per_cent);
+            let (whole, rest) = factor.split_once('.').unwrap();
+            let rest: u32 = rest.parse::<u32>().unwrap() * if rest.len() == 1 { 10 } else { 1 };
+            assert_eq!(whole.parse::<u32>().unwrap() * 100 + rest, per_cent);
+        }
+    }
+
+    #[test]
+    fn a_scheme_goes_by_its_word_and_rift_is_the_default() {
+        for scheme in Scheme::ALL {
+            assert_eq!(Scheme::from_setting(scheme.word()), scheme);
+            let config = scheme.config();
+            assert!(config.contains(&format!("background = {}\n", scheme.background())));
+            assert!(config.contains(&format!("foreground = {}\n", scheme.foreground())));
+            match scheme.palette() {
+                None => assert!(!config.contains("palette")),
+                Some(palette) => {
+                    for (at, colour) in palette.iter().enumerate() {
+                        assert!(
+                            config.contains(&format!("palette = {at}={colour}\n")),
+                            "{at}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(Scheme::from_setting(" Nord \n"), Scheme::Nord);
+        assert_eq!(Scheme::from_setting("amber"), Scheme::Rift);
+        assert_eq!(Scheme::from_setting(""), Scheme::Rift);
+        assert_eq!(Scheme::default(), Scheme::Rift);
+        // rift's own is what the image writes into ghostty's config, so the default changes nothing
+        assert_eq!(Scheme::Rift.background(), "#040406");
+        assert_eq!(Scheme::Rift.foreground(), "#d4d4d4");
+    }
 
     #[test]
     fn light_is_the_only_other_word() {
@@ -569,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn gtk_gets_a_scheme_a_theme_name_and_an_accent() {
+    fn gtk_gets_a_scheme_a_theme_name_an_accent_and_the_text_size() {
         let dark = Look {
             theme: Theme::Dark,
             accent: Accent::Blue,
@@ -590,6 +869,10 @@ mod tests {
                     "/org/gnome/desktop/interface/accent-color",
                     "'blue'".to_string()
                 ),
+                (
+                    "/org/gnome/desktop/interface/text-scaling-factor",
+                    "1.0".to_string()
+                ),
             ]
         );
         let light = Look {
@@ -609,6 +892,8 @@ mod tests {
             accent: Accent::Blue,
             gaps: GAPS_DEFAULT,
             radius: RADIUS_DEFAULT,
+            text: TEXT_DEFAULT,
+            terminal: Scheme::Rift,
             wallpaper,
         }
     }
