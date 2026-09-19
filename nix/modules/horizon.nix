@@ -30,13 +30,16 @@ let
   ];
   # ghostty's settings, written into the owner's home once, when there is no file yet. tmpfiles
   # turns the \n into new lines. the background is the near black the logo was drawn on, and the
-  # title bar follows the desktop, dark or light
+  # title bar follows the desktop, dark or light. the last line reads the colours settings writes,
+  # which ghostty takes after this whole file, so they stand in place of the two above. a file that
+  # is not there is no error, which is a drive whose owner has never picked another scheme
   ghosttySettings = lib.concatStringsSep "\\n" [
     "font-family = DejaVu Sans Mono"
     "font-size = 11"
     "background = #040406"
     "foreground = #d4d4d4"
     "window-theme = system"
+    "config-file = ?~/.config/rift/terminal.ghostty"
   ];
   # the dark theme for gtk 3. gtk 3 has no colour scheme: it takes the dark stylesheet by the name
   # of its theme, and the name gnome writes for dark is Adwaita-dark. gtk 3 carries that stylesheet
