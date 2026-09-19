@@ -11,7 +11,7 @@ use iced::widget::{button, column, container, row, space, text};
 use iced::{
     Border, Center, Color, Element, Fill, Length, Size, Subscription, Task, Theme, theme, window,
 };
-use librift::appearance::{Accent, Look, Theme as Mode};
+use librift::appearance::{Accent, Look, Scheme, Theme as Mode};
 use librift::orbit::Host;
 
 use crate::control::{self, Command};
@@ -73,6 +73,10 @@ pub enum Message {
     Wallpaper(usize),
     /// The gap slider moved, and where it was let go.
     Gaps(u32),
+    /// The text size slider moved.
+    Text(u32),
+    /// One of the terminal colour schemes.
+    Terminal(Scheme),
     /// The corner radius slider moved.
     Radius(u32),
     /// A slider was let go, so the look is written.
@@ -95,6 +99,7 @@ pub enum Message {
 ///
 /// When the window cannot be opened.
 pub fn run(start: Start) -> iced::Result {
+    let whole_page = start.screenshot.is_some();
     iced::application(move || boot(&start), update, view)
         .title("Settings")
         .theme(|state: &Settings| {
@@ -112,6 +117,10 @@ pub fn run(start: Start) -> iced::Result {
             )
         })
         .subscription(subscription)
+        // the window follows the interface text size the way a GTK app does, since it is not one
+        .scale_factor(|state: &Settings| {
+            f32::from(u16::try_from(state.look.text).unwrap_or(100)) / 100.0
+        })
         .default_font(FONT)
         .settings(iced::Settings {
             id: Some(APP_ID.to_string()),
@@ -119,16 +128,18 @@ pub fn run(start: Start) -> iced::Result {
             default_text_size: TEXT_SIZE.into(),
             ..iced::Settings::default()
         })
-        .window(window())
+        .window(window(whole_page))
         .run()
 }
 
 /// The window itself. On Wayland the app id comes from the platform settings and nowhere else, and
 /// it is the name of the desktop entry, which is how the dock and the compositor know the window.
-fn window() -> window::Settings {
+/// A window that is only there to have its picture taken is as tall as a whole page, so the
+/// picture holds one without anyone scrolling it.
+fn window(screenshot: bool) -> window::Settings {
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut settings = window::Settings {
-        size: Size::new(920.0, 660.0),
+        size: Size::new(920.0, if screenshot { 1060.0 } else { 660.0 }),
         min_size: Some(Size::new(600.0, 420.0)),
         exit_on_close_request: false,
         // the app draws its own title bar, the way the GTK apps of the session do. left to itself
@@ -197,6 +208,8 @@ impl Settings {
             format!("wallpaper {}", look.wallpaper),
             format!("gaps {}", look.gaps),
             format!("radius {}", look.radius),
+            format!("text {}", look.text),
+            format!("terminal {}", look.terminal.word()),
             format!("greeting {}", if self.greeting { "on" } else { "off" }),
         ]
         .join("\n")
@@ -241,6 +254,11 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         }
         Message::Gaps(gaps) => state.look.gaps = gaps,
         Message::Radius(radius) => state.look.radius = radius,
+        Message::Text(text) => state.look.text = text,
+        Message::Terminal(scheme) => {
+            state.look.terminal = scheme;
+            state.wrote();
+        }
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
             state.greeting = on;
@@ -289,6 +307,11 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
             state.look.radius = radius;
             Task::done(Message::Wrote)
         }),
+        "text" => number(librift::appearance::TEXT_MOST).map_or_else(Task::none, |text| {
+            state.look.text = text.max(librift::appearance::TEXT_LEAST);
+            Task::done(Message::Wrote)
+        }),
+        "terminal" => Task::done(Message::Terminal(Scheme::from_setting(value))),
         "greeting" => Task::done(Message::Greeting(!value.trim().eq_ignore_ascii_case("off"))),
         "wallpaper" => state
             .choices

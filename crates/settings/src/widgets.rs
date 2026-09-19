@@ -18,6 +18,11 @@ pub const BOLD: Font = Font {
     weight: font::Weight::Bold,
     ..FONT
 };
+/// The font a terminal draws in, for the sample of a terminal colour scheme.
+pub const MONO: Font = Font {
+    family: font::Family::Name("DejaVu Sans Mono"),
+    ..Font::DEFAULT
+};
 /// Body text, at eleven points on a ninety-six dot screen.
 pub const TEXT_SIZE: f32 = 14.0;
 /// One step above it, for the name at the top of a page.
@@ -103,11 +108,12 @@ pub fn setting<'a, M: 'a>(
 }
 
 /// A row of a group that is pressed to choose it, with a mark at the right when it is the one in
-/// use.
+/// use, and whatever `beside` is between the two.
 pub fn choice<'a, M: Clone + 'a>(
     colors: Colors,
     label: &'a str,
     under: Option<&'a str>,
+    beside: Option<Element<'a, M>>,
     chosen: bool,
     press: M,
 ) -> Element<'a, M> {
@@ -120,31 +126,33 @@ pub fn choice<'a, M: Clone + 'a>(
     } else {
         space().width(16.0).height(16.0).into()
     };
-    button(
-        row![left.width(Fill), mark]
-            .align_y(Center)
-            .spacing(GAP)
-            .width(Fill),
-    )
-    .width(Fill)
-    .padding([8, 12])
-    .on_press(press)
-    .style(move |_: &Theme, status| button::Style {
-        background: Some(
-            match status {
-                button::Status::Hovered | button::Status::Pressed => colors.hover,
-                _ => Color::TRANSPARENT,
-            }
-            .into(),
-        ),
-        text_color: colors.text,
-        border: Border {
-            radius: 4.0.into(),
-            ..Border::default()
-        },
-        ..button::Style::default()
-    })
-    .into()
+    let mut inside = row![left.width(Fill)]
+        .align_y(Center)
+        .spacing(GAP)
+        .width(Fill);
+    if let Some(beside) = beside {
+        inside = inside.push(beside);
+    }
+    button(inside.push(mark))
+        .width(Fill)
+        .padding([8, 12])
+        .on_press(press)
+        .style(move |_: &Theme, status| button::Style {
+            background: Some(
+                match status {
+                    button::Status::Hovered | button::Status::Pressed => colors.hover,
+                    _ => Color::TRANSPARENT,
+                }
+                .into(),
+            ),
+            text_color: colors.text,
+            border: Border {
+                radius: 4.0.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        })
+        .into()
 }
 
 /// The switch of a row that is on or off.
@@ -184,16 +192,19 @@ pub fn switch<'a, M: Clone + 'a>(
         .into()
 }
 
-/// The slider of a row that is a number between two others, with the number beside it.
+/// The slider of a row that is a number between two others, with the number and its unit beside it.
 pub fn steps<'a, M: Clone + 'a>(
     colors: Colors,
     range: std::ops::RangeInclusive<u32>,
+    step: u32,
     value: u32,
+    unit: &'static str,
     moved: impl Fn(u32) -> M + 'a,
     released: M,
 ) -> Element<'a, M> {
     row![
         slider(range, value, moved)
+            .step(step)
             .on_release(released)
             .width(Length::Fixed(200.0))
             .style(move |_: &Theme, _| slider::Style {
@@ -213,10 +224,10 @@ pub fn steps<'a, M: Clone + 'a>(
                     border_width: 0.0,
                 },
             }),
-        text(format!("{value} px"))
+        text(format!("{value} {unit}"))
             .size(TEXT_SIZE)
             .color(colors.dim)
-            .width(Length::Fixed(48.0)),
+            .width(Length::Fixed(52.0)),
     ]
     .align_y(Center)
     .spacing(GAP)
