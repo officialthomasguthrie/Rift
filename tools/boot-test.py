@@ -294,6 +294,10 @@ BAR_LINE = (20, 20, 20)
 MENU = (46, 46, 46)
 FIELD = BAR
 BAR_HEIGHT = 32
+# the two grays and everything between them, for measuring a bar at an interface text size that is
+# not a whole number of pixels: the hairline along its edge falls on half a pixel and that row is
+# the two mixed, which is neither gray but is still the bar
+BAR_GRAYS = (BAR_LINE[0] - 3, BAR[0] + 3)
 MENU_WIDTH = 496
 MENU_PAD = 8
 MENU_GAP = 4
@@ -3736,9 +3740,21 @@ def main():
             # asking for every surface at that much of its size and drawing it at the same scale,
             # so the bar and the dock on screen are their own heights times the factor
             def bars(name):
-                """The rows the bar and the dock cover on screen."""
+                """The rows the bar and the dock cover on screen, counting the row where the
+                hairline falls on half a pixel as the bar, which it is."""
                 wide, tall, pixels = screendump(args.qmp, work, name)
-                return bar_and_dock(wide, tall, bar_gray_rows(wide, tall, pixels))
+                rows = []
+                for y in range(tall):
+                    row = y * wide * 3
+                    found = 0
+                    for x in range(wide):
+                        px = pixels[row + x * 3:row + x * 3 + 3]
+                        if (BAR_GRAYS[0] <= px[0] <= BAR_GRAYS[1]
+                                and BAR_GRAYS[0] <= px[1] <= BAR_GRAYS[1]
+                                and BAR_GRAYS[0] <= px[2] <= BAR_GRAYS[1]):
+                            found += 1
+                    rows.append(found)
+                return bar_and_dock(wide, tall, rows)
 
             grown = (round(BAR_HEIGHT * SETTINGS_TEXT[0] / 100),
                      round(DOCK_HEIGHT * SETTINGS_TEXT[0] / 100))
