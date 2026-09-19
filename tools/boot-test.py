@@ -3699,13 +3699,18 @@ def main():
                                           "the accent the page wrote")[1])
             if SETTINGS_OTHER[0] not in written or f'active-color "{SETTINGS_OTHER[1]}"' not in written:
                 fail(f"the accent the page wrote says {written.strip()[-300:]!r}")
-            blue, teal = accents_on_screen("accent-after")
-            if teal < 3000 or blue > 2000:
-                shot(f"{stem}-settings-accent{extension}", "accent-after")
+            # the shell repaints as soon as it is told, and the compositor when it has read its
+            # config again, so the colour arrives in two parts and the count is given a moment
+            counted = wait_for(60, lambda: next(
+                (found for found in [accents_on_screen("accent-after")]
+                 if found[1] >= 3000 and found[0] <= 2000), None))
+            shot(f"{stem}-settings-accent{extension}", "accent-after")
+            if not counted:
+                blue, teal = accents_on_screen("accent-after")
                 fail(f"the screen has {teal} pixels of {SETTINGS_OTHER[0]} and {blue} of "
                      f"{SETTINGS_ACCENT[0]} after the accent was changed, see "
                      f"{stem}-settings-accent{extension}")
-            shot(f"{stem}-settings-accent{extension}", "accent-after")
+            blue, teal = counted
             ok(f"the Appearance page set the accent to {SETTINGS_OTHER[0]}: the shell says so and "
                f"{teal} pixels of the screen are it, where {blue} are left of {SETTINGS_ACCENT[0]}")
 
