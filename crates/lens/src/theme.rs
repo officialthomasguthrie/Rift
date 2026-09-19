@@ -1,8 +1,10 @@
-//! The shell's colours: one table for the dark theme and one for the light one, neutral grays
-//! with one blue accent. `~/.config/rift/theme` picks which is in use until Settings writes it.
+//! The shell's colours: one table for the dark theme and one for the light one, neutral grays with
+//! one accent. `~/.config/rift/theme` says which table is in use and `~/.config/rift/accent` which
+//! of GNOME's nine colours the accent is; Settings writes both, and `lens --look` tells the shell
+//! to read them again.
 
 use iced::Color;
-use librift::appearance::Theme;
+use librift::appearance::{Accent, Theme};
 
 /// Every colour the bar, the dock and the menus draw with.
 #[derive(Debug, Clone, Copy)]
@@ -89,13 +91,24 @@ pub const LIGHT: Palette = Palette {
     warn: rgb(0xc8_8800),
 };
 
-/// The colours of a theme.
+/// The colours of a theme, with the owner's accent in place of the blue.
 #[must_use]
-pub const fn palette(theme: Theme) -> Palette {
-    match theme {
+pub fn palette(theme: Theme, accent: Accent) -> Palette {
+    let table = match theme {
         Theme::Dark => DARK,
         Theme::Light => LIGHT,
+    };
+    Palette {
+        accent: hex(accent.hex(theme)),
+        ..table
     }
+}
+
+/// A colour the appearance settings name, `#rrggbb`. A word that is not one is black, which no
+/// accent is.
+fn hex(text: &str) -> Color {
+    let digits = text.strip_prefix('#').unwrap_or(text);
+    rgb(u32::from_str_radix(digits, 16).unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -173,8 +186,19 @@ mod tests {
 
     #[test]
     fn a_theme_has_its_own_colours() {
-        assert!((palette(Theme::Dark).bar.r - DARK.bar.r).abs() < f32::EPSILON);
-        assert!((palette(Theme::Light).bar.r - LIGHT.bar.r).abs() < f32::EPSILON);
+        let dark = palette(Theme::Dark, Accent::Blue);
+        let light = palette(Theme::Light, Accent::Blue);
+        assert!((dark.bar.r - DARK.bar.r).abs() < f32::EPSILON);
+        assert!((light.bar.r - LIGHT.bar.r).abs() < f32::EPSILON);
+        // blue is the table's own colour, and another accent takes its place
+        assert!((dark.accent.b - DARK.accent.b).abs() < f32::EPSILON);
+        assert_eq!(hex("#68b4c1"), palette(Theme::Dark, Accent::Teal).accent);
+        assert_eq!(hex("#2190a4"), palette(Theme::Light, Accent::Teal).accent);
+        for accent in Accent::ALL {
+            for theme in [Theme::Dark, Theme::Light] {
+                assert!(palette(theme, accent).accent != rgb(0), "{accent:?}");
+            }
+        }
     }
 
     #[test]

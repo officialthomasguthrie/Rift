@@ -1,7 +1,9 @@
-//! Dark or light, which the owner picks. `~/.config/rift/theme` holds the word until Settings writes
-//! it. The shell and the lock screen read it themselves; the shell also hands it on when it starts, to
-//! GTK and libadwaita through the owner's dconf database and to Horizon through a part of its config
-//! that the system config includes from the owner's state directory. That part carries the
+//! What the desktop looks like: dark or light, the accent colour, the gaps between windows, the
+//! corner radius of a window, and the wallpaper. Each one is a line in a file of its own under
+//! `~/.config/rift`, written by Settings and by the rift command. The shell and the lock screen
+//! read the theme themselves; whoever writes a setting hands the whole look on as well, to GTK and
+//! libadwaita through the owner's dconf database and to Horizon through a part of its config that
+//! the system config includes from the owner's state directory. That part carries the
 //! [`crate::wallpaper`] too, so whoever writes it writes both.
 
 use std::fmt::Write as _;
@@ -11,21 +13,38 @@ use std::{env, fs};
 
 use crate::wallpaper::{self, Wallpaper};
 
-/// Where the setting lives, under home.
+/// Where the theme lives, under home.
 pub const SETTING: &str = ".config/rift/theme";
+/// Where the accent lives, under home.
+pub const ACCENT: &str = ".config/rift/accent";
+/// Where the gap between windows lives, under home.
+pub const GAPS: &str = ".config/rift/gaps";
+/// Where the corner radius of a window lives, under home.
+pub const RADIUS: &str = ".config/rift/radius";
+/// Where the terminal greeting lives, under home. The fish function in the image reads it.
+pub const GREETING: &str = ".config/rift/greeting";
 /// Where the part of Horizon's config goes, under home. The system config includes it, and Horizon
 /// reads its config again when the file changes.
 pub const HORIZON_PART: &str = ".local/state/rift/horizon.kdl";
 
-/// The desktop's background and focus ring on light, from the light column of the shell's colours.
-/// Dark is the system config's own.
+/// The desktop's background on light, from the light column of the shell's colours. Dark is the
+/// system config's own.
 const LIGHT_BACKGROUND: &str = "#f2f1f0";
-const LIGHT_ACCENT: &str = "#3584e4";
 
-/// The dconf keys that differ between the two, both in `org.gnome.desktop.interface`. libadwaita
-/// and GTK 4 follow the colour scheme; GTK 3 has no scheme and takes the dark variant by its name.
+/// The gap between windows the system config has, in pixels, and the widest the page offers.
+pub const GAPS_DEFAULT: u32 = 8;
+/// The widest gap Settings offers.
+pub const GAPS_MOST: u32 = 32;
+/// The corner radius of a window the system config has: square, as a tiled window is.
+pub const RADIUS_DEFAULT: u32 = 0;
+/// The largest corner radius Settings offers, from the design rules.
+pub const RADIUS_MOST: u32 = 12;
+
+/// The dconf keys the look sets, all in `org.gnome.desktop.interface`. libadwaita and GTK 4 follow
+/// the colour scheme and the accent; GTK 3 has no scheme and goes dark by the theme's name.
 const COLOR_SCHEME: &str = "/org/gnome/desktop/interface/color-scheme";
 const GTK_THEME: &str = "/org/gnome/desktop/interface/gtk-theme";
+const ACCENT_KEY: &str = "/org/gnome/desktop/interface/accent-color";
 
 /// The two themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,57 +76,245 @@ impl Theme {
         }
     }
 
+    /// The name of it on the page.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
+
     /// The owner's theme, or dark when home has no setting.
     #[must_use]
     pub fn read() -> Self {
-        home()
-            .and_then(|home| fs::read_to_string(home.join(SETTING)).ok())
-            .map_or(Self::Dark, |text| Self::from_setting(&text))
+        read_setting(SETTING).map_or(Self::Dark, |text| Self::from_setting(&text))
+    }
+
+    /// The name of the GTK theme for it. GTK 3 takes the dark variant by its name, so the image
+    /// carries an `Adwaita-dark` theme for GTK 3 to find.
+    const fn gtk_theme(self) -> &'static str {
+        match self {
+            Self::Dark => "Adwaita-dark",
+            Self::Light => "Adwaita",
+        }
+    }
+
+    const fn scheme(self) -> &'static str {
+        match self {
+            Self::Dark => "prefer-dark",
+            Self::Light => "default",
+        }
+    }
+}
+
+/// The nine accent colours GNOME offers, in GNOME's order. Blue is Rift's default and the one its
+/// screenshots, docs and website use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Accent {
+    /// The default, and the one Rift's own screenshots use.
+    #[default]
+    Blue,
+    /// Teal.
+    Teal,
+    /// Green.
+    Green,
+    /// Yellow.
+    Yellow,
+    /// Orange.
+    Orange,
+    /// Red.
+    Red,
+    /// Pink.
+    Pink,
+    /// Purple.
+    Purple,
+    /// Slate, a gray blue.
+    Slate,
+}
+
+impl Accent {
+    /// Every accent, in the order the page shows them.
+    pub const ALL: [Accent; 9] = [
+        Self::Blue,
+        Self::Teal,
+        Self::Green,
+        Self::Yellow,
+        Self::Orange,
+        Self::Red,
+        Self::Pink,
+        Self::Purple,
+        Self::Slate,
+    ];
+
+    /// The word for it, as the setting holds it and as dconf takes it.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Blue => "blue",
+            Self::Teal => "teal",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Orange => "orange",
+            Self::Red => "red",
+            Self::Pink => "pink",
+            Self::Purple => "purple",
+            Self::Slate => "slate",
+        }
+    }
+
+    /// The name of it on the page.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Blue => "Blue",
+            Self::Teal => "Teal",
+            Self::Green => "Green",
+            Self::Yellow => "Yellow",
+            Self::Orange => "Orange",
+            Self::Red => "Red",
+            Self::Pink => "Pink",
+            Self::Purple => "Purple",
+            Self::Slate => "Slate",
+        }
+    }
+
+    /// The colour itself, `#rrggbb`. On light it is GNOME's own value; on dark it is that value
+    /// mixed a third of the way to white, so it reads on a dark gray the way blue's #78aeed does.
+    #[must_use]
+    pub const fn hex(self, theme: Theme) -> &'static str {
+        match (self, theme) {
+            (Self::Blue, Theme::Light) => "#3584e4",
+            (Self::Blue, Theme::Dark) => "#78aeed",
+            (Self::Teal, Theme::Light) => "#2190a4",
+            (Self::Teal, Theme::Dark) => "#68b4c1",
+            (Self::Green, Theme::Light) => "#3a944a",
+            (Self::Green, Theme::Dark) => "#79b684",
+            (Self::Yellow, Theme::Light) => "#c88800",
+            (Self::Yellow, Theme::Dark) => "#daae52",
+            (Self::Orange, Theme::Light) => "#ed5b00",
+            (Self::Orange, Theme::Dark) => "#f38f52",
+            (Self::Red, Theme::Light) => "#e62d42",
+            (Self::Red, Theme::Dark) => "#ee707f",
+            (Self::Pink, Theme::Light) => "#d56199",
+            (Self::Pink, Theme::Dark) => "#e294ba",
+            (Self::Purple, Theme::Light) => "#9141ac",
+            (Self::Purple, Theme::Dark) => "#b47ec7",
+            (Self::Slate, Theme::Light) => "#6f8396",
+            (Self::Slate, Theme::Dark) => "#9dabb8",
+        }
+    }
+
+    /// The accent a setting names, or blue for anything else.
+    #[must_use]
+    pub fn from_setting(text: &str) -> Self {
+        let word = text.trim();
+        Self::ALL
+            .into_iter()
+            .find(|accent| word.eq_ignore_ascii_case(accent.word()))
+            .unwrap_or_default()
+    }
+
+    /// The owner's accent, or blue when home has no setting.
+    #[must_use]
+    pub fn read() -> Self {
+        read_setting(ACCENT).map_or_else(Self::default, |text| Self::from_setting(&text))
+    }
+}
+
+/// Everything the desktop is drawn from, as the owner has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Look {
+    /// Dark or light.
+    pub theme: Theme,
+    /// The accent colour.
+    pub accent: Accent,
+    /// The gap between windows, in pixels.
+    pub gaps: u32,
+    /// The corner radius of a window, in pixels.
+    pub radius: u32,
+    /// The picture or the colour behind the windows.
+    pub wallpaper: Wallpaper,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            accent: Accent::default(),
+            gaps: GAPS_DEFAULT,
+            radius: RADIUS_DEFAULT,
+            wallpaper: Wallpaper::read(),
+        }
+    }
+}
+
+impl Look {
+    /// The look as the owner's files have it, each setting falling back to the default.
+    #[must_use]
+    pub fn read() -> Self {
+        Self {
+            theme: Theme::read(),
+            accent: Accent::read(),
+            gaps: number(GAPS, GAPS_DEFAULT, GAPS_MOST),
+            radius: number(RADIUS, RADIUS_DEFAULT, RADIUS_MOST),
+            wallpaper: Wallpaper::read(),
+        }
+    }
+
+    /// The accent as it is drawn in this theme.
+    #[must_use]
+    pub const fn accent_hex(&self) -> &'static str {
+        self.accent.hex(self.theme)
     }
 
     /// The dconf keys for GTK and libadwaita apps, each with its value as dconf writes it.
     #[must_use]
-    pub const fn gtk(self) -> [(&'static str, &'static str); 2] {
-        match self {
-            Self::Dark => [
-                (COLOR_SCHEME, "'prefer-dark'"),
-                (GTK_THEME, "'Adwaita-dark'"),
-            ],
-            Self::Light => [(COLOR_SCHEME, "'default'"), (GTK_THEME, "'Adwaita'")],
-        }
+    pub fn gtk(&self) -> [(&'static str, String); 3] {
+        [
+            (COLOR_SCHEME, format!("'{}'", self.theme.scheme())),
+            (GTK_THEME, format!("'{}'", self.theme.gtk_theme())),
+            (ACCENT_KEY, format!("'{}'", self.accent.word())),
+        ]
     }
 
-    /// The part of Horizon's config for this theme and this wallpaper. The system config is dark,
-    /// so dark adds nothing of its own; light has the light desktop and the light accent around the
-    /// focused window. A picture is named for Horizon to draw, with the theme's gray under it while
-    /// it is read; a colour takes the desktop's place and no picture is drawn.
+    /// The part of Horizon's config for this look. The system config is dark with the blue accent
+    /// and the gap it ships, so the part says what differs: the focus ring in the accent, the gap
+    /// and the corner radius whatever they are, the light desktop under a picture on light, and a
+    /// colour in the desktop's place when the wallpaper is one.
     #[must_use]
-    pub fn horizon(self, wallpaper: &Wallpaper) -> String {
+    pub fn horizon(&self) -> String {
         let mut part = format!(
-            "// written from ~/{SETTING} and ~/{}: {}, {}\n",
-            wallpaper::SETTING,
-            self.word(),
-            wallpaper.setting().replace('\n', " ")
+            "// written from ~/.config/rift: {}, {}, gaps {}, radius {}, {}\n",
+            self.theme.word(),
+            self.accent.word(),
+            self.gaps,
+            self.radius,
+            self.wallpaper.setting().replace('\n', " ")
         );
-        let background = match wallpaper {
+        let background = match &self.wallpaper {
             Wallpaper::Color(color) => Some(color.as_str()),
-            Wallpaper::Picture(_) => (self == Self::Light).then_some(LIGHT_BACKGROUND),
+            Wallpaper::Picture(_) => (self.theme == Theme::Light).then_some(LIGHT_BACKGROUND),
         };
-        let accent = (self == Self::Light).then_some(LIGHT_ACCENT);
-        if background.is_some() || accent.is_some() {
-            part.push_str("layout {\n");
-            if let Some(background) = background {
-                let _ = writeln!(part, "    background-color \"{background}\"");
-            }
-            if let Some(accent) = accent {
-                let _ = writeln!(
-                    part,
-                    "    focus-ring {{\n        active-color \"{accent}\"\n    }}"
-                );
-            }
-            part.push_str("}\n");
+        part.push_str("layout {\n");
+        let _ = writeln!(part, "    gaps {}", self.gaps);
+        if let Some(background) = background {
+            let _ = writeln!(part, "    background-color \"{background}\"");
         }
-        match wallpaper {
+        let _ = writeln!(
+            part,
+            "    focus-ring {{\n        active-color \"{}\"\n    }}",
+            self.accent_hex()
+        );
+        part.push_str("}\n");
+        if self.radius > 0 {
+            let _ = writeln!(
+                part,
+                "window-rule {{\n    geometry-corner-radius {}\n    clip-to-geometry true\n}}",
+                self.radius
+            );
+        }
+        match &self.wallpaper {
             Wallpaper::Picture(path) => {
                 let _ = writeln!(
                     part,
@@ -119,29 +326,100 @@ impl Theme {
         }
         part
     }
+
+    /// Write the part of Horizon's config. Horizon reads its config again when the file changes,
+    /// so the desktop follows at once.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when there is no home or the file could not be written.
+    pub fn write_horizon(&self) -> Result<(), String> {
+        let path = home()
+            .ok_or("There is no home to write the compositor's part into.")?
+            .join(HORIZON_PART);
+        write_beside(&path, &self.horizon())
+    }
+
+    /// Hand the look on to GTK and to Horizon. A key or a file that already says it is left alone,
+    /// so running apps get no change signal for nothing.
+    ///
+    /// # Errors
+    ///
+    /// A sentence for each part that could not be written. The other parts are still written.
+    pub fn apply(&self) -> Result<(), String> {
+        let mut failed = Vec::new();
+        if let Err(why) = self.write_horizon() {
+            failed.push(why);
+        }
+        for (key, value) in self.gtk() {
+            if let Err(why) = write_key(key, &value) {
+                failed.push(why);
+            }
+        }
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(failed.join(" "))
+        }
+    }
+
+    /// Write every setting of the look into the owner's files, then hand it on.
+    ///
+    /// # Errors
+    ///
+    /// A sentence for each part that could not be written.
+    pub fn save(&self) -> Result<(), String> {
+        let mut failed = Vec::new();
+        for (setting, value) in [
+            (SETTING, self.theme.word().to_string()),
+            (ACCENT, self.accent.word().to_string()),
+            (GAPS, self.gaps.to_string()),
+            (RADIUS, self.radius.to_string()),
+            (wallpaper::SETTING, self.wallpaper.setting()),
+        ] {
+            if let Err(why) = write_home(setting, &format!("{value}\n")) {
+                failed.push(why);
+            }
+        }
+        if let Err(why) = self.apply() {
+            failed.push(why);
+        }
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(failed.join(" "))
+        }
+    }
 }
 
-/// Hand the theme on to GTK and to Horizon. A key or a file that already says it is left alone, so
-/// running apps get no change signal for nothing.
+/// Whether the terminal greets the first shell of a session with fastfetch. The fish function in
+/// the image reads the same file.
+#[must_use]
+pub fn greeting() -> bool {
+    read_setting(GREETING).is_none_or(|text| !text.trim().eq_ignore_ascii_case("off"))
+}
+
+/// Turn the terminal greeting on or off.
 ///
 /// # Errors
 ///
-/// A sentence for each part that could not be written. The other part is still written.
+/// A sentence when there is no home or the file could not be written.
+pub fn set_greeting(on: bool) -> Result<(), String> {
+    write_home(GREETING, if on { "on\n" } else { "off\n" })
+}
+
+/// Hand the owner's look on to GTK and to Horizon, with this theme in place of the one on file.
+/// The shell calls this when it starts, since dconf may only be reachable once the session is up.
+///
+/// # Errors
+///
+/// A sentence for each part that could not be written.
 pub fn apply(theme: Theme) -> Result<(), String> {
-    let mut failed = Vec::new();
-    if let Err(why) = write_horizon(theme, &Wallpaper::read()) {
-        failed.push(why);
+    Look {
+        theme,
+        ..Look::read()
     }
-    for (key, value) in theme.gtk() {
-        if let Err(why) = write_key(key, value) {
-            failed.push(why);
-        }
-    }
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(failed.join(" "))
-    }
+    .apply()
 }
 
 pub(crate) fn home() -> Option<PathBuf> {
@@ -150,17 +428,39 @@ pub(crate) fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Write the part of Horizon's config for a theme and a wallpaper. Horizon reads its config again
-/// when the file changes, so the desktop follows at once.
+/// The text of a setting under home, when there is one.
+fn read_setting(setting: &str) -> Option<String> {
+    fs::read_to_string(home()?.join(setting)).ok()
+}
+
+/// A whole number a setting holds, kept inside its range, or the default.
+fn number(setting: &str, default: u32, most: u32) -> u32 {
+    read_setting(setting)
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .map_or(default, |value| value.min(most))
+}
+
+/// Write a setting under home.
+fn write_home(setting: &str, text: &str) -> Result<(), String> {
+    let path = home()
+        .ok_or_else(|| format!("There is no home to keep {setting} in."))?
+        .join(setting);
+    write_beside(&path, text)
+}
+
+/// Write the part of Horizon's config for a theme and a wallpaper, with the rest of the look as
+/// the owner has it.
 ///
 /// # Errors
 ///
 /// A sentence when there is no home or the file could not be written.
 pub fn write_horizon(theme: Theme, wallpaper: &Wallpaper) -> Result<(), String> {
-    let path = home()
-        .ok_or("There is no home to write the compositor's part into.")?
-        .join(HORIZON_PART);
-    write_beside(&path, &theme.horizon(wallpaper))
+    Look {
+        theme,
+        wallpaper: wallpaper.clone(),
+        ..Look::read()
+    }
+    .write_horizon()
 }
 
 /// Write a file beside itself and rename it over the old one, so nothing ever reads half of it. A
@@ -230,16 +530,87 @@ mod tests {
     }
 
     #[test]
-    fn gtk_gets_a_scheme_and_a_theme_name_for_each() {
+    fn an_accent_goes_by_its_word_and_blue_is_the_default() {
+        for accent in Accent::ALL {
+            assert_eq!(Accent::from_setting(accent.word()), accent);
+            assert_eq!(accent.label().to_ascii_lowercase(), accent.word());
+        }
+        assert_eq!(Accent::from_setting(" Teal \n"), Accent::Teal);
+        assert_eq!(Accent::from_setting("chartreuse"), Accent::Blue);
+        assert_eq!(Accent::from_setting(""), Accent::Blue);
+        assert_eq!(Accent::default(), Accent::Blue);
+    }
+
+    #[test]
+    fn every_accent_has_two_colours_and_the_dark_one_is_lighter() {
+        let channels = |hex: &str| {
+            let hex = hex.strip_prefix('#').unwrap();
+            assert_eq!(hex.len(), 6, "{hex}");
+            (0..3)
+                .map(|at| u32::from_str_radix(&hex[at * 2..at * 2 + 2], 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let mut seen = Vec::new();
+        for accent in Accent::ALL {
+            let light = channels(accent.hex(Theme::Light));
+            let dark = channels(accent.hex(Theme::Dark));
+            let lighter: u32 = dark.iter().sum();
+            assert!(lighter > light.iter().sum::<u32>(), "{accent:?}");
+            seen.push(accent.hex(Theme::Light));
+            seen.push(accent.hex(Theme::Dark));
+        }
+        // the design rules name these two by hand, so they may never drift
+        assert_eq!(Accent::Blue.hex(Theme::Light), "#3584e4");
+        assert_eq!(Accent::Blue.hex(Theme::Dark), "#78aeed");
+        seen.sort_unstable();
+        let mut once = seen.clone();
+        once.dedup();
+        assert_eq!(seen, once, "two accents share a colour");
+    }
+
+    #[test]
+    fn gtk_gets_a_scheme_a_theme_name_and_an_accent() {
+        let dark = Look {
+            theme: Theme::Dark,
+            accent: Accent::Blue,
+            ..plain(Wallpaper::Color("#242424".into()))
+        };
         assert_eq!(
-            Theme::Dark.gtk(),
+            dark.gtk(),
             [
-                ("/org/gnome/desktop/interface/color-scheme", "'prefer-dark'"),
-                ("/org/gnome/desktop/interface/gtk-theme", "'Adwaita-dark'"),
+                (
+                    "/org/gnome/desktop/interface/color-scheme",
+                    "'prefer-dark'".to_string()
+                ),
+                (
+                    "/org/gnome/desktop/interface/gtk-theme",
+                    "'Adwaita-dark'".to_string()
+                ),
+                (
+                    "/org/gnome/desktop/interface/accent-color",
+                    "'blue'".to_string()
+                ),
             ]
         );
-        assert_eq!(Theme::Light.gtk()[0].1, "'default'");
-        assert_eq!(Theme::Light.gtk()[1].1, "'Adwaita'");
+        let light = Look {
+            theme: Theme::Light,
+            accent: Accent::Teal,
+            ..dark
+        };
+        assert_eq!(light.gtk()[0].1, "'default'");
+        assert_eq!(light.gtk()[1].1, "'Adwaita'");
+        assert_eq!(light.gtk()[2].1, "'teal'");
+    }
+
+    /// A look with the defaults and this wallpaper, without reading anything from home.
+    fn plain(wallpaper: Wallpaper) -> Look {
+        Look {
+            theme: Theme::Dark,
+            accent: Accent::Blue,
+            gaps: GAPS_DEFAULT,
+            radius: RADIUS_DEFAULT,
+            wallpaper,
+        }
     }
 
     fn photo() -> Wallpaper {
@@ -249,19 +620,24 @@ mod tests {
     }
 
     #[test]
-    fn dark_with_a_picture_names_the_picture_alone() {
-        let dark = Theme::Dark.horizon(&photo());
+    fn dark_with_a_picture_has_the_gap_the_ring_and_the_picture() {
+        let dark = plain(photo()).horizon();
         assert_eq!(
             dark,
-            "// written from ~/.config/rift/theme and ~/.config/rift/wallpaper: dark, \
+            "// written from ~/.config/rift: dark, blue, gaps 8, radius 0, \
              /run/current-system/sw/share/backgrounds/rift/earthset.jpg\n\
+             layout {\n    gaps 8\n    focus-ring {\n        active-color \"#78aeed\"\n    }\n}\n\
              wallpaper \"/run/current-system/sw/share/backgrounds/rift/earthset.jpg\"\n"
         );
     }
 
     #[test]
     fn light_has_its_desktop_and_accent_under_the_picture() {
-        let light = Theme::Light.horizon(&photo());
+        let light = Look {
+            theme: Theme::Light,
+            ..plain(photo())
+        }
+        .horizon();
         assert!(light.contains("background-color \"#f2f1f0\""));
         assert!(light.contains("active-color \"#3584e4\""));
         assert!(light.ends_with(
@@ -276,15 +652,47 @@ mod tests {
     #[test]
     fn a_colour_takes_the_desktops_place_and_no_picture_is_drawn() {
         let gray = Wallpaper::Color("#242424".into());
-        let dark = Theme::Dark.horizon(&gray);
-        assert!(dark.lines().next().unwrap().ends_with(": dark, #242424"));
-        assert!(dark.contains("layout {\n    background-color \"#242424\"\n}\n"));
+        let dark = plain(gray.clone()).horizon();
+        assert!(dark.lines().next().unwrap().ends_with(", #242424"));
+        assert!(dark.contains("background-color \"#242424\""));
         assert!(dark.ends_with("wallpaper null\n"));
-        let light = Theme::Light.horizon(&gray);
+        let light = Look {
+            theme: Theme::Light,
+            ..plain(gray)
+        }
+        .horizon();
         assert_eq!(light.matches("background-color").count(), 1);
         assert!(light.contains("background-color \"#242424\""));
         assert!(light.contains("active-color \"#3584e4\""));
         assert!(light.ends_with("wallpaper null\n"));
+    }
+
+    #[test]
+    fn the_accent_the_gap_and_the_radius_go_into_the_part() {
+        let part = Look {
+            accent: Accent::Teal,
+            gaps: 20,
+            radius: 12,
+            ..plain(photo())
+        }
+        .horizon();
+        assert!(part.contains("    gaps 20\n"), "{part}");
+        assert!(part.contains("active-color \"#68b4c1\""), "{part}");
+        assert!(
+            part.contains(
+                "window-rule {\n    geometry-corner-radius 12\n    clip-to-geometry true\n}\n"
+            ),
+            "{part}"
+        );
+        assert_eq!(part.matches('{').count(), 3);
+        assert_eq!(part.matches('}').count(), 3);
+        // a square window is the system's own, so nothing is written for it
+        let square = Look {
+            radius: 0,
+            ..plain(photo())
+        }
+        .horizon();
+        assert!(!square.contains("window-rule"), "{square}");
     }
 
     #[test]
@@ -294,7 +702,7 @@ mod tests {
             r#"/home/rift/a \"b\"\\c.jpg"#
         );
         let odd = Wallpaper::Picture(PathBuf::from("/home/rift/it's \"here\".png"));
-        let part = Theme::Dark.horizon(&odd);
+        let part = plain(odd).horizon();
         assert!(
             part.ends_with("wallpaper \"/home/rift/it's \\\"here\\\".png\"\n"),
             "{part}"

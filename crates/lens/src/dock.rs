@@ -56,7 +56,12 @@ const MENU_ROW: u32 = 28;
 
 /// The apps the dock keeps whether or not they are running, until the owner has a list of their
 /// own. The three the image ships that a person opens first.
-const KEPT: [&str; 3] = ["firefox", "com.mitchellh.ghostty", "dev.zed.Zed"];
+const KEPT: [&str; 4] = [
+    "firefox",
+    "com.mitchellh.ghostty",
+    "dev.zed.Zed",
+    "dev.rift.Settings",
+];
 
 /// One app in the dock: pinned, running, or both.
 #[derive(Debug, Clone)]
@@ -319,7 +324,7 @@ fn path() -> Option<PathBuf> {
     Some(std::path::Path::new(&home).join(".config/rift/dock"))
 }
 
-/// The apps the dock keeps, one id per line. The three the image ships with when the owner has
+/// The apps the dock keeps, one id per line. The four the image ships with when the owner has
 /// not said otherwise.
 #[must_use]
 pub fn pinned() -> Vec<String> {

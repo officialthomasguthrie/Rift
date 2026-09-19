@@ -7,7 +7,8 @@
 //! [--yes] <words>` does it from a terminal instead, with `--yes` standing in for the
 //! confirmation the field asks for. `lens --type <words>`, `lens --enter [<words>]` and
 //! `lens --escape` type into the field of the shell that is already running, `lens --menu` opens
-//! and closes the Applications menu, and `lens --state` prints what the bar shows. `lens --volume
+//! and closes the Applications menu, `lens --look` makes it read the appearance settings again,
+//! and `lens --state` prints what the bar shows. `lens --volume
 //! up|down|mute` and `lens --brightness up|down` are what the keys for them run: they make the
 //! change and the shell shows the level in the key popup. `lens --record`, `lens --screen-reader`
 //! and `lens --keyboard` are the keys for the screen recorder, the screen reader and the on-screen
@@ -81,6 +82,7 @@ fn main() -> ExitCode {
         Some("--enter") => tell(&control::Command::Enter(args[1..].join(" "))),
         Some("--escape") => tell(&control::Command::Escape),
         Some("--menu") => tell(&control::Command::Menu),
+        Some("--look") => tell(&control::Command::Look),
         Some("--state") => show(),
         #[cfg(target_os = "linux")]
         Some("--volume") => key(keys::volume(args.get(1).map_or("", String::as_str))),
@@ -94,7 +96,7 @@ fn main() -> ExitCode {
         Some("--keyboard") => turn(access::Tool::Keyboard),
         Some(other) => {
             eprintln!(
-                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --state | --volume up|down|mute | --brightness up|down | --record | --screen-reader | --keyboard]"
+                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --look | --state | --volume up|down|mute | --brightness up|down | --record | --screen-reader | --keyboard]"
             );
             ExitCode::from(2)
         }

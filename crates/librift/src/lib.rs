@@ -123,6 +123,8 @@ pub mod paths {
     pub const LOGO: &str = "/etc/rift/logo.txt";
     /// The same logo with its colours as terminal escape sequences.
     pub const LOGO_ANSI: &str = "/etc/rift/logo.ansi";
+    /// The mark, the line drawing of the black hole, as a picture. The About page draws it.
+    pub const LOGO_MARK: &str = "/etc/rift/logo.png";
 }
 
 #[cfg(test)]

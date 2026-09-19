@@ -77,8 +77,10 @@ const JOIN_WAIT: Duration = Duration::from_secs(45);
 /// The shell's state. The bar and the dock are always there; a menu, a dialog, a notification or the
 /// key popup comes and goes with its surface.
 struct Lens {
-    /// Dark or light, as the owner's setting said when the shell started.
+    /// Dark or light, from the owner's setting.
     theme: appearance::Theme,
+    /// Which of GNOME's nine the accent is, from the owner's setting.
+    accent: appearance::Accent,
     look: Palette,
     apps: Vec<App>,
     clock: String,
@@ -501,9 +503,11 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
     let dock = Dock::new(window::Id::unique(), &apps);
     let opening = Task::done(Message::OpenDock(dock.id));
     let now = clock::now();
+    let accent = appearance::Accent::read();
     let state = Lens {
         theme: chosen,
-        look: crate::theme::palette(chosen),
+        accent,
+        look: crate::theme::palette(chosen, accent),
         apps,
         clock: now.line,
         today: now.today,
@@ -1433,9 +1437,20 @@ fn typed(state: &mut Lens, command: Command) -> Task<Message> {
         Command::Menu => toggle(state),
         Command::Popup(level) => show_popup(state, level),
         Command::Record(recording) => record(state, &recording),
+        Command::Look => look(state),
         // answered on the socket's own thread, from the lines remember() keeps
         Command::State => Task::none(),
     }
+}
+
+/// The appearance settings changed. The shell reads the theme and the accent again and draws with
+/// them; the desktop, the apps and the lock screen follow through the files Settings wrote.
+fn look(state: &mut Lens) -> Task<Message> {
+    state.theme = appearance::Theme::read();
+    state.accent = appearance::Accent::read();
+    state.look = crate::theme::palette(state.theme, state.accent);
+    remember(state);
+    Task::none()
 }
 
 /// The screen recorder started or stopped. While it runs the bar carries the mark every desktop
@@ -1520,6 +1535,7 @@ fn remember(state: &Lens) {
     let status = &state.status;
     line("clock", &state.clock);
     line("theme", state.theme.word());
+    line("accent", state.accent.word());
     line("apps", &state.apps.len().to_string());
     line("network", &status::network_word(status.network.as_ref()));
     line(

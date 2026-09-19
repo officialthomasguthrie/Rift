@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use librift::appearance::Theme;
+use librift::appearance::{Accent, Theme};
 
 use crate::control::{self, Recording};
 use crate::theme::{self, Palette};
@@ -228,7 +228,7 @@ fn start(tool: Tool, file: Option<&str>) -> Result<u32, String> {
             command.arg("--replace");
         }
         Tool::Keyboard => {
-            command.args(keyboard(theme::palette(Theme::read())));
+            command.args(keyboard(theme::palette(Theme::read(), Accent::read())));
         }
     }
     command

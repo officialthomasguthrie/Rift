@@ -1,6 +1,6 @@
 //! The shell, driven from a terminal. Lens listens on a socket in the session's runtime
-//! directory; `lens --type`, `lens --enter`, `lens --escape`, `lens --menu` and `lens --state`
-//! write one line to it, and `--state` reads the answer back. `lens --volume` and
+//! directory; `lens --type`, `lens --enter`, `lens --escape`, `lens --menu`, `lens --look` and
+//! `lens --state` write one line to it, and `--state` reads the answer back. `lens --volume` and
 //! `lens --brightness`, which the keys for them run, write the level they left behind, and the
 //! shell shows it in the key popup. The runtime directory belongs to one person, so only that
 //! person can type into their field.
@@ -28,6 +28,9 @@ pub enum Command {
     Menu,
     /// Print what the bar shows.
     State,
+    /// Read the appearance settings again and draw with them. Settings sends this when the owner
+    /// changes the theme or the accent.
+    Look,
     /// Show the key popup with this level: a volume or a brightness key was pressed.
     Popup(Level),
     /// A screen recording started, or stopped and left a file behind.
@@ -130,13 +133,14 @@ impl Command {
             Self::Escape => "escape".to_string(),
             Self::Menu => "menu".to_string(),
             Self::State => "state".to_string(),
+            Self::Look => "look".to_string(),
             Self::Popup(level) => format!("popup {}", level.words()),
             Self::Record(recording) => format!("record {}", recording.words()),
         }
     }
 }
 
-/// Read one line of the protocol. `None` when it is not one of the seven.
+/// Read one line of the protocol. `None` when it is not one of the eight.
 #[must_use]
 pub fn parse(line: &str) -> Option<Command> {
     let line = line.trim_end_matches(['\r', '\n']);
@@ -147,6 +151,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "escape" => Some(Command::Escape),
         "menu" => Some(Command::Menu),
         "state" => Some(Command::State),
+        "look" => Some(Command::Look),
         "popup" => Level::read(rest).map(Command::Popup),
         "record" => Recording::read(rest).map(Command::Record),
         _ => None,
