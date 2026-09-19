@@ -160,12 +160,13 @@ mod tests {
     /// that is there, and every page has a title and a heading. An 80 minute image build is a slow
     /// way to find a link with a typo in it.
     ///
-    /// `nix flake check` builds the crate from the Rust sources alone, without the rest of the
-    /// repository, so there the guide is not there to read and this has nothing to say.
+    /// `nix flake check` builds the crate from the Rust sources alone, so the guide's own files are
+    /// not there to read and this has nothing to say. The folder itself is, which is why the
+    /// contents is what is looked for.
     #[test]
     fn the_guide_hangs_together() {
         let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nix/guide");
-        if !folder.is_dir() {
+        if !folder.join("index.html").is_file() {
             return;
         }
         let listed = pages(&folder);
