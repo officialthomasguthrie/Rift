@@ -38,6 +38,18 @@ let
     "foreground = #d4d4d4"
     "window-theme = system"
   ];
+  # the dark theme for gtk 3. gtk 3 has no colour scheme: it takes the dark stylesheet by the name
+  # of its theme, and the name gnome writes for dark is Adwaita-dark. gtk 3 carries that stylesheet
+  # as a resource but ships no theme by that name, and a name it cannot find falls back to light
+  # Adwaita, which is why the portal's own dialogs came up light over a dark desktop. this is the
+  # theme: the one line that pulls the stylesheet in, the same file gnome-themes-extra installs,
+  # without the gtk 2 engine that comes with it
+  adwaitaDark = pkgs.runCommand "adwaita-dark-gtk3" { } ''
+    mkdir -p $out/share/themes/Adwaita-dark/gtk-3.0
+    echo '@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");' \
+      > $out/share/themes/Adwaita-dark/gtk-3.0/gtk.css
+  '';
+
   # the part of the config written from the owner's theme and wallpaper: by the shell when the
   # session starts, and by rift wallpaper set. horizon reads its config again when the file changes,
   # and a file that is not there yet is no error
@@ -112,6 +124,12 @@ let
         default-window-height { fixed ${toString console.height}; }
         default-floating-position x=0 y=0 relative-to="top-left"
     }
+    // settings opens wide enough for its sidebar and a page beside it
+    window-rule {
+        match app-id=r#"^dev\.rift\.Settings$"#
+        default-column-width { proportion 0.75; }
+    }
+
     ${lib.concatMapStringsSep "\n" (
       command: "spawn-at-startup " + lib.concatMapStringsSep " " (word: ''"${word}"'') command
     ) cfg.startup}
@@ -269,6 +287,7 @@ in
       pkgs.brightnessctl
       pkgs.adwaita-icon-theme
       pkgs.hicolor-icon-theme
+      adwaitaDark
       # the title bar qt 5 apps draw on wayland, in the adwaita style, dark or light with the desktop
       pkgs.qadwaitadecorations
       wallpapers

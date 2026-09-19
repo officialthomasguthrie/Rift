@@ -93,6 +93,17 @@ in
       ];
     })
     (row {
+      id = "dev.rift.Settings";
+      name = "Settings";
+      what = "How the system looks and what it does";
+      exec = "rift-settings";
+      icon = "preferences-system-symbolic";
+      categories = [
+        "System"
+        "Settings"
+      ];
+    })
+    (row {
       id = "dev.rift.Guide";
       name = "Rift guide";
       what = "How Rift works, on the drive itself";

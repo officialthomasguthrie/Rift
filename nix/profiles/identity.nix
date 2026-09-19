@@ -69,6 +69,8 @@ in
   '';
   environment.etc."rift/logo.txt".text = logo.plain;
   environment.etc."rift/logo.ansi".text = logo.ansi;
+  # the mark, the line drawing of the black hole. the About page of Settings draws it
+  environment.etc."rift/logo.png".source = ../liftoff/logo/rift-mark.png;
 
   environment.systemPackages = [ fastfetch ];
   # fastfetch would pick the NixOS logo from ID_LIKE. the three lines at the end are Rift's own
