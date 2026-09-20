@@ -923,3 +923,55 @@ mod tests {
         assert_eq!(wep_kind("zzzzzzzzzz"), 2);
     }
 }
+
+#[cfg(all(test, feature = "bus"))]
+mod bus_tests {
+    use std::collections::HashMap;
+
+    use zbus::zvariant::serialized::Context;
+    use zbus::zvariant::{LE, OwnedValue, Value, to_bytes};
+
+    use super::{Addresses, gateway, named, written};
+
+    /// What `GetAll` answers for one of `NetworkManager`'s IP configurations, built and read back
+    /// the way the bus builds and reads it.
+    fn config() -> HashMap<String, OwnedValue> {
+        let address = |ip: &str, prefix: u32| {
+            HashMap::from([
+                ("address".to_string(), Value::from(ip.to_string())),
+                ("prefix".to_string(), Value::from(prefix)),
+            ])
+        };
+        let resolver =
+            |ip: &str| HashMap::from([("address".to_string(), Value::from(ip.to_string()))]);
+        let answered: HashMap<String, Value<'_>> = HashMap::from([
+            (
+                "AddressData".to_string(),
+                Value::from(vec![address("10.0.2.15", 24), address("10.0.3.7", 16)]),
+            ),
+            ("Gateway".to_string(), Value::from("10.0.2.2".to_string())),
+            (
+                "NameserverData".to_string(),
+                Value::from(vec![resolver("10.0.2.3")]),
+            ),
+        ]);
+        let bytes = to_bytes(Context::new_dbus(LE, 0), &answered).expect("the reply");
+        bytes.deserialize().expect("the values").0
+    }
+
+    #[test]
+    fn a_configuration_reads_back_as_addresses() {
+        let mut answered = config();
+        assert_eq!(
+            written(&mut answered, "AddressData"),
+            ["10.0.2.15/24", "10.0.3.7/16"]
+        );
+        assert_eq!(gateway(&mut answered), Some("10.0.2.2".to_string()));
+        assert_eq!(named(&mut answered, "NameserverData"), ["10.0.2.3"]);
+        // everything was taken, and a key that is not there is nothing
+        assert!(answered.is_empty());
+        assert!(written(&mut answered, "AddressData").is_empty());
+        assert_eq!(gateway(&mut answered), None);
+        assert_eq!(Addresses::default().gateway, None);
+    }
+}
