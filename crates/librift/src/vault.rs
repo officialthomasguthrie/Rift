@@ -1,9 +1,12 @@
 //! Vault from a client's side: the snapshots Timeline keeps of home and the backups on the backup
-//! disk, making them, and restoring a file from one.
+//! disk, making them, restoring a file from one, and the boot style on the drive's esp, which only
+//! root can write.
 
 #[cfg(feature = "bus")]
 use std::time::Duration;
 
+#[cfg(feature = "bus")]
+use crate::boot::Style;
 #[cfg(feature = "bus")]
 use crate::{Component, bus};
 
@@ -22,6 +25,10 @@ const BACKUPS_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long a backup may take. The first one of a full home reads all of it.
 #[cfg(feature = "bus")]
 const BACKUP_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
+
+/// How long reading or writing the boot style may take. Vault mounts the esp for it.
+#[cfg(feature = "bus")]
+const BOOT_STYLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
@@ -227,6 +234,37 @@ pub fn restore_backup(
     replace: bool,
 ) -> Result<(Restored, String), Refusal> {
     restore_with("RestoreBackup", backup, path, replace)
+}
+
+/// The boot style on the esp of the drive this system started from.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, or the esp could not be read.
+#[cfg(feature = "bus")]
+pub fn boot_style() -> Result<Style, String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(BOOT_STYLE_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    let word: String = proxy
+        .call("BootStyle", &())
+        .map_err(|e| bus::sentence(vault, e))?;
+    Ok(Style::from_setting(&word))
+}
+
+/// Writes the boot style onto that esp, where the initrd reads it before the next boot's splash.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, or the esp could not be written.
+#[cfg(feature = "bus")]
+pub fn set_boot_style(style: Style) -> Result<(), String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(BOOT_STYLE_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    proxy
+        .call("SetBootStyle", &(style.word(),))
+        .map_err(|e| bus::sentence(vault, e))
 }
 
 #[cfg(feature = "bus")]
