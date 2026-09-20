@@ -184,7 +184,8 @@ impl Page {
     }
 
     /// What a page that Settings cannot do yet says, in one sentence, with a second one where
-    /// there is another way to do it today. Appearance and About have pages of their own.
+    /// there is another way to do it today. Appearance, Displays and About have pages of their
+    /// own.
     #[must_use]
     pub const fn note(self) -> &'static str {
         match self {
@@ -199,16 +200,12 @@ impl Page {
                 "Bluetooth is not in Settings yet. The system menu at the right of the top bar \
                  turns the adapter on and connects a device that is already paired."
             }
-            Self::Displays => {
-                "Displays are not in Settings yet. Orbit reads each screen and picks its scale, \
-                 and About lists what it found."
-            }
             Self::Sound => {
                 "Sound devices are not in Settings yet. The system menu has the volume, and wpctl \
                  picks the output from a terminal."
             }
             Self::Power => "Power is not in Settings yet.",
-            Self::Appearance | Self::About => "",
+            Self::Appearance | Self::Displays | Self::About => "",
             Self::Dock => {
                 "The dock is not in Settings yet. A right click on an app in the dock pins it or \
                  takes it off."
@@ -296,7 +293,7 @@ mod tests {
     fn a_page_with_nothing_on_it_says_so_in_a_sentence() {
         for page in Page::ALL {
             let note = page.note();
-            if matches!(page, Page::Appearance | Page::About) {
+            if matches!(page, Page::Appearance | Page::Displays | Page::About) {
                 assert!(note.is_empty());
                 continue;
             }

@@ -19,7 +19,7 @@ use crate::control::{self, Command};
 use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
-use crate::{about, appearance, icons};
+use crate::{about, appearance, displays, icons};
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
 /// the boot test all know it by.
@@ -83,6 +83,10 @@ pub enum Message {
     Terminal(Scheme),
     /// One of the two boot styles.
     Boot(Style),
+    /// The size one screen is drawn at, from the Displays page.
+    Scale(String, u32),
+    /// What Orbit answered after a screen's size was written: the machine again, or why not.
+    Scaled(Result<Host, String>),
     /// What Vault answered about the boot style, after reading it or after writing it.
     BootStyle(Result<Style, String>),
     /// The corner radius slider moved.
@@ -222,12 +226,27 @@ impl Settings {
             format!("greeting {}", if self.greeting { "on" } else { "off" }),
         ]
         .into_iter()
-        // the boot style is Vault's to answer, so it is printed once it has
+        // the boot style is Vault's to answer, and the screens are Orbit's, so each is printed
+        // once it has
         .chain(
             self.boot
                 .as_ref()
                 .and_then(|answered| answered.as_ref().ok())
                 .map(|style| format!("boot {}", style.word())),
+        )
+        .chain(
+            self.host
+                .as_ref()
+                .and_then(|answered| answered.as_ref().ok())
+                .into_iter()
+                .flat_map(|host| {
+                    host.outputs.iter().map(|output| {
+                        format!(
+                            "screen {} {}x{} scale {}",
+                            output.connector, output.width, output.height, output.scale
+                        )
+                    })
+                }),
         )
         .collect::<Vec<_>>()
         .join("\n")
@@ -278,6 +297,12 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             state.wrote();
         }
         Message::Boot(style) => return appearance::write_style(style),
+        Message::Scale(connector, scale) => return displays::set_scale(connector, scale),
+        Message::Scaled(Ok(host)) => {
+            state.problem = None;
+            state.host = Some(Ok(host));
+        }
+        Message::Scaled(Err(why)) => state.problem = Some(why),
         Message::BootStyle(answered) => state.boot = Some(answered),
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
@@ -333,6 +358,14 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
         }),
         "terminal" => Task::done(Message::Terminal(Scheme::from_setting(value))),
         "boot" => Task::done(Message::Boot(Style::from_setting(value))),
+        // the screen is named first, then the size: `--set scale eDP-1 2`
+        "scale" => value
+            .trim()
+            .rsplit_once(' ')
+            .and_then(|(screen, size)| Some((screen.trim().to_string(), size.trim().parse().ok()?)))
+            .map_or_else(Task::none, |(screen, scale)| {
+                Task::done(Message::Scale(screen, scale))
+            }),
         "greeting" => Task::done(Message::Greeting(!value.trim().eq_ignore_ascii_case("off"))),
         "wallpaper" => state
             .choices
@@ -492,6 +525,7 @@ fn sidebar(state: &Settings, look: Colors) -> Element<'_, Message> {
 fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
     let inside = match state.page {
         Page::Appearance => appearance::view(state, look),
+        Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),
         other => nothing_yet(look, other),
     };

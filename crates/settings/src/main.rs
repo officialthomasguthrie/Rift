@@ -3,12 +3,13 @@
 //!
 //! `rift-settings` opens the window, or brings the one that is already open to the page it is on.
 //! `rift-settings --page <name>` opens or shows one page by name, `rift-settings --set <name>
-//! <value>` changes one setting of the Appearance page the way pressing it would, and
+//! <value>` changes one setting the way pressing it on its page would, and
 //! `rift-settings --state` prints the page that is up and every setting it writes.
 
 mod about;
 mod appearance;
 mod control;
+mod displays;
 mod icons;
 mod page;
 mod theme;
@@ -21,7 +22,7 @@ use std::process::ExitCode;
 use control::Command;
 use page::Page;
 
-const USAGE: &str = "Usage: rift-settings [--page <name>] [--screenshot <png>]\n       rift-settings [--set <name> <value> | --state]";
+const USAGE: &str = "Usage: rift-settings [--page <name>] [--screenshot <png>]\n       rift-settings [--set <name> <value> | --state]\n       rift-settings --set scale <screen> <1 or 2>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,7 +47,11 @@ fn main() -> ExitCode {
             }
             Err(why) => fail(&why),
         },
-        ["--set", name, value] => tell(&Command::Set((*name).to_string(), (*value).to_string())),
+        // a setting takes one word, except the size of a screen, which takes the screen and then
+        // the size: `--set scale eDP-1 2`
+        ["--set", name, rest @ ..] if !rest.is_empty() => {
+            tell(&Command::Set((*name).to_string(), rest.join(" ")))
+        }
         ["--page", word] => match Page::from_word(word) {
             Some(page) => open(Some(page), None),
             None => fail(&format!(
