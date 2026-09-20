@@ -103,15 +103,18 @@ pub fn named(state: &Settings, side: Side, name: &str) -> Option<usize> {
 
 /// Change something about the sound on a thread of its own, then read `PipeWire` back, so the page
 /// follows a change it made itself even where `pw-mon` is not running.
+///
+/// The reading is asked for inside the closure rather than beside the writing: a task built now
+/// would start its thread now, and read `PipeWire` while the write was still on its way to it.
 fn wrote(work: impl FnOnce() -> Result<(), String> + Send + 'static) -> Task<Message> {
     let (sender, receiver) = oneshot::channel();
     thread::spawn(move || {
         let _ = sender.send(work());
     });
     Task::perform(receiver, |said| {
-        Message::Acted(said.unwrap_or_else(|_| Err("It stopped before it finished.".to_string())))
+        said.unwrap_or_else(|_| Err("It stopped before it finished.".to_string()))
     })
-    .chain(read())
+    .then(|said| Task::done(Message::Acted(said)).chain(read()))
 }
 
 /// Read `PipeWire` again, on a thread of its own.
