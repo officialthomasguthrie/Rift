@@ -72,9 +72,11 @@ mod drive {
 
     /// Where the esp is mounted while the word is read.
     const AT: &str = "/run/liftoff-style";
-    /// How long the esp gets to show up. Plymouth waits for this, so it is short: a drive slower
-    /// than this draws the style the image has, and the boot is not held up for a splash.
-    const WAIT: Duration = Duration::from_secs(5);
+    /// How long the esp gets to show up. Plymouth waits for this, so it is bounded: a drive slower
+    /// than this draws the style the image has rather than holding the boot up for a splash. Ten
+    /// seconds is room for a usb stick to be enumerated, which the rest of the boot waits for
+    /// anyway, since nothing of the system can be read until it is.
+    const WAIT: Duration = Duration::from_secs(10);
 
     /// The boot style on that esp, text when it holds none.
     pub fn style() -> Result<Style, String> {
