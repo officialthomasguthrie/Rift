@@ -447,7 +447,7 @@ SETTINGS_OTHER = ("teal", "#68b4c1")
 BOOT_STYLE_FILE = "rift/boot-style"
 # what rift-settings --state prints, one word each
 SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text", "terminal",
-                 "greeting", "boot")
+                 "greeting", "boot", "screen")
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -2119,29 +2119,34 @@ def main():
     if ai_tier != file_ai_tier:
         fail(f"the bus says ai tier {ai_tier}, the profile says {file_ai_tier}")
 
-    # one virtual output. qemu gives it an edid, so the mode and the size are real; at 32 by 20
-    # centimetres 1280x800 is about 102 dpi, which is under the line, so the scale is 1
-    displays = prop("Displays", r"a\(suuu\) (\d+)([^\r\n]*)\r*\n")
+    # one virtual output: its connector, its mode, its size in centimetres and the size it is
+    # drawn at. qemu gives it an edid, so the mode and the size are real; at 32 by 20 centimetres
+    # 1280x800 is about 102 dpi, which is under the line, so the scale is 1
+    displays = prop("Displays", r"a\(suuuuu\) (\d+)([^\r\n]*)\r*\n")
     if displays.group(1) != "1":
         fail(f"the bus lists {displays.group(1)} outputs, expected 1:{displays.group(2)}")
-    output = re.match(r'\s*"([\w-]+)" (\d+) (\d+) (\d+)', displays.group(2))
+    output = re.match(r'\s*"([\w-]+)" (\d+) (\d+) (\d+) (\d+) (\d+)', displays.group(2))
     if not output:
         fail(f"the output on the bus does not read as one:{displays.group(2)}")
     if output.group(1) != file_connector:
         fail(f"the bus calls the output {output.group(1)}, the profile calls it {file_connector}")
-    if output.group(2, 3, 4) != (file_width, file_height, "1"):
-        fail(f"the output on the bus is {output.group(2, 3, 4)}, the profile says "
+    if output.group(2, 3, 6) != (file_width, file_height, "1"):
+        fail(f"the output on the bus is {output.group(2, 3, 6)}, the profile says "
              f"{file_width}x{file_height} at scale 1")
+    if output.group(4, 5) != ("32", "20"):
+        fail(f"the bus says the output is {output.group(4)} by {output.group(5)} cm, "
+             "qemu's edid says 32 by 20")
     ok(
         f"host profile {fingerprint[:12]}, {machine}, class {klass}, gpu {gpu_path}, "
-        f"ai tier {ai_tier}, output {output.group(1)} scale {output.group(4)}, on the bus"
+        f"ai tier {ai_tier}, output {output.group(1)} {output.group(4)}x{output.group(5)} cm "
+        f"scale {output.group(6)}, on the bus"
     )
 
     # 3a. `rift host` reads the same properties off the bus and prints a row for each
     host_rows = {
         "Fingerprint": fingerprint,
         "Class": klass,
-        "Display": f"{output.group(1)}, {output.group(2)}x{output.group(3)}, scale {output.group(4)}",
+        "Display": f"{output.group(1)}, {output.group(2)}x{output.group(3)}, scale {output.group(6)}",
         "GPU path": gpu_path,
         "AI tier": ai_tier,
     }
@@ -3935,6 +3940,87 @@ def main():
             if not wait_for(60, lambda: terminal_pixels("terminal-back", SETTINGS_OWN_SCHEME[1]) > TERMINAL_PIXELS):
                 fail(f"the terminal window is not drawn on {SETTINGS_OWN_SCHEME[1]} again")
             close_app(MENU_APP, MENU_APP_ID)
+
+            # the Displays page. the size a screen is drawn at is in the host profile, which is
+            # root's, so the page asks Orbit over the system bus; the session writes the part of
+            # the compositor's config that draws the screens, so the change lands where it stands.
+            # the whole screen is drawn twice as big for a moment, so it is put back before the
+            # rest of the test looks at anything
+            def screen_state(what, scale):
+                """Whether the page says the one screen of this machine is drawn at that size."""
+                said = settings_state(what).get("screen")
+                return said == f"{file_connector} {file_width}x{file_height} scale {scale}"
+
+            def scale_on_the_bus(what):
+                """The size Orbit says the screen is drawn at, off the system bus."""
+                child.send(f"busctl --system get-property {bus} {obj} {bus} Displays\r")
+                expect([r"a\(suuuuu\) \d+ [^\r\n]*\r*\n"], what)
+                said = re.search(r'"[\w-]+" \d+ \d+ \d+ \d+ (\d+)', child.match.group(0))
+                expect([PROMPT], "the prompt")
+                return said.group(1) if said else None
+
+            def scale_in_horizon(what):
+                """The size the compositor is drawing that screen at, which it reads from the part
+                of its config the session writes."""
+                _, printed = run("horizon msg --json outputs", what)
+                found = re.search(r'"scale":\s*([\d.]+)', without_console(printed))
+                return found.group(1) if found else None
+
+            run("rift-settings --page displays", "the Displays page")
+            if not wait_for(30, lambda: settings_state("the Displays page").get("page") == "displays"):
+                fail("rift-settings --page displays did not show that page")
+            if not wait_for(30, lambda: screen_state("the screen on the Displays page", 1)):
+                said = settings_state("the screen on the Displays page").get("screen")
+                fail(f"the Displays page says screen {said!r}, expected {file_connector} "
+                     f"{file_width}x{file_height} scale 1")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Displays page", f"{stem}-settings-displays{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+
+            status, output_said = run(f"rift-settings --set scale {file_connector} 2",
+                                      "the size of the screen on the Displays page")
+            if status != 0:
+                fail(f"rift-settings --set scale exited with {status}: "
+                     f"{without_console(output_said).strip()[-300:]!r}")
+            if not wait_for(60, lambda: screen_state("the screen's new size", 2)):
+                said = settings_state("the screen's new size").get("screen")
+                fail(f"the Displays page says screen {said!r} after it was set to scale 2")
+            # orbit wrote it into the [set] layer of the profile, and says so on the bus
+            _, written = run(f"cat {profile}", "the profile after the page set the size")
+            written = without_console(written)
+            for wanted in ("[[set.display]]", f'connector = "{file_connector}"', "scale = 2"):
+                if wanted not in written:
+                    fail(f"the profile has no {wanted!r} after the page set the size: "
+                         f"{written.strip()[-400:]!r}")
+            on_the_bus = scale_on_the_bus("the size on the bus")
+            if on_the_bus != "2":
+                fail(f"the bus says the screen is drawn at scale {on_the_bus}, the page set 2")
+            _, printed = run("rift host", "rift host after the page set the size")
+            row = re.search(r"^Display:[ \t]+(.*?)[ \t]*$", without_console(printed), re.M)
+            if not row or row.group(1) != f"{file_connector}, {file_width}x{file_height}, scale 2":
+                fail(f"rift host says Display {row and row.group(1)!r}, expected scale 2")
+            # and the compositor draws it that way, so the bar and the dock cover twice the rows
+            if not wait_for(60, lambda: scale_in_horizon("the size the compositor draws") == "2.0"):
+                fail(f"horizon draws the screen at scale {scale_in_horizon('the size the compositor draws')}, "
+                     "expected 2.0 after the page set it")
+            twice = (2 * BAR_HEIGHT, 2 * DOCK_HEIGHT)
+            bigger = wait_for(60, lambda: next((found for found in [bars("screen-scale")] if found == twice), None))
+            shot(f"{stem}-settings-scale{extension}", "screen-scale")
+            if not bigger:
+                fail(f"the bar and the dock are {bars('screen-scale')} rows with the screen drawn twice as "
+                     f"big, expected {twice}, see {stem}-settings-scale{extension}")
+            ok(f"the Displays page set {file_connector} to scale 2: the profile, the bus and rift host "
+               f"all say so, and horizon draws the bar and the dock {twice[0]} and {twice[1]} rows tall")
+
+            # and back, so the rest of the test and the next boots see the screen they know
+            run(f"rift-settings --set scale {file_connector} 1", "the size of the screen back")
+            if not wait_for(60, lambda: screen_state("the screen's size again", 1)):
+                fail("the Displays page does not say scale 1 after it was put back")
+            if not wait_for(60, lambda: next(
+                    (found for found in [bars("screen-scale-back")]
+                     if found == (BAR_HEIGHT, DOCK_HEIGHT)), None)):
+                fail(f"the bar and the dock are {bars('screen-scale-back')} rows again, expected "
+                     f"{(BAR_HEIGHT, DOCK_HEIGHT)}")
 
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
