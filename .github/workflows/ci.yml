@@ -545,8 +545,8 @@ jobs:
             first-boot-splash.png
             graphical-splash.png
             boot-style-splash.png
-            boot-style-graphical.png
-            boot-style-text.png
+            boot-style-splash-graphical.png
+            boot-style-splash-text.png
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         id: screendumps
@@ -562,7 +562,7 @@ jobs:
         # log, and `gh run view --log | base64 -d` gets the png back
         if: always() && steps.screendumps.outcome == 'failure'
         run: |
-          for f in splash.png first-boot-splash.png graphical-splash.png desktop*.png; do
+          for f in splash.png first-boot-splash.png graphical-splash.png boot-style-splash*.png desktop*.png; do
             [ -f "$f" ] || continue
             echo "::group::$f"
             base64 -w0 "$f"; echo
