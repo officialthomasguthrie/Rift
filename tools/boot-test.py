@@ -4,7 +4,7 @@ runs this after it builds the image.
 
 Usage: boot-test.py <rift-vm> <image> <passfile> [--models dir] [--exchange size] [--timeout 600]
        [--log serial.log] [--splash splash.png] [--desktop desktop.png] [--lens] [--updates updates.img]
-       [--backup backup.img] [--clone clone.img] [--first-boot]
+       [--backup backup.img] [--clone clone.img] [--first-boot] [--boot-style]
 
 With --first-boot rift-flash writes the drive without persist, the way it writes one on macOS and
 Windows, and the drive makes persist when it first starts. The test answers its questions over serial: a
@@ -52,6 +52,13 @@ data reads as no file system, so the two volume keys differ. After the poweroff 
 only the clone. Its luks prompt refuses the first drive's passphrase and takes the clone's, the file is
 in home, and the clone boots the version it was made from, from its own esp and slot a, with a machine
 id of its own and none of the first drive's snapshots.
+
+With --boot-style the test sets the boot style from the Appearance page instead of the checks below.
+The first boot draws the text splash, which is what a drive with no setting draws. Then Settings opens
+in the session, `rift-settings --set boot graphical` writes the word onto the esp through Vault, the
+test reads it back from /boot, and the vm reboots: the splash of that boot has to be the graphical one.
+It sets the style back to text from the page the same way, reboots again, and that splash has to be the
+text one. The two screendumps are saved beside the png --splash names. The test ends there.
 
 The drive: the vm app writes it from the image into a sparse file with rift-flash, with an exchange
 partition when --exchange gives its size. Persist has to be luks2 with argon2id, the settings a person
@@ -435,9 +442,12 @@ SETTINGS_APP_ID = "dev.rift.settings"
 SETTINGS_PAGES = 23
 SETTINGS_ACCENT = ("blue", "#78aeed")
 SETTINGS_OTHER = ("teal", "#68b4c1")
+# where the boot style lives on the esp, from crates/librift/src/boot.rs. the running system has the
+# esp at /boot, root only, so reading it back takes sudo
+BOOT_STYLE_FILE = "rift/boot-style"
 # what rift-settings --state prints, one word each
 SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text", "terminal",
-                 "greeting")
+                 "greeting", "boot")
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -1257,6 +1267,9 @@ def main():
                     help="the boot style to check the splash for: text, the default, or graphical, which the drive "
                     "gets through the kernel command line")
     ap.add_argument("--splash-only", action="store_true", help="end once the shell is up after the splash")
+    ap.add_argument("--boot-style", action="store_true",
+                    help="set the boot style from the Appearance page, reboot, and check the splash the next boot "
+                         "draws, both ways. Needs --splash: the two screendumps are saved beside that png")
     ap.add_argument("--desktop", help="take a screendump of the session, check it, save it as this png")
     ap.add_argument("--desktop-timeout", type=int, default=60, help="seconds for horizon to paint its first frame")
     ap.add_argument("--lens", action="store_true", help="expect lens's bar on the desktop")
@@ -1271,8 +1284,11 @@ def main():
     with open(args.passfile, encoding="utf-8") as f:
         passphrase = f.read()
 
+    if args.boot_style and not args.splash:
+        ap.error("--boot-style needs --splash, which names the png its screendumps are saved beside")
+
     work = tempfile.mkdtemp(prefix="rift-boot-")
-    if (args.splash or args.desktop or args.updates or args.first_boot) and not args.qmp:
+    if (args.splash or args.desktop or args.updates or args.first_boot or args.boot_style) and not args.qmp:
         args.qmp = os.path.join(work, "qmp.sock")
 
     # the app picks kvm or tcg and the firmware. what follows its options replaces its defaults.
@@ -1376,6 +1392,23 @@ def main():
             child.send(passphrase + "\r")
         ok("shell")
 
+    def reboot_action(action):
+        """What qemu does when the guest reboots. -no-reboot ends it, which is right for the last
+        boot of a run; a reboot the test goes on after needs a reset."""
+        try:
+            qmp(args.qmp, {"execute": "set-action", "arguments": {"reboot": action}})
+        except (OSError, RuntimeError) as e:
+            fail(f"qmp set-action reboot={action}: {e}")
+
+    def power_off():
+        """Shut the vm down from the shell and wait for qemu to go."""
+        child.send("sudo systemctl poweroff\r")
+        try:
+            child.expect(pexpect.EOF, timeout=90)
+        except pexpect.TIMEOUT:
+            print("\nboot-test: poweroff did not end qemu, killing it", flush=True)
+            child.terminate(force=True)
+
     def choose():
         """Answer the first boot's questions for a new passphrase: one too short, two that differ, then
         the passphrase twice. The drive makes persist, opens it and goes on to the autologin shell
@@ -1427,12 +1460,94 @@ def main():
         unlock()
 
     if args.splash_only:
-        child.send("sudo systemctl poweroff\r")
-        try:
-            child.expect(pexpect.EOF, timeout=90)
-        except pexpect.TIMEOUT:
-            print("\nboot-test: poweroff did not end qemu, killing it", flush=True)
-            child.terminate(force=True)
+        power_off()
+        print(f"\nboot-test: PASSED in {since()}", flush=True)
+        return
+
+    # 1c. the boot style. the Appearance page writes a word onto the esp, liftoff-style reads it there
+    # in the initrd before plymouthd starts, and the boot after it draws the style it names. The splash
+    # checked above is the text one, which is what a drive whose owner has chosen nothing draws
+    if args.boot_style:
+        stem, extension = os.path.splitext(args.splash)
+
+        def waited(seconds, ready):
+            """Poll until ready() answers something, or give up and answer what it last said."""
+            until = time.monotonic() + seconds
+            while True:
+                found = ready()
+                if found or time.monotonic() > until:
+                    return found
+                time.sleep(2)
+
+        def settings_state(what):
+            """What rift-settings --state prints, as a dict of the words it knows. The boot style is
+            only in it once Vault has answered, since Vault is the one that reads the esp."""
+            status, output = run("rift-settings --state", what)
+            if status != 0:
+                return {}
+            state = {}
+            for printed in without_console(output).splitlines():
+                key, _, value = printed.strip().partition(" ")
+                if key in SETTINGS_KEYS:
+                    state[key] = value.strip()
+            return state
+
+        def open_settings():
+            """Start Settings in the session and wait for its socket to answer."""
+            if not waited(args.desktop_timeout + 120,
+                          lambda: run("lens --state", "the shell")[0] == 0 or None):
+                fail("the shell does not answer, so Settings has no screen to open on")
+            run("systemd-run --user --quiet --collect rift-settings", "the Settings window")
+            if not waited(120, lambda: settings_state("the page Settings opens on") or None):
+                _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"rift-settings --state answers nothing: {without_console(output).strip()[-800:]!r}")
+
+        def choose(style):
+            """Set the boot style from the Appearance page, and read the word back off the esp."""
+            status, output = run(f"rift-settings --set boot {style}", f"the boot style set to {style}")
+            if status != 0:
+                fail(f"rift-settings --set boot {style} exited with {status}: "
+                     f"{without_console(output).strip()[-300:]!r}")
+            if not waited(120, lambda: settings_state("the boot style").get("boot") == style):
+                said = settings_state("the boot style").get("boot")
+                fail(f"rift-settings --state says boot {said!r} after the page was set to {style}")
+            status, output = run(f"sudo cat /boot/{BOOT_STYLE_FILE}", "the word on the esp")
+            written = without_console(output).strip()
+            if status != 0 or written != style:
+                fail(f"/boot/{BOOT_STYLE_FILE} holds {written!r} after the page was set to {style}")
+            ok(f"the Appearance page set the boot style to {style}, and the drive's esp holds the word")
+
+        def next_boot(style):
+            """Reboot, and check the splash of the boot that follows is the style that was chosen."""
+            png = f"{stem}-{style}{extension}"
+            reboot_action("reset")
+            child.send("sudo systemctl reboot\r")
+            expect([PASSPHRASE], f"the passphrase prompt of the boot after {style} was chosen")
+            ok(f"passphrase prompt of the boot after {style} was chosen")
+            time.sleep(3)
+            try:
+                width, height, rgb = screendump(args.qmp, work, f"boot-style-{style}")
+            except (OSError, RuntimeError) as e:
+                fail(f"screendump: {e}")
+            write_png(png, width, height, rgb)
+            check = check_splash if style == "graphical" else check_text_splash
+            good, lines = check(width, height, rgb)
+            print("\nboot-test: " + "\nboot-test: ".join(lines), flush=True)
+            if not good:
+                fail(f"the boot after {style} was chosen does not draw it, see {png}")
+            ok(f"the boot after {style} was chosen draws the {style} splash")
+
+        # graphical, which is not the style the image was built with, then text again
+        open_settings()
+        choose("graphical")
+        next_boot("graphical")
+        unlock()
+        open_settings()
+        choose("text")
+        next_boot("text")
+        unlock()
+        reboot_action("shutdown")
+        power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
         return
 
@@ -1796,10 +1911,7 @@ def main():
             fail("vault-first-boot did not say it formatted the exchange partition")
         ok(f"persist on {first['partitions'][-1][0]} has one key slot, and the system runs with the machine id in @var")
 
-        try:
-            qmp(args.qmp, {"execute": "set-action", "arguments": {"reboot": "reset"}})
-        except (OSError, RuntimeError) as e:
-            fail(f"qmp set-action reboot=reset: {e}")
+        reboot_action("reset")
         child.send("sudo systemctl reboot\r")
         if expect([CHOOSE, PASSPHRASE], "the passphrase prompt of the second boot") == 0:
             fail("the second boot asked for a new passphrase, it did not find the persist the first boot made")
@@ -1813,12 +1925,7 @@ def main():
             fail("vault-first-boot made something again on the second boot")
         ok("the second boot opened the same persist with the same passphrase and made nothing new")
 
-        child.send("sudo systemctl poweroff\r")
-        try:
-            child.expect(pexpect.EOF, timeout=90)
-        except pexpect.TIMEOUT:
-            print("\nboot-test: poweroff did not end qemu, killing it", flush=True)
-            child.terminate(force=True)
+        power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
         return
 
@@ -4514,13 +4621,6 @@ def main():
                f"slot {slot}, {fresh} on the esp")
             return new
 
-        # -no-reboot ends qemu when the guest reboots. for the reboots here the vm resets instead
-        def reboot_action(action):
-            try:
-                qmp(args.qmp, {"execute": "set-action", "arguments": {"reboot": action}})
-            except (OSError, RuntimeError) as e:
-                fail(f"qmp set-action reboot={action}: {e}")
-
         def reboot(what):
             child.send("sudo systemctl reboot\r")
             expect([PASSPHRASE], f"the luks passphrase prompt {what}")
@@ -4712,14 +4812,6 @@ def main():
         ok(f"the clone's persist {clone_luks} opens only with its own passphrase and has a volume key of its own")
 
     # 9. down
-    def power_off():
-        child.send("sudo systemctl poweroff\r")
-        try:
-            child.expect(pexpect.EOF, timeout=90)
-        except pexpect.TIMEOUT:
-            print("\nboot-test: poweroff did not end qemu, killing it", flush=True)
-            child.terminate(force=True)
-
     power_off()
 
     # 10. the clone by itself. qemu starts again with only the clone's disk as its drive. the first

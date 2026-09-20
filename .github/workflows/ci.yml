@@ -518,6 +518,12 @@ jobs:
         run: |
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --style graphical --splash-only \
             --log graphical.log --splash graphical-splash.png --timeout 600
+      - name: Boot the style the Appearance page chose
+        # the page writes the word onto the esp through Vault, the initrd reads it there, and the boot
+        # after it draws that style. both ways, so three boots: text, then graphical, then text again
+        run: |
+          python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --boot-style \
+            --log boot-style.log --splash boot-style-splash.png --timeout 1200
       - uses: actions/upload-artifact@v4
         if: always()
         continue-on-error: true
@@ -527,6 +533,7 @@ jobs:
             serial.log
             first-boot.log
             graphical.log
+            boot-style.log
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always()
@@ -537,6 +544,9 @@ jobs:
             splash.png
             first-boot-splash.png
             graphical-splash.png
+            boot-style-splash.png
+            boot-style-graphical.png
+            boot-style-text.png
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         id: screendumps
