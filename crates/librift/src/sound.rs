@@ -249,6 +249,10 @@ fn devices(printed: &str) -> (Vec<Device>, Vec<Device>) {
     let mut audio = false;
     let mut listing: Option<Side> = None;
     for line in printed.lines() {
+        // a line with nothing on it stands between two sections and says nothing about either
+        if line.trim().is_empty() {
+            continue;
+        }
         // Audio, Video and Settings are headed at the left margin; everything under one of them is
         // indented, and drawn into a tree
         if !line.starts_with(char::is_whitespace) {
@@ -435,6 +439,14 @@ Settings
             Some(51)
         );
         assert_eq!(picture.devices(Side::Input).len(), 1);
+    }
+
+    #[test]
+    fn a_blank_line_is_not_the_end_of_the_audio_section() {
+        let spaced = STATUS.replace(" \u{2502}  \n", "\n");
+        let (outputs, inputs) = devices(&spaced);
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(inputs.len(), 1);
     }
 
     #[test]
