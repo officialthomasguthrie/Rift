@@ -22,7 +22,7 @@ use crate::widgets::{GAP, TEXT_SIZE, choice, field, group, heading, note, settin
 /// How long a join is given before the page says the network did not come up.
 const JOIN_WAIT: Duration = Duration::from_secs(45);
 /// The password field's widget id, for the operation that puts the cursor in it.
-const FIELD: &str = "password";
+pub const FIELD: &str = "password";
 /// How big a signal icon is drawn.
 const ICON: f32 = 16.0;
 
@@ -221,7 +221,6 @@ pub fn wifi(state: &Settings, look: Colors) -> Element<'_, Message> {
             let Some(wireless) = &picture.wireless else {
                 return page
                     .push(note(look, "This machine has no Wi-Fi card."))
-                    .push(hidden(look))
                     .into();
             };
             page = page.push(group(look, vec![radio(look, picture)]));
@@ -312,10 +311,7 @@ fn radio(look: Colors, picture: &Picture) -> Element<'_, Message> {
             look,
             "Wi-Fi",
             None,
-            said(
-                look,
-                "A switch on this machine holds the radio off".to_string(),
-            ),
+            said(look, "Held off by a switch on this machine".to_string()),
         )
     }
 }
@@ -330,7 +326,7 @@ fn connected<'a>(
         setting(
             look,
             &network.name,
-            Some(secured_words(network.security)),
+            Some(secured_now(network.security)),
             strength(look, network),
         ),
         setting(
@@ -380,12 +376,14 @@ fn around<'a>(
         }
     }
     if rows.is_empty() {
-        return column![
-            heading(look, "Networks"),
-            note(look, "No other network is in range."),
-        ]
-        .spacing(8)
-        .into();
+        let nothing = if wireless.active().is_some() {
+            "No other network is in range."
+        } else {
+            "No network is in range."
+        };
+        return column![heading(look, "Networks"), note(look, nothing)]
+            .spacing(8)
+            .into();
     }
     column![heading(look, "Networks"), group(look, rows)]
         .spacing(8)
@@ -397,7 +395,10 @@ fn password(look: Colors, asked: &Joining) -> Element<'_, Message> {
     let hint = if asked.busy {
         "Connecting."
     } else if asked.password.chars().count() < asked.network.security.shortest() {
-        "At least eight characters."
+        match asked.network.security {
+            Security::Wep => "Type the key.",
+            _ => "At least eight characters.",
+        }
     } else {
         "Press Enter to join."
     };
@@ -447,6 +448,19 @@ fn under(network: &Network) -> &'static str {
         "Joined before"
     } else {
         secured_words(network.security)
+    }
+}
+
+/// How the network the machine is on is secured, in words. It has been joined, so it asks for
+/// nothing more.
+const fn secured_now(security: Security) -> &'static str {
+    match security {
+        Security::Open => "Open, with no password",
+        Security::Enhanced => "Open, and encrypted all the same",
+        Security::Password => "Secured with a WPA2 password",
+        Security::Sae => "Secured with a WPA3 password",
+        Security::Wep => "Secured with an old WEP key",
+        Security::Enterprise => "Secured with a user name and a password",
     }
 }
 
@@ -546,9 +560,15 @@ mod tests {
             Security::Wep,
             Security::Enterprise,
         ] {
-            let words = secured_words(security);
-            assert!(words.is_ascii() && !words.ends_with('.'), "{words}");
+            for words in [secured_words(security), secured_now(security)] {
+                assert!(words.is_ascii() && !words.ends_with('.'), "{words}");
+            }
         }
+        // the one the machine is on is not asking for anything
+        assert_eq!(
+            secured_now(Security::Password),
+            "Secured with a WPA2 password"
+        );
     }
 
     #[test]

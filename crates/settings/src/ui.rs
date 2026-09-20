@@ -364,7 +364,7 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             if state
                 .joining
                 .as_ref()
-                .is_some_and(|asked| joined(state, asked.network.ssid.as_slice()))
+                .is_some_and(|asked| on_network(state, asked.network.ssid.as_slice()))
             {
                 state.joining = None;
                 state.doing = None;
@@ -405,7 +405,7 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             state.problem = Some(why);
             if let Some(asked) = state.joining.as_mut() {
                 asked.busy = false;
-                return crate::widgets::focus("password");
+                return crate::widgets::focus(net::FIELD);
             }
         }
         Message::Scaled(Ok(host)) => {
@@ -451,7 +451,7 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
 }
 
 /// Whether the machine is on the network with this name as the radio sends it.
-fn joined(state: &Settings, ssid: &[u8]) -> bool {
+fn on_network(state: &Settings, ssid: &[u8]) -> bool {
     state
         .network
         .as_ref()
