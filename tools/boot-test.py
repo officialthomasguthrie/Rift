@@ -3984,6 +3984,11 @@ def main():
                      f"{without_console(output_said).strip()[-300:]!r}")
             if not wait_for(60, lambda: screen_state("the screen's new size", 2)):
                 said = settings_state("the screen's new size").get("screen")
+                # orbit prints a line for every setting it writes, so its journal says whether the
+                # page reached it at all
+                _, printed = run("journalctl -b -u orbit --no-pager -n 20 -o cat | cat",
+                                 "orbit's journal")
+                print(f"\nboot-test: orbit's journal:\n{without_console(printed)}", flush=True)
                 fail(f"the Displays page says screen {said!r} after it was set to scale 2")
             # orbit wrote it into the [set] layer of the profile, and says so on the bus
             _, written = run(f"cat {profile}", "the profile after the page set the size")
@@ -4001,8 +4006,10 @@ def main():
                 fail(f"rift host says Display {row and row.group(1)!r}, expected scale 2")
             # and the compositor draws it that way, so the bar and the dock cover twice the rows
             if not wait_for(60, lambda: scale_in_horizon("the size the compositor draws") == "2.0"):
+                _, part = run("cat ~/.local/state/rift/displays.kdl", "the part written for the screens")
                 fail(f"horizon draws the screen at scale {scale_in_horizon('the size the compositor draws')}, "
-                     "expected 2.0 after the page set it")
+                     f"expected 2.0 after the page set it; the part says "
+                     f"{without_console(part).strip()[-300:]!r}")
             twice = (2 * BAR_HEIGHT, 2 * DOCK_HEIGHT)
             bigger = wait_for(60, lambda: next((found for found in [bars("screen-scale")] if found == twice), None))
             shot(f"{stem}-settings-scale{extension}", "screen-scale")
