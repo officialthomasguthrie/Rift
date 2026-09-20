@@ -12,6 +12,7 @@ use iced::{
     Border, Center, Color, Element, Fill, Length, Size, Subscription, Task, Theme, theme, window,
 };
 use librift::appearance::{Accent, Look, Scheme, Theme as Mode};
+use librift::boot::Style;
 use librift::orbit::Host;
 
 use crate::control::{self, Command};
@@ -48,6 +49,9 @@ pub struct Settings {
     pub look: Look,
     /// Whether the terminal greets the first shell of a session.
     pub greeting: bool,
+    /// How the next boot of this drive looks, once Vault has said. It is on the esp, not in home,
+    /// so Vault is the one that reads and writes it.
+    pub boot: Option<Result<Style, String>>,
     /// The wallpapers to choose from: the photographs Rift ships, then the flat colours.
     pub choices: Vec<appearance::Choice>,
     /// What Orbit says about this machine, once it has answered.
@@ -77,6 +81,10 @@ pub enum Message {
     Text(u32),
     /// One of the terminal colour schemes.
     Terminal(Scheme),
+    /// One of the two boot styles.
+    Boot(Style),
+    /// What Vault answered about the boot style, after reading it or after writing it.
+    BootStyle(Result<Style, String>),
     /// The corner radius slider moved.
     Radius(u32),
     /// A slider was let go, so the look is written.
@@ -139,7 +147,7 @@ pub fn run(start: Start) -> iced::Result {
 fn window(screenshot: bool) -> window::Settings {
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut settings = window::Settings {
-        size: Size::new(920.0, if screenshot { 1060.0 } else { 660.0 }),
+        size: Size::new(920.0, if screenshot { 1200.0 } else { 660.0 }),
         min_size: Some(Size::new(600.0, 420.0)),
         exit_on_close_request: false,
         // the app draws its own title bar, the way the GTK apps of the session do. left to itself
@@ -159,13 +167,14 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         page: start.page.unwrap_or(Page::FIRST),
         look: Look::read(),
         greeting: librift::appearance::greeting(),
+        boot: None,
         choices: appearance::choices(),
         host: None,
         release: about::release(),
         problem: None,
         screenshot: start.screenshot.clone(),
     };
-    let mut work = vec![about::ask_orbit()];
+    let mut work = vec![about::ask_orbit(), appearance::ask_vault()];
     if start.screenshot.is_some() {
         work.push(shoot());
     }
@@ -212,6 +221,15 @@ impl Settings {
             format!("terminal {}", look.terminal.word()),
             format!("greeting {}", if self.greeting { "on" } else { "off" }),
         ]
+        .into_iter()
+        // the boot style is Vault's to answer, so it is printed once it has
+        .chain(
+            self.boot
+                .as_ref()
+                .and_then(|answered| answered.as_ref().ok())
+                .map(|style| format!("boot {}", style.word())),
+        )
+        .collect::<Vec<_>>()
         .join("\n")
             + "\n"
     }
@@ -259,6 +277,8 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             state.look.terminal = scheme;
             state.wrote();
         }
+        Message::Boot(style) => return appearance::write_style(style),
+        Message::BootStyle(answered) => state.boot = Some(answered),
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
             state.greeting = on;
@@ -312,6 +332,7 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
             Task::done(Message::Wrote)
         }),
         "terminal" => Task::done(Message::Terminal(Scheme::from_setting(value))),
+        "boot" => Task::done(Message::Boot(Style::from_setting(value))),
         "greeting" => Task::done(Message::Greeting(!value.trim().eq_ignore_ascii_case("off"))),
         "wallpaper" => state
             .choices

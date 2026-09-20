@@ -1,13 +1,18 @@
 //! The Appearance page: the wallpaper, dark or light, the accent, the interface text size, the
-//! gaps between windows, the corner radius of a window, the terminal colours and the terminal
-//! greeting. Every change is written to the owner's files and handed to the apps, the compositor
-//! and the shell at once.
+//! gaps between windows, the corner radius of a window, the terminal colours, the terminal greeting
+//! and the boot style. Every change but the last is written to the owner's files and handed to the
+//! apps, the compositor and the shell at once; the boot style is on the drive's esp, which only
+//! root can write, so Vault does it and the next boot draws it.
 
+use std::thread;
+
+use iced::futures::channel::oneshot;
 use iced::widget::{button, column, container, row, text};
-use iced::{Border, Center, Element, Fill, Length, Theme};
+use iced::{Border, Center, Element, Fill, Length, Task, Theme};
 use librift::appearance::{
     Accent, GAPS_MOST, RADIUS_MOST, Scheme, TEXT_LEAST, TEXT_MOST, TEXT_STEP, Theme as Mode,
 };
+use librift::boot::Style;
 use librift::wallpaper::{self, Wallpaper};
 
 use crate::theme::{Colors, hex};
@@ -64,9 +69,30 @@ pub fn choices() -> Vec<Choice> {
     choices
 }
 
+/// Ask Vault how this drive starts, on a thread of its own: the system bus takes a moment, and the
+/// window opens without waiting for it.
+pub fn ask_vault() -> Task<Message> {
+    answered(librift::vault::boot_style)
+}
+
+/// Write a boot style through Vault, on a thread of its own, and say what it answered.
+pub fn write_style(style: Style) -> Task<Message> {
+    answered(move || librift::vault::set_boot_style(style).map(|()| style))
+}
+
+/// What Vault says, from a thread, as the message the window takes it in.
+fn answered(ask: impl FnOnce() -> Result<Style, String> + Send + 'static) -> Task<Message> {
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let _ = sender.send(ask());
+    });
+    Task::perform(receiver, |said| {
+        Message::BootStyle(said.unwrap_or_else(|_| Err("Vault did not answer.".to_string())))
+    })
+}
+
 /// The page.
 pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
-    let later = note(look, "The boot style comes with the rest of Settings.");
     let mut page = column![
         themes(state, look),
         accents(state, look),
@@ -74,7 +100,7 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
         text_size(state, look),
         windows(state, look),
         terminal(state, look),
-        later,
+        boot(state, look),
     ]
     .spacing(GAP)
     .width(Fill);
@@ -232,6 +258,37 @@ fn terminal(state: &Settings, look: Colors) -> Element<'_, Message> {
         switch(look, state.greeting, Message::Greeting),
     ));
     column![heading(look, "Terminal"), group(look, rows)]
+        .spacing(8)
+        .into()
+}
+
+/// How the drive looks while it starts. It is the one setting of this page that is not in home and
+/// does not take effect where it stands: plymouth draws the passphrase prompt before persist is
+/// open, so the word lives on the esp and the next boot is the one that draws it.
+fn boot(state: &Settings, look: Colors) -> Element<'_, Message> {
+    let chosen = match &state.boot {
+        Some(Ok(style)) => Some(*style),
+        _ => None,
+    };
+    let rows = Style::ALL
+        .into_iter()
+        .map(|style| {
+            choice(
+                look,
+                style.label(),
+                Some(style.note()),
+                None,
+                Some(style) == chosen,
+                Message::Boot(style),
+            )
+        })
+        .collect();
+    let under: Element<'_, Message> = match &state.boot {
+        None => note(look, "Asking Vault how this drive starts."),
+        Some(Ok(_)) => note(look, "The next start of this drive draws it."),
+        Some(Err(why)) => text(why).size(TEXT_SIZE).color(look.error).into(),
+    };
+    column![heading(look, "Boot"), group(look, rows), under]
         .spacing(8)
         .into()
 }
