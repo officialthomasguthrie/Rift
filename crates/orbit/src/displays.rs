@@ -13,9 +13,6 @@ use crate::edid;
 /// Above this many dots per inch a screen is dense enough to want everything drawn twice as big.
 pub const HIDPI: f64 = 160.0;
 
-/// Centimetres in an inch.
-const CM_PER_INCH: f64 = 2.54;
-
 /// One connected output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Display {
@@ -108,15 +105,11 @@ pub fn scale_for(mode: (u32, u32), size_cm: (u32, u32)) -> u32 {
     }
 }
 
-/// Dots per inch along the diagonal, `None` when the output does not report enough.
+/// Dots per inch along the diagonal, `None` when the output does not report enough. The Displays
+/// page shows the same number, so the sum lives in librift beside the rest of what a screen is.
 #[must_use]
 pub fn dpi(mode: (u32, u32), size_cm: (u32, u32)) -> Option<f64> {
-    if mode.0 == 0 || mode.1 == 0 || size_cm.0 == 0 || size_cm.1 == 0 {
-        return None;
-    }
-    let pixels = f64::from(mode.0).hypot(f64::from(mode.1));
-    let inches = f64::from(size_cm.0).hypot(f64::from(size_cm.1)) / CM_PER_INCH;
-    Some(pixels / inches)
+    librift::orbit::dpi(mode, size_cm)
 }
 
 #[cfg(test)]

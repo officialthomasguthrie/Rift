@@ -24,6 +24,8 @@ pub const NVK: &str = "nvk";
 pub const NONE: &str = "none";
 /// A card whose vendor we do not recognise, or no card at all.
 pub const UNKNOWN_VENDOR: &str = "unknown";
+/// Every path, for the profile setting that names one.
+pub const PATHS: [&str; 3] = [MESA, NVK, NONE];
 
 /// Reads the cards of the running machine.
 #[must_use]

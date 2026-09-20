@@ -45,7 +45,7 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ),
     (
         "host",
-        "Show what Orbit remembers about this machine",
+        "Show or set what Orbit remembers about this machine",
         "Phase 1",
     ),
     (

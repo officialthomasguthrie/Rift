@@ -93,7 +93,8 @@ fn main() -> ExitCode {
     if !args.serve {
         return ExitCode::SUCCESS;
     }
-    if let Err(e) = bus::serve(profile) {
+    // the bus keeps what was detected, so a setting written over it rewrites the same file
+    if let Err(e) = bus::serve(args.hosts_dir, detected, profile) {
         eprintln!("orbit: could not answer on the system bus: {e}");
         return ExitCode::FAILURE;
     }

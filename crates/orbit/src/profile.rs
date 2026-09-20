@@ -3,9 +3,10 @@
 //!
 //! The file is a delta, not a dump. `[detected]` is what Orbit worked out about this machine
 //! and holds only what differs from the built in defaults, so it stays a few lines and a change
-//! to a default reaches every machine on its next boot. `[set]` is what a person or another
-//! Rift service decided; Orbit never writes into it and copies it through every rewrite,
-//! comments and all. Effective values are the defaults, then `[detected]`, then `[set]`.
+//! to a default reaches every machine on its next boot. `[set]` is what a person decided. Orbit
+//! writes into it only when it is asked to, over the bus, one line at a time: every other line of
+//! the block, comments and all, is carried through a rewrite as it was. Effective values are the
+//! defaults, then `[detected]`, then `[set]`.
 //!
 //! Only the subset of TOML written here is read back: `key = "string"`, `key = 12`, the two
 //! tables and their `display` arrays. That keeps the crate dependency free.
@@ -22,6 +23,21 @@ use crate::host::{self, Host};
 
 /// The default class for a machine seen for the first time.
 pub const DEFAULT_CLASS: &str = "borrowed";
+
+/// What a machine can be to the drive. Only a person decides this.
+pub const CLASSES: [&str; 3] = ["owned", "trusted", DEFAULT_CLASS];
+
+/// The sizes a screen is drawn at: its own, or twice it. The detection works one of these out,
+/// and a person can ask for the other.
+pub const SCALES: [u32; 2] = [1, 2];
+
+/// The settings the bus writes into `[set]`: the word for it, the key it writes, and the values
+/// it takes.
+const SETTABLE: [(&str, &str, &[&str]); 3] = [
+    ("class", "class", &CLASSES),
+    ("tier", "ai_tier", &host::TIERS),
+    ("gpu", "gpu_path", &gpu::PATHS),
+];
 
 /// Every setting a host profile can carry, with the value the whole fleet gets when the file
 /// says nothing.
@@ -86,12 +102,15 @@ pub struct Layer {
     pub gpu_path: Option<String>,
     /// See [`Settings::ai_tier`].
     pub ai_tier: Option<String>,
-    /// See [`Settings::displays`]. A layer that names any output replaces the whole list.
+    /// See [`Settings::displays`]. One entry per output the layer says something about, found by
+    /// its connector: the scale it is drawn at, and a mode or a size where it names one. An entry
+    /// for a connector this machine does not have says nothing.
     pub displays: Option<Vec<Display>>,
 }
 
 impl Layer {
-    /// This layer laid over `base`. Everything this layer names wins.
+    /// This layer laid over `base`. Everything this layer names wins. An output is found by its
+    /// connector, so what the layer says about one screen leaves the others as they were read.
     #[must_use]
     pub fn over(&self, base: Settings) -> Settings {
         Settings {
@@ -100,8 +119,32 @@ impl Layer {
             gpu_vendor: self.gpu_vendor.clone().unwrap_or(base.gpu_vendor),
             gpu_path: self.gpu_path.clone().unwrap_or(base.gpu_path),
             ai_tier: self.ai_tier.clone().unwrap_or(base.ai_tier),
-            displays: self.displays.clone().unwrap_or(base.displays),
+            displays: base
+                .displays
+                .into_iter()
+                .map(|display| self.over_display(display))
+                .collect(),
         }
+    }
+
+    /// One output with what this layer says about that connector laid over it.
+    fn over_display(&self, mut display: Display) -> Display {
+        let Some(said) = self
+            .displays
+            .iter()
+            .flatten()
+            .find(|one| one.connector == display.connector)
+        else {
+            return display;
+        };
+        if said.mode != (0, 0) {
+            display.mode = said.mode;
+        }
+        if said.size_cm != (0, 0) {
+            display.size_cm = said.size_cm;
+        }
+        display.scale = said.scale;
+        display
     }
 
     /// Nothing to write.
@@ -463,6 +506,174 @@ pub fn render(identity: &Identity, detected: &Settings, set_text: &str) -> Strin
     out
 }
 
+/// Writes one line of `[set]` into the profile for `identity` and gives back the settings the
+/// file makes after it. `change` is given the `[set]` block as the file has it and answers with
+/// the block to write; [`put`] and [`put_scale`] are the two that do that. Nothing is written
+/// unless the new file reads back.
+///
+/// # Errors
+///
+/// Any I/O error under `hosts_dir`, and a file that does not parse, before or after the change.
+pub fn write_set(
+    hosts_dir: &Path,
+    identity: &Identity,
+    detected: &Settings,
+    change: impl FnOnce(&str) -> String,
+) -> io::Result<Settings> {
+    let stored = load(hosts_dir, &identity.fingerprint)?.unwrap_or_default();
+    let text = render(identity, detected, &change(&stored.set_text));
+    let parsed = Stored::parse(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    write_atomically(&path(hosts_dir, &identity.fingerprint), &text)?;
+    Ok(parsed.set.over(detected.clone()))
+}
+
+/// The key `[set]` holds a setting under, and the value to put there.
+///
+/// # Errors
+///
+/// A sentence when `name` is not a setting, or `value` is not one that setting takes.
+pub fn settable(name: &str, value: &str) -> Result<(&'static str, String), String> {
+    let (name, value) = (name.trim(), value.trim());
+    let Some((_, key, takes)) = SETTABLE
+        .iter()
+        .find(|(word, ..)| name.eq_ignore_ascii_case(word))
+    else {
+        let words: Vec<&str> = SETTABLE.iter().map(|(word, ..)| *word).collect();
+        return Err(format!(
+            "There is nothing called \"{name}\" to set on this machine. There is {}.",
+            list(&words)
+        ));
+    };
+    if !takes.contains(&value) {
+        return Err(format!(
+            "\"{value}\" is not a {name}. It is {}.",
+            list(takes)
+        ));
+    }
+    Ok((key, value.to_owned()))
+}
+
+/// `a`, `a or b`, `a, b or c`.
+fn list(words: &[&str]) -> String {
+    match words {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
+/// The `[set]` block with `key = "value"` in it: in place of the line that has that key, or after
+/// the last line of the table when it has none. Every other line is left exactly as it was.
+#[must_use]
+pub fn put(set_text: &str, key: &str, value: &str) -> String {
+    let mut tables = tables(set_text);
+    let line = format!("{key} = {}", quote(value));
+    match tables
+        .iter_mut()
+        .find(|table| header_of(table) == Some(Section::Set))
+    {
+        Some(table) => put_line(table, key, line),
+        None => tables.insert(0, vec!["[set]".to_owned(), line]),
+    }
+    joined(&tables)
+}
+
+/// The `[set]` block with `scale = <scale>` in the display table for `connector`, adding that
+/// table when the block has none for that screen.
+#[must_use]
+pub fn put_scale(set_text: &str, connector: &str, scale: u32) -> String {
+    let mut tables = tables(set_text);
+    let line = format!("scale = {scale}");
+    if let Some(table) = tables
+        .iter_mut()
+        .find(|table| names_display(table, connector))
+    {
+        put_line(table, "scale", line);
+        return joined(&tables);
+    }
+    if !tables
+        .iter()
+        .any(|table| header_of(table) == Some(Section::Set))
+    {
+        tables.insert(0, vec!["[set]".to_owned()]);
+    }
+    tables.push(vec![
+        String::new(),
+        "[[set.display]]".to_owned(),
+        format!("connector = {}", quote(connector)),
+        line,
+    ]);
+    joined(&tables)
+}
+
+/// The `[set]` block split at its table headers: the table itself, then one for each display.
+fn tables(set_text: &str) -> Vec<Vec<String>> {
+    let mut tables: Vec<Vec<String>> = Vec::new();
+    for raw in set_text.lines() {
+        if table_header(raw.trim()).is_some() || tables.is_empty() {
+            tables.push(Vec::new());
+        }
+        if let Some(table) = tables.last_mut() {
+            table.push(raw.to_owned());
+        }
+    }
+    tables
+}
+
+/// The tables back into one block, with the newline every line of a file ends with.
+fn joined(tables: &[Vec<String>]) -> String {
+    let lines: Vec<&str> = tables
+        .iter()
+        .flatten()
+        .map(std::string::String::as_str)
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The table a header line starts, `None` when the table has no header.
+fn header_of(table: &[String]) -> Option<Section> {
+    table.first().and_then(|line| table_header(line.trim()))
+}
+
+/// Whether this table is the display table for `connector`.
+fn names_display(table: &[String], connector: &str) -> bool {
+    header_of(table) == Some(Section::SetDisplay)
+        && table.iter().any(|line| {
+            key_of(line) == Some("connector")
+                && value_of(line).and_then(unquote).as_deref() == Some(connector)
+        })
+}
+
+/// Puts `line` in this table, in place of the line that sets `key`, or after its last line.
+fn put_line(table: &mut Vec<String>, key: &str, line: String) {
+    if let Some(at) = table.iter().position(|one| key_of(one) == Some(key)) {
+        table[at] = line;
+        return;
+    }
+    let end = table
+        .iter()
+        .rposition(|one| !one.trim().is_empty())
+        .map_or(0, |at| at + 1);
+    table.insert(end, line);
+}
+
+/// The key a `key = value` line sets, when the line is one.
+fn key_of(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.starts_with('#') || line.starts_with('[') {
+        return None;
+    }
+    Some(line.split_once('=')?.0.trim())
+}
+
+/// What that line sets it to, with any comment after it cut off.
+fn value_of(line: &str) -> Option<&str> {
+    Some(strip_comment(line.trim().split_once('=')?.1).trim())
+}
+
 fn identity_to_toml(identity: &Identity) -> String {
     let mut out = String::new();
     for (key, value) in [
@@ -747,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn a_set_display_replaces_the_list() {
+    fn a_set_display_says_the_scale_of_that_screen() {
         let text = render(
             &identity(),
             &laptop(),
@@ -757,8 +968,158 @@ mod tests {
         let effective = stored.set.over(laptop());
         assert_eq!(effective.displays.len(), 1);
         assert_eq!(effective.displays[0].scale, 1);
-        // the layer says nothing about the mode, so an unnamed field is unknown, not the panel's
-        assert_eq!(effective.displays[0].mode, (0, 0));
+        // the block says nothing about the mode, so the panel's own is still there
+        assert_eq!(effective.displays[0].mode, (2880, 1800));
+
+        // a screen the machine does not have says nothing, and the ones it has are left alone
+        let stranger = Layer {
+            displays: Some(vec![Display {
+                connector: "HDMI-A-2".to_owned(),
+                scale: 2,
+                ..Display::default()
+            }]),
+            ..Layer::default()
+        };
+        assert_eq!(stranger.over(laptop()).displays, laptop().displays);
+    }
+
+    #[test]
+    fn one_screen_of_two_is_set_on_its_own() {
+        let mut two = laptop();
+        two.displays.push(Display {
+            connector: "HDMI-A-1".to_owned(),
+            mode: (1920, 1080),
+            size_cm: (52, 29),
+            scale: 1,
+        });
+        let set = put_scale("", "HDMI-A-1", 2);
+        let stored = Stored::parse(&render(&identity(), &two, &set)).unwrap();
+        let effective = stored.set.over(two);
+        assert_eq!(effective.displays.len(), 2);
+        assert_eq!(effective.displays[0].connector, "eDP-1");
+        assert_eq!(effective.displays[0].scale, 2, "the panel's own scale");
+        assert_eq!(effective.displays[1].scale, 2, "the one that was set");
+        assert_eq!(effective.displays[1].mode, (1920, 1080));
+    }
+
+    #[test]
+    fn a_line_put_in_set_leaves_every_other_line_alone() {
+        let block = "[set]\n# mine, since the summer\nclass = \"trusted\" # for now\n";
+        let written = put(block, "class", "owned");
+        assert_eq!(
+            written,
+            "[set]\n# mine, since the summer\nclass = \"owned\"\n"
+        );
+        // a key the block does not have goes after the last line of the table
+        let added = put(&written, "ai_tier", "large");
+        assert_eq!(
+            added,
+            "[set]\n# mine, since the summer\nclass = \"owned\"\nai_tier = \"large\"\n"
+        );
+        // and with no block at all there is one afterwards
+        assert_eq!(put("", "class", "owned"), "[set]\nclass = \"owned\"\n");
+        // the display tables stay under the table they belong to
+        let with_screen = put(
+            "[set]\n\n[[set.display]]\nconnector = \"eDP-1\"\nscale = 2\n",
+            "class",
+            "owned",
+        );
+        assert_eq!(
+            with_screen,
+            "[set]\nclass = \"owned\"\n\n[[set.display]]\nconnector = \"eDP-1\"\nscale = 2\n"
+        );
+    }
+
+    #[test]
+    fn a_scale_is_put_in_the_table_for_that_screen() {
+        // no block at all: the table and the screen are both written
+        let first = put_scale("", "eDP-1", 2);
+        assert_eq!(
+            first,
+            "[set]\n\n[[set.display]]\nconnector = \"eDP-1\"\nscale = 2\n"
+        );
+        // the same screen again, in place
+        assert_eq!(
+            put_scale(&first, "eDP-1", 1).lines().last(),
+            Some("scale = 1")
+        );
+        assert_eq!(put_scale(&first, "eDP-1", 1).matches("scale").count(), 1);
+        // another screen gets a table of its own, and the first one keeps what it says
+        let both = put_scale(&first, "HDMI-A-1", 2);
+        assert!(
+            both.contains("connector = \"eDP-1\"\nscale = 2\n"),
+            "{both}"
+        );
+        assert!(
+            both.ends_with("[[set.display]]\nconnector = \"HDMI-A-1\"\nscale = 2\n"),
+            "{both}"
+        );
+        // a table that names no scale yet, comments and all
+        let bare = "[set]\n\n[[set.display]]\n# the panel\nconnector = \"eDP-1\"\n";
+        assert_eq!(
+            put_scale(bare, "eDP-1", 2),
+            "[set]\n\n[[set.display]]\n# the panel\nconnector = \"eDP-1\"\nscale = 2\n"
+        );
+    }
+
+    #[test]
+    fn only_the_settings_a_person_decides_can_be_set() {
+        assert_eq!(
+            settable("class", "owned"),
+            Ok(("class", "owned".to_owned()))
+        );
+        assert_eq!(
+            settable(" Tier ", " large "),
+            Ok(("ai_tier", "large".to_owned()))
+        );
+        assert_eq!(settable("gpu", "nvk"), Ok(("gpu_path", "nvk".to_owned())));
+        assert_eq!(
+            settable("chassis", "laptop").unwrap_err(),
+            "There is nothing called \"chassis\" to set on this machine. There is class, tier or gpu."
+        );
+        assert_eq!(
+            settable("class", "mine").unwrap_err(),
+            "\"mine\" is not a class. It is owned, trusted or borrowed."
+        );
+        assert_eq!(list(&["one"]), "one");
+        assert_eq!(list(&["one", "two"]), "one or two");
+    }
+
+    #[test]
+    fn a_setting_written_over_the_bus_keeps_the_rest_of_the_file() {
+        let dir = temp_dir("write-set");
+        let host = sample_host();
+        let detected = qemu();
+        let (path, _, profile) = record(&dir, &host, &detected, "2026-09-20T09:00:00Z").unwrap();
+        let hand_written = format!(
+            "{}\n[set]\n# this one is mine\nclass = \"owned\"\n",
+            fs::read_to_string(&path).unwrap().trim_end()
+        );
+        fs::write(&path, hand_written).unwrap();
+
+        let settings = write_set(&dir, &profile.identity, &detected, |set| {
+            put_scale(set, "Virtual-1", 2)
+        })
+        .unwrap();
+        assert_eq!(settings.displays[0].scale, 2);
+        assert_eq!(settings.class, "owned");
+        assert_eq!(settings.displays[0].mode, (1280, 800));
+
+        let text = fs::read_to_string(&path).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            text.contains("# this one is mine\nclass = \"owned\""),
+            "{text}"
+        );
+        assert!(text.contains("[detected]"), "{text}");
+        assert!(
+            text.contains("first_seen = \"2026-09-20T09:00:00Z\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("[[set.display]]\nconnector = \"Virtual-1\"\nscale = 2"),
+            "{text}"
+        );
     }
 
     #[test]

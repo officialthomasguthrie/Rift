@@ -1,5 +1,6 @@
 //! `rift host`: what Orbit remembers about this machine, one row per setting, or one value by
-//! itself. Changing a setting needs a method on Orbit's side of the bus, which does not exist yet.
+//! itself. `rift host set` writes the settings a person decides into the profile, through Orbit,
+//! which is the only thing that writes that file.
 
 use std::process::ExitCode;
 
@@ -7,10 +8,12 @@ use librift::orbit::{self, Host, Output};
 
 use crate::text;
 
-const USAGE: &str = "Usage: rift host [class | tier]";
+const USAGE: &str = "Usage: rift host [class | tier]\n       rift host set <class | tier | gpu> \
+<value>\n       rift host set scale <screen> <1 or 2>";
 
 const HELP: &str = "Shows what Orbit remembers about this machine. class prints the host class \
-(owned, trusted or borrowed) by itself, and tier the AI tier.";
+(owned, trusted or borrowed) by itself, and tier the AI tier. set writes one of them into this \
+machine's profile: the class, the AI tier, the graphics path, or the size a screen is drawn at.";
 
 pub fn run(args: &[String]) -> ExitCode {
     let one = match args {
@@ -20,6 +23,7 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [arg] if field(arg).is_some() => field(arg),
+        [arg, rest @ ..] if arg == "set" => return set(rest),
         [arg, rest @ ..] => return text::unknown("host", rest.first().unwrap_or(arg), USAGE),
     };
     match orbit::host() {
@@ -30,6 +34,40 @@ pub fn run(args: &[String]) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `rift host set <name> <value>`, and `rift host set scale <screen> <1 or 2>`. Orbit writes it
+/// into the `[set]` layer of this machine's profile and says so on the bus.
+fn set(args: &[String]) -> ExitCode {
+    let written = match args {
+        [name, value] if name != "scale" => orbit::set(name, value).map(|()| {
+            println!("{name} is {value} for this machine.");
+        }),
+        [name, screen, size] if name == "scale" => match size.trim().parse::<u32>() {
+            Ok(scale) => orbit::set_display_scale(screen, scale).map(|()| {
+                // the compositor reads the scale from a part of its config under home, which the
+                // session writes when it starts. a shell with no home of its own is no reason to
+                // fail: the profile is where the setting lives
+                let _ = orbit::follow();
+                println!("{screen} is drawn at scale {scale}.");
+            }),
+            Err(_) => Err(format!(
+                "\"{}\" is not a size a screen is drawn at. It is 1 or 2.",
+                size.trim()
+            )),
+        },
+        _ => {
+            eprintln!("{USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match written {
+        Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             eprintln!("{why}");
             ExitCode::FAILURE
@@ -68,6 +106,7 @@ fn describe(output: &Output) -> String {
         width,
         height,
         scale,
+        ..
     } = output;
     if *width == 0 {
         format!("{connector}, no EDID, scale {scale}")
@@ -96,6 +135,8 @@ mod tests {
             connector: "Virtual-1".into(),
             width: 1280,
             height: 800,
+            width_cm: 32,
+            height_cm: 20,
             scale: 1,
         }]);
         let expected = format!(
@@ -113,12 +154,16 @@ mod tests {
                 connector: "eDP-1".into(),
                 width: 2880,
                 height: 1800,
+                width_cm: 30,
+                height_cm: 19,
                 scale: 2,
             },
             Output {
                 connector: "HDMI-A-1".into(),
                 width: 0,
                 height: 0,
+                width_cm: 0,
+                height_cm: 0,
                 scale: 1,
             },
         ]);
