@@ -447,7 +447,8 @@ SETTINGS_OTHER = ("teal", "#68b4c1")
 BOOT_STYLE_FILE = "rift/boot-style"
 # what rift-settings --state prints, one word each
 SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text", "terminal",
-                 "greeting", "boot", "screen")
+                 "greeting", "boot", "screen", "wifi", "networks", "network", "wired", "address",
+                 "bluetooth", "devices", "connected")
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -4029,6 +4030,94 @@ def main():
                 fail(f"the bar and the dock are {bars('screen-scale-back')} rows again, expected "
                      f"{(BAR_HEIGHT, DOCK_HEIGHT)}")
 
+            # the Wi-Fi, Network and Bluetooth pages, over the three services the shell's system
+            # menu already talks to. this machine has no wireless card and no adapter, so two of
+            # them say so in their own words and neither writes anything; the cable is real, and
+            # what the Network page says about it is checked against nmcli on this same boot
+            def printed_word(printed):
+                """The last word a command printed, or nothing when it printed nothing."""
+                lines = [line.strip() for line in without_console(printed).splitlines() if line.strip()]
+                return lines[-1] if lines else ""
+
+            def radio_word(what):
+                """Whether NetworkManager has Wi-Fi switched on, whatever cards there are."""
+                _, printed = run("nmcli radio wifi", what)
+                return printed_word(printed)
+
+            def nmcli_wired():
+                """What nmcli says the cable is called and what address it has, off this boot."""
+                _, printed = run("nmcli -t -f GENERAL.TYPE,GENERAL.DEVICE,IP4.ADDRESS device show",
+                                 "the devices nmcli knows")
+                kind, name, found = None, None, {}
+                for printed_line in without_console(printed).splitlines():
+                    key, _, value = printed_line.strip().partition(":")
+                    if key == "GENERAL.TYPE":
+                        kind = value.strip()
+                    elif key == "GENERAL.DEVICE":
+                        name = value.strip()
+                    elif key.startswith("IP4.ADDRESS") and kind == "ethernet":
+                        found = {"name": name, "address": value.strip()}
+                return found
+
+            run("rift-settings --page wifi", "the Wi-Fi page")
+            if not wait_for(30, lambda: settings_state("the Wi-Fi page").get("page") == "wifi"):
+                fail("rift-settings --page wifi did not show that page")
+            if not wait_for(60, lambda: settings_state("the Wi-Fi page").get("wifi") == "none"):
+                said = settings_state("the Wi-Fi page").get("wifi")
+                fail(f"the Wi-Fi page says wifi {said!r}, and this machine has no wireless card")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Wi-Fi page", f"{stem}-settings-wifi{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            # with no card there is no switch to press, so there is none from a terminal either
+            before = radio_word("whether Wi-Fi is on before the page was told to turn it off")
+            run("rift-settings --set wifi off", "the Wi-Fi switch on a machine with no card")
+            if radio_word("whether Wi-Fi is on after") != before:
+                fail(f"rift-settings --set wifi off changed nmcli radio wifi from {before!r}, and "
+                     "this machine has no wireless card to switch")
+            ok(f"the Wi-Fi page says this machine has no wireless card and writes nothing, with "
+               f"nmcli radio wifi still {before}")
+
+            run("rift-settings --page network", "the Network page")
+            if not wait_for(30, lambda: settings_state("the Network page").get("page") == "network"):
+                fail("rift-settings --page network did not show that page")
+            cable = wait_for(60, lambda: next(
+                (found for found in [settings_state("the cable on the Network page")]
+                 if found.get("wired") == "connected" and found.get("address", "none") != "none"),
+                None))
+            if not cable:
+                said = settings_state("the cable on the Network page")
+                fail(f"the Network page says wired {said.get('wired')!r} with address "
+                     f"{said.get('address')!r}, and the vm's cable is up")
+            said_by_nmcli = nmcli_wired()
+            if said_by_nmcli.get("address") != cable["address"]:
+                fail(f"the Network page says the cable has {cable['address']!r} and nmcli says "
+                     f"{said_by_nmcli.get('address')!r}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Network page", f"{stem}-settings-network{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            ok(f"the Network page says the cable is connected with address {cable['address']}, "
+               f"which is what nmcli says about {said_by_nmcli.get('name')}")
+
+            run("rift-settings --page bluetooth", "the Bluetooth page")
+            if not wait_for(30, lambda: settings_state("the Bluetooth page").get("page") == "bluetooth"):
+                fail("rift-settings --page bluetooth did not show that page")
+            if not wait_for(60, lambda: settings_state("the Bluetooth page").get("bluetooth") == "none"):
+                said = settings_state("the Bluetooth page").get("bluetooth")
+                fail(f"the Bluetooth page says bluetooth {said!r}, and this machine has no adapter")
+            run("rift-settings --set bluetooth on", "the Bluetooth switch on a machine with no adapter")
+            if not wait_for(20, lambda: settings_state("the page after the switch").get("bluetooth") == "none"):
+                fail("the Bluetooth page stopped saying none after the switch was told to turn on")
+            # asking a machine with no adapter must not start BlueZ, which would fail every time
+            _, output = run("systemctl is-active bluetooth", "whether BlueZ is running")
+            running = printed_word(output)
+            if running != "inactive":
+                fail(f"systemctl is-active bluetooth says {running!r}, and the page must not start "
+                     "BlueZ on a machine with no adapter")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Bluetooth page", f"{stem}-settings-bluetooth{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            ok(f"the Bluetooth page says this machine has no adapter, and BlueZ is {running}")
+
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
             if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
@@ -4037,7 +4126,7 @@ def main():
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            for page in ("wifi", "updates", "backups"):
+            for page in ("sound", "updates", "backups"):
                 run(f"rift-settings --page {page}", f"the {page} page")
                 if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
                     fail(f"rift-settings --page {page} did not show that page")
