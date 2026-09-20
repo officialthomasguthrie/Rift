@@ -1281,11 +1281,10 @@ def main():
     ap.add_argument("--flatpak", help="a directory with platform.flatpak and app.flatpak from nix build .#test-flatpak, "
                     "install them and run the app with the portals")
     args = ap.parse_args()
-    with open(args.passfile, encoding="utf-8") as f:
-        passphrase = f.read()
-
     if args.boot_style and not args.splash:
         ap.error("--boot-style needs --splash, which names the png its screendumps are saved beside")
+    with open(args.passfile, encoding="utf-8") as f:
+        passphrase = f.read()
 
     work = tempfile.mkdtemp(prefix="rift-boot-")
     if (args.splash or args.desktop or args.updates or args.first_boot or args.boot_style) and not args.qmp:
