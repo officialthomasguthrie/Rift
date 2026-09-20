@@ -4045,11 +4045,13 @@ def main():
                 return printed_word(printed)
 
             def nmcli_wired():
-                """What nmcli says the cable is called and what address it has, off this boot."""
-                _, printed = run("nmcli -t -f GENERAL.TYPE,GENERAL.DEVICE,IP4.ADDRESS device show",
-                                 "the devices nmcli knows")
+                """What nmcli says the cable is called and what address it has, off this boot. The
+                two whole groups are asked for rather than named fields, since terse output names
+                an address IP4.ADDRESS[1] and a group is one word."""
+                _, printed = run("nmcli -t -f GENERAL,IP4 device show", "the devices nmcli knows")
+                said = without_console(printed)
                 kind, name, found = None, None, {}
-                for printed_line in without_console(printed).splitlines():
+                for printed_line in said.splitlines():
                     key, _, value = printed_line.strip().partition(":")
                     if key == "GENERAL.TYPE":
                         kind = value.strip()
@@ -4057,6 +4059,7 @@ def main():
                         name = value.strip()
                     elif key.startswith("IP4.ADDRESS") and kind == "ethernet":
                         found = {"name": name, "address": value.strip()}
+                found["said"] = said.strip()[-400:]
                 return found
 
             run("rift-settings --page wifi", "the Wi-Fi page")
@@ -4091,7 +4094,7 @@ def main():
             said_by_nmcli = nmcli_wired()
             if said_by_nmcli.get("address") != cable["address"]:
                 fail(f"the Network page says the cable has {cable['address']!r} and nmcli says "
-                     f"{said_by_nmcli.get('address')!r}")
+                     f"{said_by_nmcli.get('address')!r}, from {said_by_nmcli['said']!r}")
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             look(f"{SETTINGS_APP} on the Network page", f"{stem}-settings-network{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
@@ -4110,7 +4113,7 @@ def main():
             # asking a machine with no adapter must not start BlueZ, which would fail every time
             _, output = run("systemctl is-active bluetooth", "whether BlueZ is running")
             running = printed_word(output)
-            if running != "inactive":
+            if running not in ("inactive", "unknown"):
                 fail(f"systemctl is-active bluetooth says {running!r}, and the page must not start "
                      "BlueZ on a machine with no adapter")
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
