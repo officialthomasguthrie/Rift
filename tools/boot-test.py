@@ -4189,7 +4189,11 @@ def main():
                 fail("rift-settings --page power did not show that page")
             if not wait_for(60, lambda: settings_state("the Power page").get("battery") == "none"):
                 said = settings_state("the Power page").get("battery")
-                fail(f"the Power page says battery {said!r}, and this machine has no battery")
+                # the page says nothing about a battery until UPower has answered, and UPower is
+                # started by the first call that asks it something
+                _, output = run("systemctl is-active upower", "whether UPower is running")
+                fail(f"the Power page says battery {said!r} and this machine has no battery, with "
+                     f"upower {printed_word(output)}")
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             look(f"{SETTINGS_APP} on the Power page", f"{stem}-settings-power{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
