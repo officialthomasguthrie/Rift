@@ -32,7 +32,13 @@ pub fn set_scale(connector: String, scale: u32) -> Task<Message> {
     thread::spawn(move || {
         let said = librift::orbit::set_display_scale(&connector, scale)
             .and_then(|()| librift::orbit::host())
-            .and_then(|host| librift::orbit::write_horizon(&host.outputs).map(|()| host));
+            .inspect(|host| {
+                // the profile is where the size lives, so a compositor that could not be told is
+                // not a setting that failed: the session tells it again when it next starts
+                if let Err(why) = librift::orbit::write_horizon(&host.outputs) {
+                    eprintln!("rift-settings: {why}");
+                }
+            });
         let _ = sender.send(said);
     });
     Task::perform(receiver, |said| {
