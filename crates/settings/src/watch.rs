@@ -15,8 +15,9 @@ use std::time::Duration;
 
 use iced::Subscription;
 use librift::sound::Monitor;
-use librift::{battery, bluetooth, bus, network, sound};
+use librift::{Component, battery, bluetooth, bus, network, sound};
 
+use crate::ai;
 use crate::ui::Message;
 
 /// How long to wait before starting `pw-mon` again when it went away.
@@ -51,6 +52,20 @@ pub fn bluetooth() -> Subscription<Message> {
 pub fn sound() -> Subscription<Message> {
     Subscription::run_with("sound", |_| {
         follow(monitor, || Message::Sound(Box::new(sound::read())))
+    })
+}
+
+/// What Quasar says about the models it runs, now and after every change it announces: a model that
+/// has finished loading, or one that could not.
+pub fn quasar() -> Subscription<Message> {
+    Subscription::run_with("quasar", |_| {
+        follow(
+            |poke| {
+                let name = Component::Quasar.dbus_name();
+                listen(poke, move |each| bus::signals(&name, each));
+            },
+            ai::reading,
+        )
     })
 }
 

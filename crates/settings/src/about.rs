@@ -6,14 +6,14 @@ use std::path::Path;
 use std::thread;
 
 use iced::futures::channel::oneshot;
-use iced::widget::{column, container, image, row, text};
+use iced::widget::{column, container, image, text};
 use iced::{Center, Element, Fill, Length, Task};
 use librift::orbit::Host;
 use librift::{paths, release};
 
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
-use crate::widgets::{BOLD, GAP, TEXT_SIZE, TITLE_SIZE, group, line, note};
+use crate::widgets::{BOLD, GAP, TITLE_SIZE, fact, group, note};
 
 /// How wide the mark is drawn. It is a wide drawing, so this is about sixty pixels tall.
 const MARK: f32 = 180.0;
@@ -101,21 +101,6 @@ fn name(state: &Settings, look: Colors) -> Element<'_, Message> {
         .font(BOLD)
         .color(look.text)
         .into()
-}
-
-/// One row: what it is at the left, what it says at the right.
-fn fact(look: Colors, label: &str, value: String) -> Element<'_, Message> {
-    container(
-        row![
-            container(line(look, label)).width(Length::Fixed(150.0)),
-            text(value).size(TEXT_SIZE).color(look.dim).width(Fill),
-        ]
-        .align_y(Center)
-        .spacing(GAP),
-    )
-    .width(Fill)
-    .padding([8, 12])
-    .into()
 }
 
 /// The first half of the fingerprint. The whole of it is a sha256 in hex, which no one reads off a

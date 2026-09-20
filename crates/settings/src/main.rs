@@ -7,6 +7,7 @@
 //! `rift-settings --state` prints the page that is up and every setting it writes.
 
 mod about;
+mod ai;
 mod appearance;
 mod bluetooth;
 mod control;
@@ -15,6 +16,7 @@ mod icons;
 mod net;
 mod page;
 mod power;
+mod search;
 mod sound;
 mod theme;
 mod ui;

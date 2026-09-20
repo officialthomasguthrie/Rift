@@ -195,6 +195,8 @@ impl Page {
             | Self::Sound
             | Self::Power
             | Self::Appearance
+            | Self::Search
+            | Self::Ai
             | Self::About => "",
             Self::Dock => {
                 "The dock is not in Settings yet. A right click on an app in the dock pins it or \
@@ -207,10 +209,6 @@ impl Page {
             Self::Notifications => {
                 "Notification settings are not in Settings yet. The clock menu keeps the ones that \
                  have come in."
-            }
-            Self::Search => {
-                "Search is not in Settings yet. rift ai index reads your home folder and rift ai \
-                 search finds the files in it closest in meaning to the words."
             }
             Self::Keyboard => {
                 "Keyboard layouts and shortcuts are not in Settings yet. Mod+Shift+Slash shows \
@@ -247,10 +245,6 @@ impl Page {
                 "Backups are not in Settings yet. rift snapshot lists the snapshots Vault takes of \
                  your home folder, and rift backup copies them to a disk."
             }
-            Self::Ai => {
-                "The local AI is not in Settings yet. rift ai asks it a question and says which \
-                 model this machine runs."
-            }
         }
     }
 }
@@ -261,7 +255,7 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 8] = [
+    const REAL: [Page; 10] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
@@ -269,6 +263,8 @@ mod tests {
         Page::Sound,
         Page::Power,
         Page::Appearance,
+        Page::Search,
+        Page::Ai,
         Page::About,
     ];
 

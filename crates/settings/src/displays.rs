@@ -42,7 +42,7 @@ pub fn set_scale(connector: String, scale: u32) -> Task<Message> {
         let _ = sender.send(said);
     });
     Task::perform(receiver, |said| {
-        Message::Scaled(said.unwrap_or_else(|_| Err("Orbit did not answer.".to_string())))
+        Message::Orbit(said.unwrap_or_else(|_| Err("Orbit did not answer.".to_string())))
     })
 }
 

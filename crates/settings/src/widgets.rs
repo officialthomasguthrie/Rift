@@ -32,6 +32,8 @@ pub const PAD: f32 = 20.0;
 pub const GAP: f32 = 16.0;
 /// How wide a field is.
 const FIELD: f32 = 200.0;
+/// How wide the label of a row is when its value fills the rest of the row.
+const LABEL: f32 = 150.0;
 
 /// The name over a group of rows.
 pub fn heading<'a, M: 'a>(colors: Colors, label: &'a str) -> Element<'a, M> {
@@ -107,6 +109,58 @@ pub fn setting<'a, M: 'a>(
     .width(Fill)
     .padding([8, 12])
     .into()
+}
+
+/// A row of a group whose label is a fixed width and whose value fills the rest of it, for a value
+/// too long to sit at the right end of the row.
+pub fn fact<'a, M: 'a>(colors: Colors, label: &'a str, value: String) -> Element<'a, M> {
+    container(
+        row![
+            container(line(colors, label)).width(Length::Fixed(LABEL)),
+            text(value).size(TEXT_SIZE).color(colors.dim).width(Fill),
+        ]
+        .align_y(Center)
+        .spacing(GAP),
+    )
+    .width(Fill)
+    .padding([8, 12])
+    .into()
+}
+
+/// A button that does something, with the verb on it. Without a press it is dimmed, which is how a
+/// button whose work is already running is drawn.
+pub fn action<'a, M: Clone + 'a>(
+    colors: Colors,
+    label: &'a str,
+    press: Option<M>,
+) -> Element<'a, M> {
+    let mut pressable =
+        button(text(label).size(TEXT_SIZE))
+            .padding([5, 14])
+            .style(move |_: &Theme, status| button::Style {
+                background: Some(
+                    match status {
+                        button::Status::Hovered | button::Status::Pressed => colors.hover,
+                        button::Status::Disabled => colors.track,
+                        button::Status::Active => colors.button,
+                    }
+                    .into(),
+                ),
+                text_color: match status {
+                    button::Status::Disabled => colors.dim,
+                    _ => colors.text,
+                },
+                border: Border {
+                    color: colors.edge,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..button::Style::default()
+            });
+    if let Some(press) = press {
+        pressable = pressable.on_press(press);
+    }
+    pressable.into()
 }
 
 /// A row of a group that is pressed to choose it, with a mark at the right when it is the one in

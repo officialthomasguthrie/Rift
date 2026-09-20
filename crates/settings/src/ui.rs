@@ -15,6 +15,7 @@ use librift::appearance::{Accent, Look, Scheme, Theme as Mode};
 use librift::battery::Battery;
 use librift::bluetooth as bluetooth_picture;
 use librift::boot::Style;
+use librift::models::Tier;
 use librift::network;
 use librift::orbit::Host;
 use librift::sound::{self as sound_picture, Side};
@@ -24,7 +25,7 @@ use crate::net::Joining;
 use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
-use crate::{about, appearance, bluetooth, displays, icons, net, power, sound, watch};
+use crate::{about, ai, appearance, bluetooth, displays, icons, net, power, search, sound, watch};
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
 /// the boot test all know it by.
@@ -72,6 +73,13 @@ pub struct Settings {
     pub moving: Option<(Side, u32)>,
     /// What `UPower` says about the battery. `Ok(None)` is a machine that runs on the mains.
     pub battery: Option<Result<Option<Battery>, String>>,
+    /// What Quasar says about the models it runs, with the models the manifest declares, once it
+    /// has answered and after every change it announces while the window is open.
+    pub quasar: Option<Box<ai::Picture>>,
+    /// What the front of the search index says, once it has been read.
+    pub index: Option<Result<search::Look, String>>,
+    /// Whether an update of the search index is running now.
+    pub indexing: bool,
     /// The network being joined that asks for a password, and what has been typed for it.
     pub joining: Option<Joining>,
     /// What is happening: a join, or a device being connected.
@@ -124,6 +132,17 @@ pub enum Message {
     Pick(Side, usize),
     /// What `UPower` says about the battery now.
     Battery(Result<Option<Battery>, String>),
+    /// What Quasar says now, with the models on the drive. It travels behind a pointer, the way
+    /// the other pictures a service answers with do.
+    Quasar(Box<ai::Picture>),
+    /// How big a model this machine runs, from the AI page.
+    Tier(Tier),
+    /// The search index was asked to come up to date.
+    Index,
+    /// What the front of the search index says now.
+    Indexed(Result<search::Look, String>),
+    /// How bringing the index up to date went.
+    Updated(Result<(), String>),
     /// The Wi-Fi switch.
     Wifi(bool),
     /// The network at this place in the list was pressed.
@@ -140,8 +159,9 @@ pub enum Message {
     Device(usize),
     /// How a join, a switch or a connect went.
     Acted(Result<(), String>),
-    /// What Orbit answered after a screen's size was written: the machine again, or why not.
-    Scaled(Result<Host, String>),
+    /// What Orbit answered after something about this machine was written, a screen's size or the
+    /// size of model it runs: the machine again, or why not.
+    Orbit(Result<Host, String>),
     /// What Vault answered about the boot style, after reading it or after writing it.
     BootStyle(Result<Style, String>),
     /// The corner radius slider moved.
@@ -234,7 +254,10 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         screenshot: start.screenshot.clone(),
         ..Settings::bare()
     };
-    let mut work = vec![about::ask_orbit(), appearance::ask_vault()];
+    let mut work = vec![about::ask_orbit(), appearance::ask_vault(), ai::ask()];
+    if state.page == Page::Search {
+        work.push(search::read());
+    }
     if start.screenshot.is_some() {
         work.push(shoot());
     }
@@ -277,6 +300,9 @@ impl Settings {
             sound: None,
             moving: None,
             battery: None,
+            quasar: None,
+            index: None,
+            indexing: false,
             joining: None,
             doing: None,
             swept: false,
@@ -333,6 +359,8 @@ impl Settings {
         .chain(bluetooth::state(self))
         .chain(sound::state(self))
         .chain(power::state(self))
+        .chain(ai::state(self))
+        .chain(search::state(self))
         .collect::<Vec<_>>()
         .join("\n")
             + "\n"
@@ -385,6 +413,18 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         }
         Message::Boot(style) => return appearance::write_style(style),
         Message::Scale(connector, scale) => return displays::set_scale(connector, scale),
+        Message::Tier(tier) => {
+            state.problem = None;
+            return ai::set_size(tier);
+        }
+        Message::Index => {
+            if state.indexing {
+                return Task::none();
+            }
+            state.problem = None;
+            state.indexing = true;
+            return search::update();
+        }
         Message::Volume(side, level) => state.moving = Some((side, level)),
         Message::Volumed(side, level) => {
             state.problem = None;
@@ -454,6 +494,12 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
             state.moving = None;
         }
         Message::Battery(answer) => state.battery = Some(answer),
+        Message::Quasar(answer) => state.quasar = Some(answer),
+        Message::Indexed(answer) => state.index = Some(answer),
+        Message::Updated(said) => {
+            state.indexing = false;
+            state.problem = said.err();
+        }
         Message::Acted(Ok(())) => {
             state.problem = None;
             state.doing = None;
@@ -469,11 +515,11 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
                 return crate::widgets::focus(net::FIELD);
             }
         }
-        Message::Scaled(Ok(host)) => {
+        Message::Orbit(Ok(host)) => {
             state.problem = None;
             state.host = Some(Ok(host));
         }
-        Message::Scaled(Err(why)) => state.problem = Some(why),
+        Message::Orbit(Err(why)) => state.problem = Some(why),
         Message::BootStyle(answer) => state.boot = Some(answer),
         Message::Host(host) => state.host = Some(host),
         Message::Said(command) => return said(state, command),
@@ -502,13 +548,18 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
     state.page = page;
     state.problem = None;
     state.doing = None;
-    if page == Page::Wifi {
-        state.swept = true;
-        return net::scan(state);
-    }
     state.swept = false;
     state.joining = None;
-    Task::none()
+    match page {
+        Page::Wifi => {
+            state.swept = true;
+            net::scan(state)
+        }
+        // the index is a file on the drive that a timer writes too, so it is read again every time
+        // the page comes up rather than once when the window opened
+        Page::Search => search::read(),
+        _ => Task::none(),
+    }
 }
 
 /// Whether the machine is on the network with this name as the radio sends it.
@@ -566,6 +617,9 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
                 Task::done(Message::Scale(screen, scale))
             }),
         "greeting" => Task::done(Message::Greeting(!value.trim().eq_ignore_ascii_case("off"))),
+        "tier" => ai::named(value).map_or_else(Task::none, |tier| Task::done(Message::Tier(tier))),
+        // the value is there to be typed, the way a switch takes on or off: there is one thing to do
+        "index" => Task::done(Message::Index),
         "wifi" => Task::done(Message::Wifi(on(value))),
         "bluetooth" => Task::done(Message::Power(on(value))),
         // moved, then let go, in that order, the way the slider itself does it
@@ -613,6 +667,7 @@ fn subscription(_: &Settings) -> Subscription<Message> {
         watch::bluetooth(),
         watch::sound(),
         watch::battery(),
+        watch::quasar(),
     ])
 }
 
@@ -765,6 +820,8 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Bluetooth => bluetooth::view(state, look),
         Page::Sound => sound::view(state, look),
         Page::Power => power::view(state, look),
+        Page::Ai => ai::view(state, look),
+        Page::Search => search::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),
