@@ -373,7 +373,8 @@ impl Backups {
         self.state.join(KEY_FILE)
     }
 
-    fn target(&self) -> Result<Target, String> {
+    /// Where backups go, out of the file `sudo vault target` writes.
+    pub fn target(&self) -> Result<Target, String> {
         match fs::read_to_string(self.state.join(TARGET_FILE)) {
             Ok(text) => Target::read(&text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(

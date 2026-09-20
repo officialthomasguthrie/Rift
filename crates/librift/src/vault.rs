@@ -1,6 +1,6 @@
-//! Vault from a client's side: the snapshots Timeline keeps of home and the backups on the backup
-//! disk, making them, restoring a file from one, and the boot style on the drive's esp, which only
-//! root can write.
+//! Vault from a client's side: the snapshots Timeline keeps of home, the backups on the backup
+//! disk and where they go, making them, restoring a file from one, and the boot style on the
+//! drive's esp, which only root can write.
 
 #[cfg(feature = "bus")]
 use std::time::Duration;
@@ -143,6 +143,15 @@ pub enum Refusal {
     Other(String),
 }
 
+/// Where backups go: a folder on a file system, and the file system's uuid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// The folder, from the root of that file system.
+    pub folder: String,
+    /// The file system's uuid, as `/dev/disk/by-uuid` names it.
+    pub disk: String,
+}
+
 /// What the outcome string `Restore` returned means.
 #[must_use]
 pub fn read(outcome: &str) -> Option<Restored> {
@@ -204,6 +213,22 @@ pub fn backups() -> Result<Vec<(String, String)>, String> {
     proxy
         .call("Backups", &())
         .map_err(|e| bus::sentence(vault, e))
+}
+
+/// Where backups go, once a folder on a disk has been chosen.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, or no folder has been chosen yet.
+#[cfg(feature = "bus")]
+pub fn target() -> Result<Target, String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(bus::PROPERTY_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    let (folder, disk): (String, String) = proxy
+        .call("Target", &())
+        .map_err(|e| bus::sentence(vault, e))?;
+    Ok(Target { folder, disk })
 }
 
 /// Backs up home now. Returns the backup's id and when it was made.

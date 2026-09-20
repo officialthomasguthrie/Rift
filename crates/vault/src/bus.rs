@@ -4,8 +4,9 @@
 //! rules. `Restore` copies one file back from a snapshot as the account that asked, and refuses
 //! with `org.freedesktop.DBus.Error.FileExists` when the file there has changed, unless it is told
 //! to replace it. `Backups`, `Backup` and `RestoreBackup` do the same with the backups on the
-//! backup disk. `BootStyle` and `SetBootStyle` read and write the word on the esp that says how the
-//! next boot looks, which only root can reach.
+//! backup disk, and `Target` says which folder on which disk they go to. `BootStyle` and
+//! `SetBootStyle` read and write the word on the esp that says how the next boot looks, which only
+//! root can reach.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -89,6 +90,16 @@ impl Vault {
             .into_iter()
             .map(|made| (made.id, timeline::name_of(made.time)))
             .collect())
+    }
+
+    /// Where backups go: the folder on the backup disk, and the uuid of the file system it is on.
+    #[zbus(out_args("folder", "disk"))]
+    async fn target(&self) -> fdo::Result<(String, String)> {
+        let backups = Arc::clone(&self.backups);
+        let target = blocking::unblock(move || backups.target())
+            .await
+            .map_err(fdo::Error::Failed)?;
+        Ok((target.folder, target.disk))
     }
 
     /// Backs up home now and returns the backup's id and when it was made.
