@@ -513,10 +513,10 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
         }
         "connect" => bluetooth::named(state, value)
             .map_or_else(Task::none, |at| Task::done(Message::Device(at))),
-        "password" => Task::batch([
-            Task::done(Message::Password(value.to_string())),
-            Task::done(Message::Joined),
-        ]),
+        // typed, then given, in that order, which a batch does not promise
+        "password" => {
+            Task::done(Message::Password(value.to_string())).chain(Task::done(Message::Joined))
+        }
         "wallpaper" => state
             .choices
             .iter()
