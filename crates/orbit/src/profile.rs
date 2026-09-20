@@ -544,13 +544,14 @@ pub fn settable(name: &str, value: &str) -> Result<(&'static str, String), Strin
             list(&words)
         ));
     };
-    if !takes.contains(&value) {
+    let Some(word) = takes.iter().find(|one| value.eq_ignore_ascii_case(one)) else {
         return Err(format!(
             "\"{value}\" is not a {name}. It is {}.",
             list(takes)
         ));
-    }
-    Ok((key, value.to_owned()))
+    };
+    // the file holds the word as this crate spells it, whatever case it was asked for in
+    Ok((key, (*word).to_owned()))
 }
 
 /// `a`, `a or b`, `a, b or c`.
@@ -1073,6 +1074,11 @@ mod tests {
             Ok(("ai_tier", "large".to_owned()))
         );
         assert_eq!(settable("gpu", "nvk"), Ok(("gpu_path", "nvk".to_owned())));
+        // a word typed in any case is written the way this crate spells it
+        assert_eq!(
+            settable("class", "Owned"),
+            Ok(("class", "owned".to_owned()))
+        );
         assert_eq!(
             settable("chassis", "laptop").unwrap_err(),
             "There is nothing called \"chassis\" to set on this machine. There is class, tier or gpu."
