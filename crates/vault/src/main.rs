@@ -2,9 +2,11 @@
 //! answers on the system bus as `dev.rift.Vault`, `vault take` is what the hourly timer runs, and
 //! `vault prune` runs the retention rules on demand. `vault target` chooses the folder on another
 //! disk that backups go to, `vault backup` makes one and `vault backups` lists them. `vault clone`
-//! writes a second drive onto a removable disk.
+//! writes a second drive onto a removable disk. The two boot style methods on the bus read and
+//! write the word on the esp that says how the next boot looks.
 
 mod backup;
+mod boot;
 mod bus;
 mod clone;
 mod restore;
@@ -15,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use backup::Backups;
+use boot::Esp;
 use clone::Cloner;
 use restore::Source;
 use timeline::{Keep, Timeline};
@@ -63,6 +66,7 @@ struct Args {
     timeline: Timeline,
     backups: Backups,
     cloner: Cloner,
+    esp: Esp,
     home: PathBuf,
     replace: bool,
 }
@@ -73,6 +77,7 @@ fn main() -> ExitCode {
         timeline,
         backups,
         cloner,
+        esp,
         home,
         replace,
     } = match parse_args(std::env::args().skip(1)) {
@@ -86,7 +91,7 @@ fn main() -> ExitCode {
     };
 
     let result = match command {
-        Command::Serve => bus::serve(timeline, backups, home)
+        Command::Serve => bus::serve(timeline, backups, home, esp)
             .map_err(|e| format!("vault: could not answer on the system bus: {e}")),
         Command::Take => timeline.take().map(|(name, dropped)| {
             println!("Took snapshot {name}.");
@@ -344,6 +349,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
             run,
             devices,
         },
+        esp: Esp::new(PathBuf::from(DESIGNATORS), PathBuf::from(RUN)),
         cloner: Cloner {
             persist,
             snapshots: snapshots.with_file_name("clone"),

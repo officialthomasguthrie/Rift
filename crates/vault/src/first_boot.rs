@@ -11,16 +11,12 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use librift::boot::{LOADER_PARTITION, PARTITIONS, loader_partition};
 use librift::disk::run::{Persist, feed, settle, tool};
 use librift::disk::{
     ALIGN, LEAST_PERSIST, LINUX_TYPE, Table, passphrase_problem, read_table, size,
 };
 
-/// The variable systemd-boot leaves with the partition uuid of the esp it was started from.
-const LOADER_PARTITION: &str =
-    "/sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
-/// Where udev names partitions by their uuids.
-const PARTITIONS: &str = "/dev/disk/by-partuuid";
 /// Where persist is mounted while it is filled.
 const RUN: &str = "/run/vault-first-boot";
 /// The label of persist, and the name it opens as, which the initrd mounts it from.
@@ -125,19 +121,6 @@ fn boot_disk() -> Result<String, String> {
         "" => Err(format!("{} is not on a disk.", partition.display())),
         name => Ok(format!("/dev/{name}")),
     }
-}
-
-/// The partition uuid in `LoaderDevicePartUUID`: four bytes of attributes, then the uuid in UTF-16
-/// ending in a zero. In lower case, the way udev names partitions.
-fn loader_partition(variable: &[u8]) -> Option<String> {
-    let units: Vec<u16> = variable
-        .get(4..)?
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .take_while(|&unit| unit != 0)
-        .collect();
-    let uuid = String::from_utf16(&units).ok()?.to_ascii_lowercase();
-    (uuid.len() == 36 && uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-')).then_some(uuid)
 }
 
 fn read_disk(disk: &str) -> Result<Table, String> {
@@ -263,24 +246,6 @@ fn ask(question: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn systemd_boot_names_the_esp_in_utf_16() {
-        let mut variable = vec![6, 0, 0, 0];
-        for unit in "0B1C2D3E-4F50-4162-8374-859607A8B9CA"
-            .encode_utf16()
-            .chain([0])
-        {
-            variable.extend(unit.to_le_bytes());
-        }
-        assert_eq!(
-            loader_partition(&variable).as_deref(),
-            Some("0b1c2d3e-4f50-4162-8374-859607a8b9ca")
-        );
-        assert_eq!(loader_partition(&variable[..4]), None);
-        assert_eq!(loader_partition(&variable[..3]), None);
-        assert_eq!(loader_partition(&[6, 0, 0, 0, b'x', 0, 0, 0]), None);
-    }
 
     #[test]
     fn persist_gets_the_space_sfdisk_gives_it() {

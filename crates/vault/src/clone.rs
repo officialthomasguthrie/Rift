@@ -403,6 +403,11 @@ impl Cloner {
         for file in BOOT_FILES {
             copy_file(&self.boot.join(file), &esp.path().join(file))?;
         }
+        // the boot style, when this drive has one. a clone starts the way the drive it came from does
+        let style = self.boot.join(librift::boot::ON_ESP);
+        if style.is_file() {
+            copy_file(&style, &esp.path().join(librift::boot::ON_ESP))?;
+        }
         copy_file(
             &running.uki,
             &esp.path().join("EFI/Linux").join(&running.uki_name),

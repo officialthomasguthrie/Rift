@@ -4,16 +4,19 @@
 //! rules. `Restore` copies one file back from a snapshot as the account that asked, and refuses
 //! with `org.freedesktop.DBus.Error.FileExists` when the file there has changed, unless it is told
 //! to replace it. `Backups`, `Backup` and `RestoreBackup` do the same with the backups on the
-//! backup disk.
+//! backup disk. `BootStyle` and `SetBootStyle` read and write the word on the esp that says how the
+//! next boot looks, which only root can reach.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use librift::Component;
+use librift::boot::Style;
 use zbus::fdo;
 use zbus::message::Header;
 
 use crate::backup::Backups;
+use crate::boot::Esp;
 use crate::restore::{self, Account, Outcome, Problem};
 use crate::timeline::{self, Timeline};
 
@@ -22,6 +25,7 @@ pub struct Vault {
     timeline: Arc<Timeline>,
     backups: Arc<Backups>,
     home: Arc<PathBuf>,
+    esp: Arc<Esp>,
 }
 
 #[zbus::interface(name = "dev.rift.Vault")]
@@ -118,6 +122,32 @@ impl Vault {
                 .await;
         answer(done, account)
     }
+
+    /// How the next boot of this drive looks: `text` or `graphical`.
+    async fn boot_style(&self) -> fdo::Result<String> {
+        let esp = Arc::clone(&self.esp);
+        blocking::unblock(move || esp.style())
+            .await
+            .map(|style| style.word().to_string())
+            .map_err(fdo::Error::Failed)
+    }
+
+    /// Writes how the next boot of this drive looks. The word is `text` or `graphical`.
+    async fn set_boot_style(&self, style: String) -> fdo::Result<()> {
+        let wanted = Style::from_setting(&style);
+        if wanted.word() != style.trim() {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "\"{}\" is not a boot style. It is text or graphical.",
+                style.trim()
+            )));
+        }
+        let esp = Arc::clone(&self.esp);
+        blocking::unblock(move || esp.set_style(wanted))
+            .await
+            .map_err(fdo::Error::Failed)?;
+        println!("vault: the next boot of this drive is {}", wanted.word());
+        Ok(())
+    }
 }
 
 /// The account that sent the message: its uid from the bus, its group from the password file.
@@ -163,13 +193,14 @@ fn answer(
 /// # Errors
 ///
 /// When the system bus is not there, or another process already owns the name.
-pub fn serve(timeline: Timeline, backups: Backups, home: PathBuf) -> zbus::Result<()> {
+pub fn serve(timeline: Timeline, backups: Backups, home: PathBuf, esp: Esp) -> zbus::Result<()> {
     backups.clear();
     let component = Component::Vault;
     let vault = Vault {
         timeline: Arc::new(timeline),
         backups: Arc::new(backups),
         home: Arc::new(home),
+        esp: Arc::new(esp),
     };
     let _connection = zbus::blocking::connection::Builder::system()?
         .name(component.dbus_name())?
