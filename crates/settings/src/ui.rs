@@ -116,8 +116,8 @@ pub enum Message {
     Sound(Box<Result<sound_picture::Picture, String>>),
     /// A volume slider moved, on one half of the sound.
     Volume(Side, u32),
-    /// A volume slider was let go, so where it landed is written.
-    Volumed(Side),
+    /// A volume slider was let go, and the level it landed on, which is written.
+    Volumed(Side, u32),
     /// The mute switch of one half of the sound.
     Muted(Side, bool),
     /// The device at this place in one half's list was pressed.
@@ -386,9 +386,9 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Boot(style) => return appearance::write_style(style),
         Message::Scale(connector, scale) => return displays::set_scale(connector, scale),
         Message::Volume(side, level) => state.moving = Some((side, level)),
-        Message::Volumed(side) => {
+        Message::Volumed(side, level) => {
             state.problem = None;
-            return sound::set_volume(state, side);
+            return sound::set_volume(state, side, level);
         }
         Message::Muted(side, muted) => {
             state.problem = None;
@@ -576,7 +576,8 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
                 Side::Input
             };
             number(100).map_or_else(Task::none, |level| {
-                Task::done(Message::Volume(side, level)).chain(Task::done(Message::Volumed(side)))
+                Task::done(Message::Volume(side, level))
+                    .chain(Task::done(Message::Volumed(side, level)))
             })
         }
         "mute" => Task::done(Message::Muted(Side::Output, on(value))),

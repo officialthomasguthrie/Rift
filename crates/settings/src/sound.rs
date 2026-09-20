@@ -53,12 +53,14 @@ fn level(state: &Settings, side: Side) -> Option<u32> {
         .map(|volume| u32::from(volume.level.min(100)))
 }
 
-/// Write the level a half's slider was let go at. A machine with no device for that half has no
-/// slider on the page, so it has none from a terminal either.
-pub fn set_volume(state: &mut Settings, side: Side) -> Task<Message> {
-    let Some((_, level)) = state.moving.take().filter(|(dragged, _)| *dragged == side) else {
-        return Task::none();
-    };
+/// Write the level a half's slider was let go at. The level travels with the message rather than
+/// being read back out of the window, so a reading that lands between the last move and the letting
+/// go does not lose it. A machine with no device for that half has no slider on the page, so it has
+/// none from a terminal either.
+pub fn set_volume(state: &mut Settings, side: Side, level: u32) -> Task<Message> {
+    if state.moving.is_some_and(|(dragged, _)| dragged == side) {
+        state.moving = None;
+    }
     if !has(state, side) {
         return Task::none();
     }
@@ -209,6 +211,7 @@ fn half<'a>(
     }
     let mut rows = Vec::new();
     if let Some(volume) = picture.volume(side) {
+        let standing = level(state, side).unwrap_or(0);
         rows.push(setting(
             look,
             loudness,
@@ -217,10 +220,10 @@ fn half<'a>(
                 look,
                 0..=100,
                 1,
-                level(state, side).unwrap_or(0),
+                standing,
                 "%",
                 move |level| Message::Volume(side, level),
-                Message::Volumed(side),
+                Message::Volumed(side, standing),
             ),
         ));
         rows.push(setting(
