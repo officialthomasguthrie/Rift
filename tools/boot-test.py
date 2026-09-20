@@ -4112,14 +4112,16 @@ def main():
                 fail("the Bluetooth page stopped saying none after the switch was told to turn on")
             # asking a machine with no adapter must not start BlueZ, which would fail every time
             _, output = run("systemctl is-active bluetooth", "whether BlueZ is running")
-            running = printed_word(output)
-            if running not in ("inactive", "unknown"):
-                fail(f"systemctl is-active bluetooth says {running!r}, and the page must not start "
+            # a name of its own: main has no block scope, and `running` is the version of the
+            # system the update part installs the next one over
+            bluez = printed_word(output)
+            if bluez not in ("inactive", "unknown"):
+                fail(f"systemctl is-active bluetooth says {bluez!r}, and the page must not start "
                      "BlueZ on a machine with no adapter")
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             look(f"{SETTINGS_APP} on the Bluetooth page", f"{stem}-settings-bluetooth{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
-            ok(f"the Bluetooth page says this machine has no adapter, and BlueZ is {running}")
+            ok(f"the Bluetooth page says this machine has no adapter, and BlueZ is {bluez}")
 
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
