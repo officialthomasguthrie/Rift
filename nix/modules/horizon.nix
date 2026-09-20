@@ -57,6 +57,10 @@ let
   # session starts, and by rift wallpaper set. horizon reads its config again when the file changes,
   # and a file that is not there yet is no error
   themePart = "~/.local/state/rift/horizon.kdl";
+  # the part written from the host profile orbit keeps: how big each screen is drawn. the shell
+  # writes it when the session starts and settings writes it again when the displays page changes
+  # a scale, since the profile itself is root's
+  screensPart = "~/.local/state/rift/displays.kdl";
   # the system config. the binary still reads the niri paths: /etc/niri/config.kdl here, and a
   # file at ~/.config/niri/config.kdl replaces it for that user
   configFile = pkgs.writeText "horizon-config.kdl" ''
@@ -215,6 +219,7 @@ let
 
     // last, so the owner's theme and wallpaper take the place of the ones above
     include "${themePart}" optional=true
+    include "${screensPart}" optional=true
   '';
 in
 {

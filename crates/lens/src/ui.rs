@@ -492,6 +492,11 @@ pub fn run(apps: Vec<App>) -> Result<(), iced_layershell::Error> {
         if let Err(why) = appearance::apply(chosen) {
             eprintln!("lens: {why}");
         }
+        // and how big each screen is drawn, which Orbit keeps in the host profile. a machine with
+        // no answer from Orbit is drawn the way the compositor works it out for itself
+        if let Err(why) = librift::orbit::follow() {
+            eprintln!("lens: the screens: {why}");
+        }
     });
     iced_layershell::daemon(move || boot(chosen, apps.clone()), "lens", update, view)
         .theme(|state: &Lens, _| Theme::custom("Rift", palette(state.look)))
