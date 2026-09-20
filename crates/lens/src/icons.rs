@@ -204,19 +204,6 @@ pub fn symbolic<'a, Message: 'a>(colour: Color, name: &str, size: f32) -> Elemen
         .into()
 }
 
-/// The icon for a strength between 0 and 100, the way GNOME steps them.
-#[must_use]
-pub fn signal(kind: &str, strength: u8) -> String {
-    let step = match strength {
-        0..=4 => "none",
-        5..=29 => "weak",
-        30..=54 => "ok",
-        55..=79 => "good",
-        _ => "excellent",
-    };
-    format!("network-{kind}-signal-{step}-symbolic")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,33 +354,5 @@ mod tests {
             .is_none()
         );
         let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn the_strength_steps_follow_the_signal() {
-        assert_eq!(
-            signal("wireless", 0),
-            "network-wireless-signal-none-symbolic"
-        );
-        assert_eq!(
-            signal("wireless", 20),
-            "network-wireless-signal-weak-symbolic"
-        );
-        assert_eq!(
-            signal("wireless", 40),
-            "network-wireless-signal-ok-symbolic"
-        );
-        assert_eq!(
-            signal("wireless", 70),
-            "network-wireless-signal-good-symbolic"
-        );
-        assert_eq!(
-            signal("wireless", 95),
-            "network-wireless-signal-excellent-symbolic"
-        );
-        assert_eq!(
-            signal("cellular", 60),
-            "network-cellular-signal-good-symbolic"
-        );
     }
 }

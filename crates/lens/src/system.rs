@@ -224,17 +224,6 @@ pub fn height(parts: &[Part]) -> u32 {
     2 * PAD + parts.iter().map(|part| part.height()).sum::<u32>()
 }
 
-/// What the wired row says about the cable.
-#[must_use]
-pub const fn wired_word(link: Link) -> &'static str {
-    match link {
-        Link::Connected => "Connected",
-        Link::Connecting => "Connecting",
-        Link::Disconnected => "Disconnected",
-        Link::Unavailable => "Cable unplugged",
-    }
-}
-
 /// What the battery row says at its right: the level, and how long it has when that is known.
 #[must_use]
 pub fn battery_words(battery: &Battery) -> String {
@@ -375,7 +364,7 @@ fn wired_row(look: Palette, status: &Status) -> Element<'static, Message> {
         Link::Connecting => "network-wired-acquiring-symbolic",
         Link::Disconnected | Link::Unavailable => "network-wired-disconnected-symbolic",
     };
-    plain(line(look, icon, "Wired", dim(look, wired_word(link))))
+    plain(line(look, icon, "Wired", dim(look, link.wired_word())))
 }
 
 /// Wi-Fi and its switch, which a switch on the machine that blocks the radio leaves off and greyed.
@@ -387,7 +376,7 @@ fn wifi_row(look: Palette, status: &Status) -> Element<'static, Message> {
         .and_then(|wireless| wireless.active());
     let icon = match active {
         _ if !(on && radio) => "network-wireless-disabled-symbolic".to_string(),
-        Some(network) => icons::signal("wireless", network.strength),
+        Some(network) => librift::network::signal_icon("wireless", network.strength),
         None => "network-wireless-signal-none-symbolic".to_string(),
     };
     let switch = switch(
@@ -518,7 +507,7 @@ fn network_row(look: Palette, network: &Network, at: usize) -> Element<'_, Messa
     }
     let content = line(
         look,
-        &icons::signal("wireless", network.strength),
+        &librift::network::signal_icon("wireless", network.strength),
         &network.name,
         marks,
     );
@@ -699,6 +688,7 @@ mod tests {
                 wired: Some(Wired {
                     path: "/devices/2".into(),
                     link: Link::Connected,
+                    ..Wired::default()
                 }),
                 wireless: None,
             }),
@@ -756,6 +746,7 @@ mod tests {
             picture.wireless = Some(Wireless {
                 path: "/devices/3".into(),
                 link: Link::Connected,
+                addresses: librift::network::Addresses::default(),
                 networks: (0..9)
                     .map(|at| network(&format!("Network {at}"), at == 0))
                     .collect(),
@@ -808,8 +799,8 @@ mod tests {
 
     #[test]
     fn the_rows_say_what_they_see() {
-        assert_eq!(wired_word(Link::Connected), "Connected");
-        assert_eq!(wired_word(Link::Unavailable), "Cable unplugged");
+        assert_eq!(Link::Connected.wired_word(), "Connected");
+        assert_eq!(Link::Unavailable.wired_word(), "Cable unplugged");
         let battery = Battery {
             level: 72,
             charge: Charge::Discharging,

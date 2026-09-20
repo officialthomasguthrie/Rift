@@ -5,6 +5,8 @@
 //! those services has something new to say.
 
 #[cfg(feature = "bus")]
+use std::sync::mpsc::Sender;
+#[cfg(feature = "bus")]
 use std::time::Duration;
 
 #[cfg(feature = "bus")]
@@ -163,6 +165,79 @@ pub fn owner_changes<F: FnMut() -> bool>(service: &str, each: F) -> Result<(), S
     watch(rule, each)
 }
 
+/// How long a burst of signals has to be quiet before the source is read again.
+#[cfg(feature = "bus")]
+pub const SETTLE: Duration = Duration::from_millis(150);
+/// The longest a reading waits for a burst to end, so a scan that never stops still shows.
+#[cfg(feature = "bus")]
+const LONGEST: Duration = Duration::from_secs(1);
+/// How long to wait before listening again when the bus went away.
+#[cfg(feature = "bus")]
+const RETRY: Duration = Duration::from_secs(5);
+
+/// Read a source now, and again after every change `start` pokes about, on a thread of its own.
+/// Every reading goes to `send`, which says whether anyone is still listening; the thread stops
+/// when nobody is. A burst of signals, which a scan or a service starting sends, turns into one
+/// reading once it has settled. The shell follows its status sources this way and Settings its
+/// pages.
+#[cfg(feature = "bus")]
+pub fn follow<T, R, S>(start: impl FnOnce(Sender<()>) + Send + 'static, read: R, mut send: S)
+where
+    T: Send + 'static,
+    R: Fn() -> T + Send + 'static,
+    S: FnMut(T) -> bool + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let (poke, pokes) = std::sync::mpsc::channel();
+        start(poke);
+        loop {
+            if !send(read()) || pokes.recv().is_err() {
+                return;
+            }
+            settle(&pokes);
+        }
+    });
+}
+
+/// Wait until the pokes stop for a moment, or a second has gone by.
+#[cfg(feature = "bus")]
+fn settle(pokes: &std::sync::mpsc::Receiver<()>) {
+    let until = std::time::Instant::now() + LONGEST;
+    loop {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        if pokes.recv_timeout(SETTLE.min(left)).is_err() {
+            return;
+        }
+    }
+}
+
+/// Run a signal watch on a thread of its own and poke for every signal. A bus that failed is
+/// listened to again after a while, with a poke, since whatever happened in between went unseen.
+/// `said` is called with the sentence for a failure, which the caller prints in its own words.
+#[cfg(feature = "bus")]
+pub fn listen<W, S>(poke: Sender<()>, watch: W, said: S)
+where
+    W: Fn(&mut dyn FnMut() -> bool) -> Result<(), String> + Send + 'static,
+    S: Fn(&str) + Send + 'static,
+{
+    std::thread::spawn(move || {
+        loop {
+            let mut each = || poke.send(()).is_ok();
+            match watch(&mut each) {
+                Ok(()) => return,
+                Err(why) => said(&why),
+            }
+            std::thread::sleep(RETRY);
+            if poke.send(()).is_err() {
+                return;
+            }
+        }
+    });
+}
+
 #[cfg(feature = "bus")]
 fn watch<F: FnMut() -> bool>(
     rule: zbus::Result<zbus::MatchRule<'_>>,
@@ -186,6 +261,38 @@ fn watch<F: FnMut() -> bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "bus")]
+    #[test]
+    fn a_burst_of_pokes_settles_into_one_reading() {
+        let (poke, pokes) = std::sync::mpsc::channel();
+        for _ in 0..50 {
+            poke.send(()).expect("the channel");
+        }
+        let started = std::time::Instant::now();
+        settle(&pokes);
+        // everything queued is taken in, then the quiet ends the wait
+        assert!(pokes.try_recv().is_err());
+        assert!(started.elapsed() >= SETTLE);
+        assert!(started.elapsed() < LONGEST + SETTLE);
+    }
+
+    #[cfg(feature = "bus")]
+    #[test]
+    fn pokes_that_never_stop_still_end_the_wait() {
+        let (poke, pokes) = std::sync::mpsc::channel();
+        let keep = std::thread::spawn(move || {
+            while poke.send(()).is_ok() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = std::time::Instant::now();
+        settle(&pokes);
+        assert!(started.elapsed() >= LONGEST);
+        assert!(started.elapsed() < LONGEST * 2);
+        drop(pokes);
+        keep.join().expect("the poking thread");
+    }
 
     #[test]
     fn errors_on_the_bus_read_as_sentences() {

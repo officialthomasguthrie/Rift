@@ -11,8 +11,6 @@ use librift::battery::{Battery, Charge};
 use librift::bluetooth;
 use librift::network::{self, Link};
 
-use crate::icons;
-
 /// The default sink's volume, as a percentage, and whether it is muted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Volume {
@@ -102,7 +100,7 @@ pub fn network_icon(picture: Option<&network::Picture>) -> String {
     }
     if let Some(wireless) = wireless.filter(|wireless| wireless.link == Link::Connected) {
         let strength = wireless.active().map_or(0, |network| network.strength);
-        return icons::signal("wireless", strength);
+        return librift::network::signal_icon("wireless", strength);
     }
     if wired == Some(Link::Connecting) {
         return "network-wired-acquiring-symbolic".to_string();
@@ -147,17 +145,10 @@ pub fn network_word(picture: Option<&network::Picture>) -> String {
 /// `unplugged`, or `none` when the machine has no port for one.
 #[must_use]
 pub fn wired_word(picture: Option<&network::Picture>) -> String {
-    let link = picture
+    picture
         .and_then(|picture| picture.wired.as_ref())
-        .map(|wired| wired.link);
-    match link {
-        None => "none",
-        Some(Link::Connected) => "connected",
-        Some(Link::Connecting) => "connecting",
-        Some(Link::Disconnected) => "disconnected",
-        Some(Link::Unavailable) => "unplugged",
-    }
-    .to_string()
+        .map_or("none", |wired| wired.link.word())
+        .to_string()
 }
 
 /// The words `lens --state` prints for Wi-Fi: `on` and how many networks it sees, `off`, or `none`
@@ -487,6 +478,7 @@ mod tests {
         Wireless {
             path: "/devices/3".into(),
             link,
+            addresses: network::Addresses::default(),
             networks: vec![Network {
                 name: "Home".into(),
                 ssid: b"Home".to_vec(),
@@ -507,6 +499,7 @@ mod tests {
             wired: Some(Wired {
                 path: "/devices/2".into(),
                 link,
+                ..Wired::default()
             }),
             wireless: Some(wireless(Link::Connected, 72)),
         };
@@ -553,6 +546,7 @@ mod tests {
             wired: Some(Wired {
                 path: "/devices/2".into(),
                 link: Link::Disconnected,
+                ..Wired::default()
             }),
             wireless: None,
         };

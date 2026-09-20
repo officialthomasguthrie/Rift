@@ -28,7 +28,7 @@ const ETHERNET: u32 = 1;
 const WIFI: u32 = 2;
 
 /// The state of a device, the way the menu says it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Link {
     /// Up and in use.
     Connected,
@@ -37,6 +37,7 @@ pub enum Link {
     /// Could be used and is not.
     Disconnected,
     /// Cannot be used now: no cable in it, or the radio is off.
+    #[default]
     Unavailable,
 }
 
@@ -51,6 +52,28 @@ impl Link {
             0..=20 => Self::Unavailable,
             // disconnected, deactivating and failed
             _ => Self::Disconnected,
+        }
+    }
+
+    /// The word a state line prints for it.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Connecting => "connecting",
+            Self::Disconnected => "disconnected",
+            Self::Unavailable => "unplugged",
+        }
+    }
+
+    /// What a row says about a cable in this state, in the menu and on the Network page.
+    #[must_use]
+    pub const fn wired_word(self) -> &'static str {
+        match self {
+            Self::Connected => "Connected",
+            Self::Connecting => "Connecting",
+            Self::Disconnected => "Disconnected",
+            Self::Unavailable => "Cable unplugged",
         }
     }
 
@@ -165,8 +188,25 @@ pub struct Network {
     pub saved: Option<String>,
 }
 
+/// What a device is called and what it has been given, which the Network page shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Addresses {
+    /// What the kernel calls it: eth0, wlan0, enp0s31f6.
+    pub interface: String,
+    /// Its hardware address.
+    pub hardware: String,
+    /// Every IPv4 address it has, as `10.0.2.15/24`.
+    pub v4: Vec<String>,
+    /// Every IPv6 address it has, the same way.
+    pub v6: Vec<String>,
+    /// The way off this network, when it was given one.
+    pub gateway: Option<String>,
+    /// The resolvers it was given.
+    pub dns: Vec<String>,
+}
+
 /// A device as `NetworkManager` lists it, before the picture is made from it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Device {
     /// Its object on the bus.
     pub path: String,
@@ -176,6 +216,8 @@ pub struct Device {
     pub state: u32,
     /// Whether `NetworkManager` looks after it. One it does not is someone else's business.
     pub managed: bool,
+    /// What it is called and what it has been given.
+    pub addresses: Addresses,
     /// For a wireless card, the access point it is on.
     pub active: Option<String>,
     /// For a wireless card, every access point it sees.
@@ -183,12 +225,14 @@ pub struct Device {
 }
 
 /// The cable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Wired {
     /// The device's object on the bus.
     pub path: String,
     /// Its state.
     pub link: Link,
+    /// What it is called and what it has been given.
+    pub addresses: Addresses,
 }
 
 /// The wireless card and the networks around it.
@@ -198,6 +242,8 @@ pub struct Wireless {
     pub path: String,
     /// Its state.
     pub link: Link,
+    /// What it is called and what it has been given.
+    pub addresses: Addresses,
     /// The networks it sees, the one in use first, then the ones joined before, then the
     /// strongest.
     pub networks: Vec<Network>,
@@ -245,10 +291,12 @@ pub fn picture(
         wired: pick(ETHERNET).map(|device| Wired {
             path: device.path.clone(),
             link: Link::from_state(device.state),
+            addresses: device.addresses.clone(),
         }),
         wireless: pick(WIFI).map(|device| Wireless {
             path: device.path.clone(),
             link: Link::from_state(device.state),
+            addresses: device.addresses.clone(),
             networks: networks(&device.points, device.active.as_deref(), saved),
         }),
     }
@@ -297,6 +345,20 @@ pub fn networks(
             .then(one.name.cmp(&other.name))
     });
     found
+}
+
+/// The icon for a signal this strong, the way GNOME steps them, so the system menu and the Wi-Fi
+/// page draw the same bars for the same network.
+#[must_use]
+pub fn signal_icon(kind: &str, strength: u8) -> String {
+    let step = match strength {
+        0..=4 => "none",
+        5..=29 => "weak",
+        30..=54 => "ok",
+        55..=79 => "good",
+        _ => "excellent",
+    };
+    format!("network-{kind}-signal-{step}-symbolic")
 }
 
 /// A network's name as text. The radio sends bytes, nearly always UTF-8; whatever is not, and any
@@ -502,11 +564,102 @@ const WIRELESS: &str = "org.freedesktop.NetworkManager.Device.Wireless";
 #[cfg(feature = "bus")]
 const POINT: &str = "org.freedesktop.NetworkManager.AccessPoint";
 #[cfg(feature = "bus")]
+const IP4: &str = "org.freedesktop.NetworkManager.IP4Config";
+#[cfg(feature = "bus")]
+const IP6: &str = "org.freedesktop.NetworkManager.IP6Config";
+#[cfg(feature = "bus")]
 const ACTIVE: &str = "org.freedesktop.NetworkManager.Connection.Active";
 #[cfg(feature = "bus")]
 const SAVED: &str = "org.freedesktop.NetworkManager.Settings.Connection";
 #[cfg(feature = "bus")]
 const SAVED_LIST: &str = "org.freedesktop.NetworkManager.Settings";
+
+/// What a device is called and what it has been given, from the properties already read and the
+/// two configuration objects they point at. A device that is not up has neither, which is not an
+/// error: the page says it has no address.
+#[cfg(feature = "bus")]
+fn addresses(
+    connection: &zbus::blocking::Connection,
+    properties: &mut HashMap<String, OwnedValue>,
+) -> Addresses {
+    fn config(
+        connection: &zbus::blocking::Connection,
+        properties: &mut HashMap<String, OwnedValue>,
+        key: &str,
+        interface: &'static str,
+    ) -> Option<HashMap<String, OwnedValue>> {
+        take::<OwnedObjectPath>(properties, key)
+            .map(|path| path.to_string())
+            .filter(|path| path != "/")
+            .and_then(|path| bus::properties(connection, SERVICE, &path, interface).ok())
+    }
+    let mut found = Addresses {
+        interface: take::<String>(properties, "Interface").unwrap_or_default(),
+        hardware: take::<String>(properties, "HwAddress").unwrap_or_default(),
+        ..Addresses::default()
+    };
+    if let Some(mut four) = config(connection, properties, "Ip4Config", IP4) {
+        found.v4 = written(&mut four, "AddressData");
+        found.gateway = gateway(&mut four);
+        found.dns = named(&mut four, "NameserverData");
+    }
+    if let Some(mut six) = config(connection, properties, "Ip6Config", IP6) {
+        found.v6 = written(&mut six, "AddressData");
+        // a machine on IPv6 alone still has a way off it
+        found.gateway = found.gateway.or_else(|| gateway(&mut six));
+        found.dns.extend(named(&mut six, "NameserverData"));
+    }
+    found
+}
+
+/// The addresses of one configuration, each with the length of its prefix.
+#[cfg(feature = "bus")]
+fn written(properties: &mut HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
+    entries(properties, key)
+        .into_iter()
+        .filter_map(|mut entry| {
+            let address = text(&mut entry, "address")?;
+            match take::<u32>(&mut entry, "prefix") {
+                Some(prefix) => Some(format!("{address}/{prefix}")),
+                None => Some(address),
+            }
+        })
+        .collect()
+}
+
+/// The resolvers of one configuration. `NameserverData` is a list of dictionaries, the way the
+/// addresses are; `NetworkManager` has had it for IPv4 for years and for IPv6 since 1.32, and a
+/// version without it answers nothing, not an error.
+#[cfg(feature = "bus")]
+fn named(properties: &mut HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
+    entries(properties, key)
+        .into_iter()
+        .filter_map(|mut entry| text(&mut entry, "address"))
+        .collect()
+}
+
+/// The way off the network this configuration is on, when it was given one.
+#[cfg(feature = "bus")]
+fn gateway(properties: &mut HashMap<String, OwnedValue>) -> Option<String> {
+    take::<String>(properties, "Gateway").filter(|gateway| !gateway.is_empty())
+}
+
+/// A property that is a list of dictionaries.
+#[cfg(feature = "bus")]
+fn entries(
+    properties: &mut HashMap<String, OwnedValue>,
+    key: &str,
+) -> Vec<HashMap<String, OwnedValue>> {
+    take::<Array<'static>>(properties, key)
+        .and_then(|array| Vec::<HashMap<String, OwnedValue>>::try_from(array).ok())
+        .unwrap_or_default()
+}
+
+/// One value of a dictionary, as text.
+#[cfg(feature = "bus")]
+fn text(entry: &mut HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+    take::<String>(entry, key).filter(|value| !value.is_empty())
+}
 
 /// One device and, for a wireless card, the access points it sees.
 #[cfg(feature = "bus")]
@@ -518,6 +671,7 @@ fn device(connection: &zbus::blocking::Connection, path: &str) -> zbus::Result<D
         kind,
         state: take::<u32>(&mut properties, "State").unwrap_or(0),
         managed: take::<bool>(&mut properties, "Managed").unwrap_or(false),
+        addresses: addresses(connection, &mut properties),
         active: None,
         points: Vec::new(),
     };
@@ -623,6 +777,10 @@ mod tests {
         assert_eq!(Link::from_state(120), Link::Disconnected);
         assert_eq!(Link::from_state(20), Link::Unavailable);
         assert_eq!(Link::from_state(0), Link::Unavailable);
+        assert_eq!(Link::from_state(100).word(), "connected");
+        assert_eq!(Link::from_state(0).word(), "unplugged");
+        assert_eq!(Link::from_state(0).wired_word(), "Cable unplugged");
+        assert_eq!(Link::default(), Link::Unavailable);
     }
 
     #[test]
@@ -672,16 +830,19 @@ mod tests {
                 kind: ETHERNET,
                 state: 20,
                 managed: true,
-                active: None,
-                points: Vec::new(),
+                ..Device::default()
             },
             Device {
                 path: "/devices/2".into(),
                 kind: ETHERNET,
                 state: 100,
                 managed: true,
-                active: None,
-                points: Vec::new(),
+                addresses: Addresses {
+                    interface: "eth0".into(),
+                    v4: vec!["10.0.2.15/24".into()],
+                    ..Addresses::default()
+                },
+                ..Device::default()
             },
             // a bridge or a loopback is not a cable
             Device {
@@ -689,8 +850,7 @@ mod tests {
                 kind: 32,
                 state: 100,
                 managed: true,
-                active: None,
-                points: Vec::new(),
+                ..Device::default()
             },
         ];
         let found = picture(true, true, &devices, &[]);
@@ -698,7 +858,12 @@ mod tests {
             found.wired,
             Some(Wired {
                 path: "/devices/2".into(),
-                link: Link::Connected
+                link: Link::Connected,
+                addresses: Addresses {
+                    interface: "eth0".into(),
+                    v4: vec!["10.0.2.15/24".into()],
+                    ..Addresses::default()
+                },
             })
         );
         assert!(found.wireless.is_none());
@@ -709,10 +874,37 @@ mod tests {
             kind: WIFI,
             state: 10,
             managed: false,
-            active: None,
-            points: Vec::new(),
+            ..Device::default()
         }];
         assert!(picture(true, true, &unmanaged, &[]).wireless.is_none());
+    }
+
+    #[test]
+    fn the_strength_steps_follow_the_signal() {
+        assert_eq!(
+            signal_icon("wireless", 0),
+            "network-wireless-signal-none-symbolic"
+        );
+        assert_eq!(
+            signal_icon("wireless", 20),
+            "network-wireless-signal-weak-symbolic"
+        );
+        assert_eq!(
+            signal_icon("wireless", 40),
+            "network-wireless-signal-ok-symbolic"
+        );
+        assert_eq!(
+            signal_icon("wireless", 70),
+            "network-wireless-signal-good-symbolic"
+        );
+        assert_eq!(
+            signal_icon("wireless", 95),
+            "network-wireless-signal-excellent-symbolic"
+        );
+        assert_eq!(
+            signal_icon("cellular", 60),
+            "network-cellular-signal-good-symbolic"
+        );
     }
 
     #[test]

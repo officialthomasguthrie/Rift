@@ -154,8 +154,9 @@ enum Closed {
 pub enum Message {
     /// The minute turned, and this is what the clock says now.
     Tick(clock::Now),
-    /// What `NetworkManager` says now, or why it did not answer.
-    Network(Result<network::Picture, String>),
+    /// What `NetworkManager` says now, or why it did not answer. It is the biggest thing a
+    /// message carries, so it travels behind a pointer.
+    Network(Box<Result<network::Picture, String>>),
     /// What `UPower` says about the battery now.
     Battery(Option<Battery>),
     /// What `BlueZ` says now.
@@ -799,10 +800,10 @@ fn heard(state: &mut Lens, message: Message) {
             }
         }
         Message::Network(picture) => {
-            if let Err(why) = &picture {
+            if let Err(why) = &*picture {
                 eprintln!("lens: {why}");
             }
-            state.status.network = picture.ok();
+            state.status.network = (*picture).ok();
         }
         Message::Battery(battery) => state.status.battery = battery,
         Message::Bluetooth(bluetooth) => state.status.bluetooth = bluetooth,
