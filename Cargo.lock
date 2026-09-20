@@ -2740,6 +2740,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "liftoff-style"
+version = "0.1.0"
+dependencies = [
+ "librift",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "lilt"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

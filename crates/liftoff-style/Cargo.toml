@@ -1,0 +1,24 @@
+[package]
+name = "liftoff-style"
+description = "Liftoff: the boot style the initrd hands plymouth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "liftoff-style"
+path = "src/main.rs"
+
+[dependencies]
+# where the word lives on the esp and what the two styles are called
+librift.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# the esp is mounted with the system call, so the initrd needs no mount program on its path
+rustix = { version = "1.1", default-features = false, features = ["mount", "std"] }
+
+[lints]
+workspace = true
