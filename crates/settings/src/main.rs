@@ -8,12 +8,15 @@
 
 mod about;
 mod appearance;
+mod bluetooth;
 mod control;
 mod displays;
 mod icons;
+mod net;
 mod page;
 mod theme;
 mod ui;
+mod watch;
 mod widgets;
 
 use std::path::PathBuf;

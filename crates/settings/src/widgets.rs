@@ -2,7 +2,7 @@
 //! switch and a slider, all in the app's colours.
 
 use iced::widget::{
-    button, column, container, row, rule, scrollable, slider, space, text, toggler,
+    button, column, container, row, rule, scrollable, slider, space, text, text_input, toggler,
 };
 use iced::{Border, Center, Color, Element, Fill, Font, Length, Theme, font};
 
@@ -30,6 +30,8 @@ pub const TITLE_SIZE: f32 = 17.0;
 /// How much space a page leaves at its edges, and between its sections.
 pub const PAD: f32 = 20.0;
 pub const GAP: f32 = 16.0;
+/// How wide a field is.
+const FIELD: f32 = 200.0;
 
 /// The name over a group of rows.
 pub fn heading<'a, M: 'a>(colors: Colors, label: &'a str) -> Element<'a, M> {
@@ -232,6 +234,54 @@ pub fn steps<'a, M: Clone + 'a>(
     .align_y(Center)
     .spacing(GAP)
     .into()
+}
+
+/// A field text is typed into, in the app's colours, with the accent around it while the cursor is
+/// in it. `secret` hides what is typed, for a password.
+pub fn field<'a, M: Clone + 'a>(
+    colors: Colors,
+    hint: &'a str,
+    value: &'a str,
+    secret: bool,
+    id: &'static str,
+    typed: impl Fn(String) -> M + 'a,
+    entered: M,
+) -> Element<'a, M> {
+    text_input(hint, value)
+        .id(id)
+        .secure(secret)
+        .on_input(typed)
+        .on_submit(entered)
+        .size(TEXT_SIZE)
+        .padding([6, 8])
+        .width(Length::Fixed(FIELD))
+        .style(move |_: &Theme, status| {
+            let (edge, width) = match status {
+                text_input::Status::Focused { .. } => (colors.accent, 2.0),
+                _ => (colors.edge, 1.0),
+            };
+            text_input::Style {
+                background: colors.field.into(),
+                border: Border {
+                    color: edge,
+                    width,
+                    radius: 4.0.into(),
+                },
+                icon: colors.text,
+                placeholder: colors.dim,
+                value: colors.text,
+                selection: Color {
+                    a: 0.4,
+                    ..colors.accent
+                },
+            }
+        })
+        .into()
+}
+
+/// The operation that puts the cursor in a field.
+pub fn focus(id: &'static str) -> iced::Task<crate::ui::Message> {
+    iced::widget::operation::focus(id)
 }
 
 /// A list that scrolls, with the thin scroller the shell's menus have.

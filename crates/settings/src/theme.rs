@@ -22,6 +22,8 @@ pub struct Colors {
     pub edge: Color,
     /// A button.
     pub button: Color,
+    /// A field text is typed into.
+    pub field: Color,
     /// Under the pointer.
     pub hover: Color,
     /// Text and symbolic icons.
@@ -62,6 +64,7 @@ const DARK: Colors = Colors {
     line: rgb(0x18_1818),
     edge: rgb(0x4a_4a4a),
     button: rgb(0x3a_3a3a),
+    field: rgb(0x38_3838),
     hover: rgb(0x46_4646),
     text: rgb(0xe6_e6e6),
     dim: rgb(0x9a_9a9a),
@@ -81,6 +84,7 @@ const LIGHT: Colors = Colors {
     line: rgb(0xd0_d0d0),
     edge: rgb(0xc4_c4c4),
     button: rgb(0xff_ffff),
+    field: rgb(0xff_ffff),
     hover: rgb(0xdf_dfdf),
     text: rgb(0x1f_1f1f),
     dim: rgb(0x6b_6b6b),

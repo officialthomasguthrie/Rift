@@ -184,28 +184,21 @@ impl Page {
     }
 
     /// What a page that Settings cannot do yet says, in one sentence, with a second one where
-    /// there is another way to do it today. Appearance, Displays and About have pages of their
-    /// own.
+    /// there is another way to do it today. A page with one of its own says nothing here.
     #[must_use]
     pub const fn note(self) -> &'static str {
         match self {
-            Self::Wifi => {
-                "Wi-Fi is not in Settings yet. The system menu at the right of the top bar turns \
-                 the radio on and off and joins a network."
-            }
-            Self::Network => {
-                "Wired networks and VPN are not in Settings yet. nmcli sets them up from a terminal."
-            }
-            Self::Bluetooth => {
-                "Bluetooth is not in Settings yet. The system menu at the right of the top bar \
-                 turns the adapter on and connects a device that is already paired."
-            }
             Self::Sound => {
                 "Sound devices are not in Settings yet. The system menu has the volume, and wpctl \
                  picks the output from a terminal."
             }
             Self::Power => "Power is not in Settings yet.",
-            Self::Appearance | Self::Displays | Self::About => "",
+            Self::Wifi
+            | Self::Network
+            | Self::Bluetooth
+            | Self::Appearance
+            | Self::Displays
+            | Self::About => "",
             Self::Dock => {
                 "The dock is not in Settings yet. A right click on an app in the dock pins it or \
                  takes it off."
@@ -269,6 +262,17 @@ impl Page {
 mod tests {
     use super::*;
 
+    /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
+    /// and one sentence.
+    const REAL: [Page; 6] = [
+        Page::Wifi,
+        Page::Network,
+        Page::Bluetooth,
+        Page::Appearance,
+        Page::Displays,
+        Page::About,
+    ];
+
     #[test]
     fn every_page_has_a_name_a_word_and_an_icon_of_its_own() {
         let mut words: Vec<&str> = Page::ALL.iter().map(|page| page.word()).collect();
@@ -293,8 +297,8 @@ mod tests {
     fn a_page_with_nothing_on_it_says_so_in_a_sentence() {
         for page in Page::ALL {
             let note = page.note();
-            if matches!(page, Page::Appearance | Page::Displays | Page::About) {
-                assert!(note.is_empty());
+            if REAL.contains(&page) {
+                assert!(note.is_empty(), "{page:?}: {note}");
                 continue;
             }
             assert!(note.ends_with('.'), "{page:?}: {note}");

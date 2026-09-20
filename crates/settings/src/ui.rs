@@ -12,14 +12,17 @@ use iced::{
     Border, Center, Color, Element, Fill, Length, Size, Subscription, Task, Theme, theme, window,
 };
 use librift::appearance::{Accent, Look, Scheme, Theme as Mode};
+use librift::bluetooth as bluetooth_picture;
 use librift::boot::Style;
+use librift::network;
 use librift::orbit::Host;
 
 use crate::control::{self, Command};
+use crate::net::Joining;
 use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
-use crate::{about, appearance, displays, icons};
+use crate::{about, appearance, bluetooth, displays, icons, net, watch};
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
 /// the boot test all know it by.
@@ -56,6 +59,17 @@ pub struct Settings {
     pub choices: Vec<appearance::Choice>,
     /// What Orbit says about this machine, once it has answered.
     pub host: Option<Result<Host, String>>,
+    /// What `NetworkManager` says about the cable and the wireless networks, once it has answered
+    /// and after every change it makes while the window is open.
+    pub network: Option<Result<network::Picture, String>>,
+    /// What `BlueZ` says, the same way. `Ok(None)` is a machine with no adapter.
+    pub bluetooth: Option<Result<Option<bluetooth_picture::Picture>, String>>,
+    /// The network being joined that asks for a password, and what has been typed for it.
+    pub joining: Option<Joining>,
+    /// What is happening: a join, or a device being connected.
+    pub doing: Option<String>,
+    /// Whether the card has been asked to sweep since the Wi-Fi page came up.
+    swept: bool,
     /// What the system calls itself, from os-release.
     pub release: String,
     /// The last setting that could not be written.
@@ -85,6 +99,27 @@ pub enum Message {
     Boot(Style),
     /// The size one screen is drawn at, from the Displays page.
     Scale(String, u32),
+    /// What `NetworkManager` says now. It is the biggest thing a message carries, so it travels
+    /// behind a pointer.
+    Network(Box<Result<network::Picture, String>>),
+    /// What `BlueZ` says now.
+    Bluetooth(Result<Option<bluetooth_picture::Picture>, String>),
+    /// The Wi-Fi switch.
+    Wifi(bool),
+    /// The network at this place in the list was pressed.
+    Join(usize),
+    /// The password field was typed into.
+    Password(String),
+    /// The password was given.
+    Joined,
+    /// The card was asked to sweep for networks again.
+    Scanned,
+    /// The Bluetooth switch.
+    Power(bool),
+    /// The paired device at this place in the list was pressed.
+    Device(usize),
+    /// How a join, a switch or a connect went.
+    Acted(Result<(), String>),
     /// What Orbit answered after a screen's size was written: the machine again, or why not.
     Scaled(Result<Host, String>),
     /// What Vault answered about the boot style, after reading it or after writing it.
@@ -177,6 +212,7 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         release: about::release(),
         problem: None,
         screenshot: start.screenshot.clone(),
+        ..Settings::bare()
     };
     let mut work = vec![about::ask_orbit(), appearance::ask_vault()];
     if start.screenshot.is_some() {
@@ -206,6 +242,27 @@ fn save(path: &Path, shot: &window::Screenshot) -> Result<(), String> {
 }
 
 impl Settings {
+    /// A window that has asked for nothing yet, which the pages' own tests build on.
+    #[must_use]
+    pub fn bare() -> Self {
+        Self {
+            page: Page::FIRST,
+            look: Look::default(),
+            greeting: false,
+            boot: None,
+            choices: Vec::new(),
+            host: None,
+            network: None,
+            bluetooth: None,
+            joining: None,
+            doing: None,
+            swept: false,
+            release: String::new(),
+            problem: None,
+            screenshot: None,
+        }
+    }
+
     /// The colours the window is drawn in.
     pub fn colors(&self) -> Colors {
         colors(self.look.theme, self.look.accent)
@@ -248,6 +305,9 @@ impl Settings {
                     })
                 }),
         )
+        // and the same for the network and Bluetooth, which the window follows while it is open
+        .chain(net::state(self))
+        .chain(bluetooth::state(self))
         .collect::<Vec<_>>()
         .join("\n")
             + "\n"
@@ -274,7 +334,7 @@ fn poke_the_shell() {
 
 fn update(state: &mut Settings, message: Message) -> Task<Message> {
     match message {
-        Message::Show(page) => state.page = page,
+        Message::Show(page) => return show(state, page),
         Message::Mode(mode) => {
             state.look.theme = mode;
             state.wrote();
@@ -298,6 +358,56 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         }
         Message::Boot(style) => return appearance::write_style(style),
         Message::Scale(connector, scale) => return displays::set_scale(connector, scale),
+        Message::Network(picture) => {
+            state.network = Some(*picture);
+            // a network that has come up is no longer one waiting for a password
+            if state
+                .joining
+                .as_ref()
+                .is_some_and(|asked| joined(state, asked.network.ssid.as_slice()))
+            {
+                state.joining = None;
+                state.doing = None;
+            }
+            if state.page == Page::Wifi && !state.swept {
+                state.swept = true;
+                return net::scan(state);
+            }
+        }
+        Message::Bluetooth(answered) => state.bluetooth = Some(answered),
+        Message::Wifi(on) => {
+            state.problem = None;
+            return net::set_wifi(state, on);
+        }
+        Message::Join(at) => return net::join(state, at),
+        Message::Password(typed) => {
+            if let Some(asked) = state.joining.as_mut() {
+                asked.password = typed;
+                state.problem = None;
+            }
+        }
+        Message::Joined => return net::joined(state),
+        Message::Scanned => {}
+        Message::Power(on) => {
+            state.problem = None;
+            return bluetooth::set_powered(state, on);
+        }
+        Message::Device(at) => return bluetooth::connect(state, at),
+        Message::Acted(Ok(())) => {
+            state.problem = None;
+            state.doing = None;
+            if let Some(asked) = state.joining.as_mut() {
+                asked.busy = false;
+            }
+        }
+        Message::Acted(Err(why)) => {
+            state.doing = None;
+            state.problem = Some(why);
+            if let Some(asked) = state.joining.as_mut() {
+                asked.busy = false;
+                return crate::widgets::focus("password");
+            }
+        }
         Message::Scaled(Ok(host)) => {
             state.problem = None;
             state.host = Some(Ok(host));
@@ -324,12 +434,39 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
     Task::none()
 }
 
+/// Show a page. The Wi-Fi page asks the card to sweep as it comes up, so the list is what is
+/// around now rather than what was around when the window opened.
+fn show(state: &mut Settings, page: Page) -> Task<Message> {
+    if state.page == page {
+        return Task::none();
+    }
+    state.page = page;
+    state.problem = None;
+    if page == Page::Wifi {
+        state.swept = true;
+        return net::scan(state);
+    }
+    state.swept = false;
+    Task::none()
+}
+
+/// Whether the machine is on the network with this name as the radio sends it.
+fn joined(state: &Settings, ssid: &[u8]) -> bool {
+    state
+        .network
+        .as_ref()
+        .and_then(|answered| answered.as_ref().ok())
+        .and_then(|picture| picture.wireless.as_ref())
+        .and_then(librift::network::Wireless::active)
+        .is_some_and(|network| network.ssid == ssid)
+}
+
 /// A line from the socket. Setting something over it does what pressing it on the page does.
 fn said(state: &mut Settings, command: Command) -> Task<Message> {
     match command {
         Command::Page(word) => {
             if let Some(page) = Page::from_word(&word) {
-                state.page = page;
+                return show(state, page);
             }
         }
         Command::Set(name, value) => return set(state, &name, &value),
@@ -341,6 +478,7 @@ fn said(state: &mut Settings, command: Command) -> Task<Message> {
 
 fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
     let number = |most: u32| value.trim().parse::<u32>().ok().map(|n| n.min(most));
+    let on = |value: &str| !value.trim().eq_ignore_ascii_case("off");
     match name {
         "theme" => Task::done(Message::Mode(Mode::from_setting(value))),
         "accent" => Task::done(Message::Accent(Accent::from_setting(value))),
@@ -367,6 +505,18 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
                 Task::done(Message::Scale(screen, scale))
             }),
         "greeting" => Task::done(Message::Greeting(!value.trim().eq_ignore_ascii_case("off"))),
+        "wifi" => Task::done(Message::Wifi(on(value))),
+        "bluetooth" => Task::done(Message::Power(on(value))),
+        // a network and a paired device are named, since neither list is in an order anyone typed
+        "join" => {
+            net::named(state, value).map_or_else(Task::none, |at| Task::done(Message::Join(at)))
+        }
+        "connect" => bluetooth::named(state, value)
+            .map_or_else(Task::none, |at| Task::done(Message::Device(at))),
+        "password" => Task::batch([
+            Task::done(Message::Password(value.to_string())),
+            Task::done(Message::Joined),
+        ]),
         "wallpaper" => state
             .choices
             .iter()
@@ -377,7 +527,12 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
 }
 
 fn subscription(_: &Settings) -> Subscription<Message> {
-    Subscription::batch([window::close_requests().map(|_| Message::Close), terminal()])
+    Subscription::batch([
+        window::close_requests().map(|_| Message::Close),
+        terminal(),
+        watch::network(),
+        watch::bluetooth(),
+    ])
 }
 
 /// The socket in the runtime directory, read on a thread of its own. The state query is answered
@@ -524,6 +679,9 @@ fn sidebar(state: &Settings, look: Colors) -> Element<'_, Message> {
 /// The page that is up.
 fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
     let inside = match state.page {
+        Page::Wifi => net::wifi(state, look),
+        Page::Network => net::wired(state, look),
+        Page::Bluetooth => bluetooth::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),
