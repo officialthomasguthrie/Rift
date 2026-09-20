@@ -1479,7 +1479,7 @@ def main():
                     return found
                 time.sleep(2)
 
-        def settings_state(what):
+        def page_state(what):
             """What rift-settings --state prints, as a dict of the words it knows. The boot style is
             only in it once Vault has answered, since Vault is the one that reads the esp."""
             status, output = run("rift-settings --state", what)
@@ -1498,18 +1498,18 @@ def main():
                           lambda: run("lens --state", "the shell")[0] == 0 or None):
                 fail("the shell does not answer, so Settings has no screen to open on")
             run("systemd-run --user --quiet --collect rift-settings", "the Settings window")
-            if not waited(120, lambda: settings_state("the page Settings opens on") or None):
+            if not waited(120, lambda: page_state("the page Settings opens on") or None):
                 _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
                 fail(f"rift-settings --state answers nothing: {without_console(output).strip()[-800:]!r}")
 
-        def choose(style):
+        def set_style(style):
             """Set the boot style from the Appearance page, and read the word back off the esp."""
             status, output = run(f"rift-settings --set boot {style}", f"the boot style set to {style}")
             if status != 0:
                 fail(f"rift-settings --set boot {style} exited with {status}: "
                      f"{without_console(output).strip()[-300:]!r}")
-            if not waited(120, lambda: settings_state("the boot style").get("boot") == style):
-                said = settings_state("the boot style").get("boot")
+            if not waited(120, lambda: page_state("the boot style").get("boot") == style):
+                said = page_state("the boot style").get("boot")
                 fail(f"rift-settings --state says boot {said!r} after the page was set to {style}")
             status, output = run(f"sudo cat /boot/{BOOT_STYLE_FILE}", "the word on the esp")
             written = without_console(output).strip()
@@ -1539,11 +1539,11 @@ def main():
 
         # graphical, which is not the style the image was built with, then text again
         open_settings()
-        choose("graphical")
+        set_style("graphical")
         next_boot("graphical")
         unlock()
         open_settings()
-        choose("text")
+        set_style("text")
         next_boot("text")
         unlock()
         reboot_action("shutdown")
