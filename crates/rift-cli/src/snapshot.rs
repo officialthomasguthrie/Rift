@@ -3,9 +3,8 @@
 //! since the snapshot is only replaced after a yes, or with --replace.
 
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use librift::vault;
+use librift::{time, vault};
 
 use crate::restore::{self, From};
 use crate::text;
@@ -64,12 +63,7 @@ fn list() -> ExitCode {
 fn last() -> ExitCode {
     match vault::list() {
         Ok(names) => {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .and_then(|since| i64::try_from(since.as_secs()).ok())
-                .unwrap_or(0);
-            println!("{}", newest(&names, now));
+            println!("{}", newest(&names, time::now()));
             ExitCode::SUCCESS
         }
         Err(why) => {
@@ -99,21 +93,9 @@ fn newest(names: &[String], now: i64) -> String {
         .filter_map(|name| vault::snapshot_time(name))
         .max()
     {
-        Some(taken) => ago(now - taken),
+        Some(taken) => time::ago(now - taken),
         None => "none yet".to_string(),
     }
-}
-
-/// A span of seconds the way a person says it about the past.
-fn ago(seconds: i64) -> String {
-    let (count, unit) = match seconds {
-        ..60 => return "just now".to_string(),
-        60..3600 => (seconds / 60, "minute"),
-        3600..172_800 => (seconds / 3600, "hour"),
-        _ => (seconds / 86_400, "day"),
-    };
-    let plural = if count == 1 { "" } else { "s" };
-    format!("{count} {unit}{plural} ago")
 }
 
 #[cfg(test)]
@@ -141,7 +123,8 @@ mod tests {
 
     #[test]
     fn a_clock_behind_the_snapshot_says_just_now() {
-        assert_eq!(ago(-120), "just now");
-        assert_eq!(ago(60), "1 minute ago");
+        let taken = vec!["2026-09-15T11:48:00Z".to_string()];
+        let at = |name| vault::snapshot_time(name).unwrap_or_default();
+        assert_eq!(newest(&taken, at("2026-09-15T11:46:00Z")), "just now");
     }
 }

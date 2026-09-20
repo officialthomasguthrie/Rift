@@ -9,7 +9,6 @@ mod bus;
 mod chat;
 mod embed;
 mod http;
-mod models;
 
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -20,7 +19,7 @@ use std::thread;
 
 use backend::{Backend, Picked, Role, Status};
 use librift::Component;
-use models::{Manifest, Tier};
+use librift::models::{Manifest, Tier};
 
 /// The local api's port. Ollama's, so tools that look for a local model find this one.
 const PORT: u16 = 11434;

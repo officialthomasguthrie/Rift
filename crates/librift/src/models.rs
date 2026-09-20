@@ -1,5 +1,7 @@
-//! Which models run. The manifest is the one list of models, Orbit's tier says how much memory
-//! this machine has, and the models directory says what is really on the drive.
+//! The model manifest: the one list of the models Rift knows about. Orbit's tier says how much
+//! memory this machine has, and the models directory says which of them are really on the drive.
+//!
+//! quasard picks what it runs from here, and the AI page shows the list.
 
 use std::path::Path;
 
@@ -17,12 +19,21 @@ pub struct Manifest {
 }
 
 /// One chat model from the manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Chat {
     /// Short name. llama-server also answers to it on its api.
     pub id: String,
     /// File name under the models directory.
     pub file: String,
+    /// How many parameters it has, as the people who trained it say it: `4B`, `30B-A3B`.
+    #[serde(default)]
+    pub parameters: String,
+    /// How its weights are packed, for example `Q4_K_M`.
+    #[serde(default)]
+    pub quant: String,
+    /// How much room the file takes, in gigabytes.
+    #[serde(default)]
+    pub size_gb: f64,
     /// The model to run when nothing says how big the machine is.
     #[serde(default)]
     pub default: bool,
@@ -33,8 +44,27 @@ pub struct Chat {
     pub tier: Needs,
 }
 
+impl Chat {
+    /// What the model is, in one line: how many parameters, how they are packed and how much room
+    /// the file takes. A manifest that says none of that gives an empty line.
+    #[must_use]
+    pub fn about(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.parameters.is_empty() {
+            parts.push(self.parameters.clone());
+        }
+        if !self.quant.is_empty() {
+            parts.push(self.quant.clone());
+        }
+        if self.size_gb > 0.0 {
+            parts.push(format!("{:.1} GB", self.size_gb));
+        }
+        parts.join(", ")
+    }
+}
+
 /// One embedding model from the manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Embedding {
     /// Short name.
     pub id: String,
@@ -71,7 +101,11 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// Every tier, smallest first, in the order Orbit lists them.
+    pub const ALL: [Tier; 3] = [Self::Small, Self::Medium, Self::Large];
+
     /// Reads the word Orbit answers with.
+    #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
         match word {
             "small" => Some(Self::Small),
@@ -82,6 +116,7 @@ impl Tier {
     }
 
     /// The word, as Orbit says it.
+    #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Small => "small",
@@ -92,6 +127,7 @@ impl Tier {
 
     /// The least memory a machine in the tier was sold with, in GB. Orbit draws its lines just
     /// under 8 and 16 GB because the kernel keeps some of it back.
+    #[must_use]
     pub const fn ram_gb(self) -> u32 {
         match self {
             Self::Small => 4,
@@ -102,7 +138,7 @@ impl Tier {
 }
 
 /// The model that runs, and a line for the log that says why.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct Pick<'a> {
     /// The model.
     pub chat: &'a Chat,
@@ -133,6 +169,7 @@ impl Manifest {
 
     /// The model a tier asks for: the largest one it has the memory for. Without a tier, the
     /// manifest's default.
+    #[must_use]
     pub fn wanted(&self, tier: Option<Tier>) -> Option<&Chat> {
         let Some(tier) = tier else {
             return self.chat.iter().find(|chat| chat.default);
@@ -211,6 +248,13 @@ impl Manifest {
 
 fn fits(chat: &Chat, ram_gb: u32) -> bool {
     chat.tier.min_vram_gb == 0 && chat.tier.min_ram_gb <= ram_gb
+}
+
+/// Whether a model's weights are in the models directory. Everything that picks a model asks this,
+/// and so does the page that lists them.
+#[must_use]
+pub fn on_drive(models_dir: &Path, file: &str) -> bool {
+    models_dir.join(file).is_file()
 }
 
 impl Manifest {
@@ -317,10 +361,49 @@ file = "embed.gguf"
 
     #[test]
     fn tiers_read_as_orbit_writes_them() {
-        for tier in [Tier::Small, Tier::Medium, Tier::Large] {
+        for tier in Tier::ALL {
             assert_eq!(Tier::parse(tier.name()), Some(tier));
         }
+        assert_eq!(Tier::ALL.map(Tier::name), ["small", "medium", "large"]);
+        assert_eq!(Tier::ALL.map(Tier::ram_gb), [4, 8, 16]);
         assert_eq!(Tier::parse("huge"), None);
+    }
+
+    #[test]
+    fn a_model_says_what_it_is_in_one_line() {
+        let manifest = Manifest::parse(include_str!("../../../models/manifest.toml")).unwrap();
+        let about = |id: &str| {
+            manifest
+                .chat
+                .iter()
+                .find(|chat| chat.id == id)
+                .map(Chat::about)
+        };
+        assert_eq!(
+            about("qwen3-4b-q4_k_m").as_deref(),
+            Some("4B, Q4_K_M, 2.5 GB")
+        );
+        assert_eq!(
+            about("qwen3-0.6b-q8_0").as_deref(),
+            Some("0.6B, Q8_0, 0.6 GB")
+        );
+        // a manifest that says none of it says nothing rather than a line of commas
+        let bare =
+            Manifest::parse("[[chat]]\nid = \"x\"\nfile = \"x.gguf\"\ntier = { min_ram_gb = 4 }\n")
+                .unwrap();
+        assert_eq!(bare.chat[0].about(), "");
+    }
+
+    #[test]
+    fn a_model_is_on_the_drive_when_its_file_is() {
+        let dir = std::env::temp_dir().join(format!("rift-models-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("here.gguf");
+        assert!(!on_drive(&dir, "here.gguf"));
+        std::fs::write(&file, b"weights").unwrap();
+        assert!(on_drive(&dir, "here.gguf"));
+        assert!(!on_drive(&dir, "gone.gguf"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

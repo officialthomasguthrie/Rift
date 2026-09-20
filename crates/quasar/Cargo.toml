@@ -13,11 +13,11 @@ name = "quasard"
 path = "src/main.rs"
 
 [dependencies]
-librift.workspace = true
-# the model list comes out of the manifest, the answers out of llama-server's json
+# the model manifest is librift's, the same list the AI page reads
+librift = { workspace = true, features = ["models"] }
+# the answers come out of llama-server's json
 serde.workspace = true
 serde_json.workspace = true
-toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
 # the system bus. blocking takes a question to the model off the bus's own threads
 zbus = { version = "5.18", default-features = false, features = ["async-io", "blocking-api"] }
 blocking = "1.6"

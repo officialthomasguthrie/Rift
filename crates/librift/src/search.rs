@@ -226,6 +226,42 @@ pub struct Stored {
 
 const DAMAGED: &str = "The search index is damaged.";
 
+/// How many bytes of the front of an index [`Summary::peek`] needs: the header, the model's id and
+/// two counts, with room to spare for a longer id than any model has.
+pub const FRONT: usize = 512;
+
+/// What an index says about itself, off the front of the file: the model that made it and how many
+/// files it holds. The vectors are almost all of an index, and nothing that only counts its files
+/// has to read them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    /// Manifest id of the model that made the vectors.
+    pub model: String,
+    /// How many dimensions those vectors have.
+    pub dimensions: usize,
+    /// How many files are in the index.
+    pub files: usize,
+}
+
+impl Summary {
+    /// Reads the front of an index. `front` is the first [`FRONT`] bytes of the file, or the whole
+    /// of it when it is shorter.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when the bytes do not start with an index.
+    pub fn peek(front: &[u8]) -> Result<Self, String> {
+        let mut reader = Reader {
+            bytes: front.strip_prefix(HEADER).ok_or(DAMAGED)?,
+        };
+        Ok(Self {
+            model: reader.text()?,
+            dimensions: reader.count()?,
+            files: reader.count()?,
+        })
+    }
+}
+
 impl Index {
     /// How many dimensions the vectors have. 0 when there are none.
     #[must_use]
@@ -807,6 +843,44 @@ mod tests {
         let at = huge.len() - 4;
         huge[at..].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(Index::decode(&huge).is_err());
+    }
+
+    #[test]
+    fn the_front_of_an_index_says_what_it_holds_without_the_vectors() {
+        let index = Index {
+            model: "nomic-embed-text-v1.5-q8".to_string(),
+            files: vec![
+                File {
+                    path: "notes/bike.txt".to_string(),
+                    modified: 1_789_221_603_000_000_000,
+                    size: 64,
+                    parts: vec![Stored {
+                        line: 1,
+                        vector: vec![1.0, 0.0, 0.0],
+                    }],
+                },
+                File {
+                    path: "code/backup.py".to_string(),
+                    modified: 0,
+                    size: 12,
+                    parts: Vec::new(),
+                },
+            ],
+        };
+        let bytes = index.encode();
+        let front = &bytes[..bytes.len().min(FRONT)];
+        assert_eq!(
+            Summary::peek(front),
+            Ok(Summary {
+                model: index.model.clone(),
+                dimensions: 3,
+                files: 2,
+            })
+        );
+        // the front alone is enough, whatever follows it
+        assert_eq!(Summary::peek(&bytes), Summary::peek(front));
+        assert!(Summary::peek(b"something else").is_err());
+        assert!(Summary::peek(HEADER).is_err());
     }
 
     #[test]

@@ -13,8 +13,8 @@ use librift::Component;
 use zbus::fdo;
 
 use crate::backend::{State, Status};
-use crate::models::Embedding;
 use crate::{chat, embed};
+use librift::models::Embedding;
 
 /// The longest question `Ask` takes, in characters.
 const LONGEST_QUESTION: usize = 4000;

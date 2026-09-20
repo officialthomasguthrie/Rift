@@ -2670,6 +2670,7 @@ dependencies = [
  "getrandom 0.3.4",
  "serde",
  "serde_json",
+ "toml",
  "zbus",
 ]
 
@@ -3923,7 +3924,6 @@ dependencies = [
  "librift",
  "serde",
  "serde_json",
- "toml",
  "zbus",
 ]
 

@@ -5,8 +5,8 @@
 //! hears, how the boot looks, and how a drive is written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
-//! which the asking side of the bus turns on, brings in zbus, and only the `disk` feature serde and
-//! getrandom.
+//! which the asking side of the bus turns on, brings in zbus, only the `disk` feature serde and
+//! getrandom, and only the `models` feature toml.
 
 pub mod airlock;
 pub mod appearance;
@@ -16,6 +16,8 @@ pub mod boot;
 pub mod bus;
 #[cfg(feature = "disk")]
 pub mod disk;
+#[cfg(feature = "models")]
+pub mod models;
 pub mod network;
 pub mod orbit;
 pub mod os;
@@ -24,6 +26,7 @@ pub mod release;
 pub mod search;
 pub mod session;
 pub mod sound;
+pub mod time;
 pub mod vault;
 pub mod wallpaper;
 
