@@ -450,7 +450,8 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "greeting", "boot", "screen", "wifi", "networks", "network", "wired", "address",
                  "bluetooth", "devices", "connected", "volume", "mute", "output", "outputs",
                  "input-volume", "input-mute", "input", "inputs", "battery", "ai", "model", "models",
-                 "tier", "search", "search-model", "indexed", "index", "indexing")
+                 "tier", "search", "search-model", "indexed", "index", "indexing", "snapshots",
+                 "snapshot", "backups", "backup", "backup-folder", "taking", "backing")
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -4312,6 +4313,47 @@ def main():
                 ok(f"the Search page says {embedding} reads {search_page.get('indexed')} files of home, "
                    f"and the button wrote the index again on this boot")
 
+            # the Backups page, over Vault. this runs before the timeline of step 6, so the
+            # snapshots it counts are the ones it takes itself, and the folder backups go to is
+            # chosen in step 6b, after this, so the page says there is none yet
+            run("rift-settings --page backups", "the Backups page")
+            if not wait_for(30, lambda: settings_state("the Backups page").get("page") == "backups"):
+                fail("rift-settings --page backups did not show that page")
+            backups_page = wait_for(120, lambda: next(
+                (found for found in [settings_state("the snapshots on the Backups page")]
+                 if found.get("snapshots") and found.get("backup-folder")), None))
+            if not backups_page:
+                said = settings_state("the Backups page once more")
+                _, printed = run("journalctl -b -u vault --no-pager -n 20 -o cat | cat", "vault's journal")
+                fail(f"the Backups page says snapshots {said.get('snapshots')!r} and backup-folder "
+                     f"{said.get('backup-folder')!r}: {without_console(printed).strip()[-400:]!r}")
+            if backups_page.get("backup-folder") != "none" or backups_page.get("backups") != "none":
+                fail(f"the Backups page says backups go to {backups_page.get('backup-folder')!r} with "
+                     f"{backups_page.get('backups')!r} of them, and no folder has been chosen yet")
+            snapshots_before = int(backups_page.get("snapshots"))
+            run("rift-settings --set snapshot now", "a snapshot taken from the Backups page")
+            page_took = wait_for(180, lambda: next(
+                (found for found in [settings_state("the snapshot the page took")]
+                 if found.get("taking") == "off"
+                 and int(found.get("snapshots", -1)) > snapshots_before), None))
+            if not page_took:
+                said = settings_state("the snapshots after the page took one")
+                fail(f"the Backups page says snapshots {said.get('snapshots')!r} with taking "
+                     f"{said.get('taking')!r} after it took one, and it said {snapshots_before} before")
+            if page_took.get("snapshot") != "just now":
+                fail(f"the Backups page says the newest snapshot was taken {page_took.get('snapshot')!r} "
+                     f"after it took one")
+            status, output = run("rift snapshot", "the snapshots vault lists")
+            in_vault = re.findall(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s*$", without_console(output), re.M)
+            if status != 0 or len(in_vault) < int(page_took.get("snapshots")):
+                fail(f"rift snapshot lists {len(in_vault)} snapshots and the page says "
+                     f"{page_took.get('snapshots')!r}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Backups page", f"{stem}-settings-backups{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon", "vault"), settle=3)
+            ok(f"the Backups page took a snapshot, {snapshots_before} to {page_took.get('snapshots')} of "
+               "them, which is what rift snapshot lists, and no backup disk is chosen yet")
+
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
             if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
@@ -4320,7 +4362,7 @@ def main():
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            for page in ("updates", "backups", "keyboard"):
+            for page in ("updates", "printers", "keyboard"):
                 run(f"rift-settings --page {page}", f"the {page} page")
                 if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
                     fail(f"rift-settings --page {page} did not show that page")
@@ -4565,6 +4607,46 @@ def main():
             fail("the backup disk could not be unmounted again")
         ok("rustic refuses the repository with a wrong password and opens it with the printed one, "
            "and the file's text is in none of its files")
+
+        # 6d. the Backups page over the same disk. step 5m saw the half of it with no folder chosen;
+        # here there is one with a backup in it, and the button makes another. the window was closed
+        # at the end of step 5m, so this opens it again on the page
+        if args.desktop:
+            on_disk = folder[len(disk):]
+            run("systemd-run --user --quiet --collect -- rift-settings --page backups",
+                "Settings on the Backups page again")
+            backup_page = wait_for(300, lambda: next(
+                (found for found in [settings_state("the Backups page with a disk behind it")]
+                 if found.get("page") == "backups"
+                 and found.get("backup-folder", "none") != "none"), None))
+            if not backup_page:
+                said = settings_state("the Backups page once more")
+                _, log = run("journalctl -b -u vault --no-pager -n 20 -o cat | cat", "vault's journal")
+                fail(f"the Backups page says backup-folder {said.get('backup-folder')!r} on the "
+                     f"{said.get('page')!r} page, and backups go to {on_disk} on the backup disk: "
+                     f"{without_console(log).strip()[-400:]!r}")
+            if backup_page.get("backup-folder") != on_disk:
+                fail(f"the Backups page says backups go to {backup_page.get('backup-folder')!r}, and "
+                     f"sudo vault target chose {on_disk} on the disk")
+            if backup_page.get("backups") != "1":
+                fail(f"the Backups page says {backup_page.get('backups')!r} backups are on the disk, "
+                     f"and rift backup now made one on this boot")
+            shot(f"{stem}-settings-backups-disk{extension}", "backups-page")
+            run("rift-settings --set backup now", "a backup made from the Backups page")
+            page_backed_up = wait_for(600, lambda: next(
+                (found for found in [settings_state("the backup the page made")]
+                 if found.get("backing") == "off" and found.get("backups") == "2"), None))
+            if not page_backed_up:
+                said = settings_state("the backups after the page made one")
+                _, log = run("journalctl -b -u vault --no-pager -n 20 -o cat | cat", "vault's journal")
+                fail(f"the Backups page says {said.get('backups')!r} backups with backing "
+                     f"{said.get('backing')!r} after it made one: {without_console(log).strip()[-400:]!r}")
+            status, printed = backup_cli("list", "the backups after the page made one")
+            if status != 0 or len(re.findall(r"^[0-9a-f]{8}  \S+Z\s*$", printed, re.M)) != 2:
+                fail(f"rift backup list exited with {status} without the two backups")
+            close_app(SETTINGS_APP, SETTINGS_APP_ID)
+            ok(f"the Backups page says backups go to {on_disk} on the backup disk, and made the "
+               f"second one of this boot from the page")
 
     # 6c. airlock. `rift run --sandbox` runs a command in bwrap, under landlock rules and a seccomp
     # filter. it gets the folder it runs in and the system's programs, nothing else of the owner's: not
