@@ -12,17 +12,19 @@ use iced::{
     Border, Center, Color, Element, Fill, Length, Size, Subscription, Task, Theme, theme, window,
 };
 use librift::appearance::{Accent, Look, Scheme, Theme as Mode};
+use librift::battery::Battery;
 use librift::bluetooth as bluetooth_picture;
 use librift::boot::Style;
 use librift::network;
 use librift::orbit::Host;
+use librift::sound::{self as sound_picture, Side};
 
 use crate::control::{self, Command};
 use crate::net::Joining;
 use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
-use crate::{about, appearance, bluetooth, displays, icons, net, watch};
+use crate::{about, appearance, bluetooth, displays, icons, net, power, sound, watch};
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
 /// the boot test all know it by.
@@ -64,6 +66,12 @@ pub struct Settings {
     pub network: Option<Result<network::Picture, String>>,
     /// What `BlueZ` says, the same way. `Ok(None)` is a machine with no adapter.
     pub bluetooth: Option<Result<Option<bluetooth_picture::Picture>, String>>,
+    /// What `PipeWire` says about the sound, the same way.
+    pub sound: Option<Result<sound_picture::Picture, String>>,
+    /// The half of the sound whose slider is being dragged, and where it stands.
+    pub moving: Option<(Side, u32)>,
+    /// What `UPower` says about the battery. `Ok(None)` is a machine that runs on the mains.
+    pub battery: Option<Result<Option<Battery>, String>>,
     /// The network being joined that asks for a password, and what has been typed for it.
     pub joining: Option<Joining>,
     /// What is happening: a join, or a device being connected.
@@ -104,6 +112,18 @@ pub enum Message {
     Network(Box<Result<network::Picture, String>>),
     /// What `BlueZ` says now.
     Bluetooth(Result<Option<bluetooth_picture::Picture>, String>),
+    /// What `PipeWire` says now.
+    Sound(Box<Result<sound_picture::Picture, String>>),
+    /// A volume slider moved, on one half of the sound.
+    Volume(Side, u32),
+    /// A volume slider was let go, so where it landed is written.
+    Volumed(Side),
+    /// The mute switch of one half of the sound.
+    Muted(Side, bool),
+    /// The device at this place in one half's list was pressed.
+    Pick(Side, usize),
+    /// What `UPower` says about the battery now.
+    Battery(Result<Option<Battery>, String>),
     /// The Wi-Fi switch.
     Wifi(bool),
     /// The network at this place in the list was pressed.
@@ -254,6 +274,9 @@ impl Settings {
             host: None,
             network: None,
             bluetooth: None,
+            sound: None,
+            moving: None,
+            battery: None,
             joining: None,
             doing: None,
             swept: false,
@@ -308,6 +331,8 @@ impl Settings {
         // and the same for the network and Bluetooth, which the window follows while it is open
         .chain(net::state(self))
         .chain(bluetooth::state(self))
+        .chain(sound::state(self))
+        .chain(power::state(self))
         .collect::<Vec<_>>()
         .join("\n")
             + "\n"
@@ -332,6 +357,8 @@ fn poke_the_shell() {
         .status();
 }
 
+/// What the owner asked for: a page, a press, a switch or a slider, from the window or from the
+/// socket. What a service answers back is in `answered`.
 fn update(state: &mut Settings, message: Message) -> Task<Message> {
     match message {
         Message::Show(page) => return show(state, page),
@@ -358,23 +385,19 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         }
         Message::Boot(style) => return appearance::write_style(style),
         Message::Scale(connector, scale) => return displays::set_scale(connector, scale),
-        Message::Network(picture) => {
-            state.network = Some(*picture);
-            // a network that has come up is no longer one waiting for a password
-            if state
-                .joining
-                .as_ref()
-                .is_some_and(|asked| on_network(state, asked.network.ssid.as_slice()))
-            {
-                state.joining = None;
-                state.doing = None;
-            }
-            if state.page == Page::Wifi && !state.swept {
-                state.swept = true;
-                return net::scan(state);
-            }
+        Message::Volume(side, level) => state.moving = Some((side, level)),
+        Message::Volumed(side) => {
+            state.problem = None;
+            return sound::set_volume(state, side);
         }
-        Message::Bluetooth(answered) => state.bluetooth = Some(answered),
+        Message::Muted(side, muted) => {
+            state.problem = None;
+            return sound::set_muted(state, side, muted);
+        }
+        Message::Pick(side, at) => {
+            state.problem = None;
+            return sound::pick(state, side, at);
+        }
         Message::Wifi(on) => {
             state.problem = None;
             return net::set_wifi(state, on);
@@ -393,6 +416,44 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             return bluetooth::set_powered(state, on);
         }
         Message::Device(at) => return bluetooth::connect(state, at),
+        Message::Wrote => state.wrote(),
+        Message::Greeting(on) => {
+            state.greeting = on;
+            state.problem = librift::appearance::set_greeting(on).err();
+        }
+        Message::Close => return iced::exit(),
+        answer => return answered(state, answer),
+    }
+    Task::none()
+}
+
+/// What a service, the socket or a write that has finished answered. It is the other half of
+/// `update`: what the owner does is above, what the machine says back is here.
+fn answered(state: &mut Settings, message: Message) -> Task<Message> {
+    match message {
+        Message::Network(picture) => {
+            state.network = Some(*picture);
+            // a network that has come up is no longer one waiting for a password
+            if state
+                .joining
+                .as_ref()
+                .is_some_and(|asked| on_network(state, asked.network.ssid.as_slice()))
+            {
+                state.joining = None;
+                state.doing = None;
+            }
+            if state.page == Page::Wifi && !state.swept {
+                state.swept = true;
+                return net::scan(state);
+            }
+        }
+        Message::Bluetooth(answer) => state.bluetooth = Some(answer),
+        Message::Sound(answer) => {
+            state.sound = Some(*answer);
+            // the slider follows PipeWire again, now that it says what the level is
+            state.moving = None;
+        }
+        Message::Battery(answer) => state.battery = Some(answer),
         Message::Acted(Ok(())) => {
             state.problem = None;
             state.doing = None;
@@ -413,12 +474,7 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             state.host = Some(Ok(host));
         }
         Message::Scaled(Err(why)) => state.problem = Some(why),
-        Message::BootStyle(answered) => state.boot = Some(answered),
-        Message::Wrote => state.wrote(),
-        Message::Greeting(on) => {
-            state.greeting = on;
-            state.problem = librift::appearance::set_greeting(on).err();
-        }
+        Message::BootStyle(answer) => state.boot = Some(answer),
         Message::Host(host) => state.host = Some(host),
         Message::Said(command) => return said(state, command),
         Message::Shot(shot) => {
@@ -429,7 +485,8 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             }
             return iced::exit();
         }
-        Message::Close => return iced::exit(),
+        // everything else is the owner's, and `update` has it
+        _ => {}
     }
     Task::none()
 }
@@ -511,6 +568,23 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
         "greeting" => Task::done(Message::Greeting(!value.trim().eq_ignore_ascii_case("off"))),
         "wifi" => Task::done(Message::Wifi(on(value))),
         "bluetooth" => Task::done(Message::Power(on(value))),
+        // moved, then let go, in that order, the way the slider itself does it
+        "volume" | "input-volume" => {
+            let side = if name == "volume" {
+                Side::Output
+            } else {
+                Side::Input
+            };
+            number(100).map_or_else(Task::none, |level| {
+                Task::done(Message::Volume(side, level)).chain(Task::done(Message::Volumed(side)))
+            })
+        }
+        "mute" => Task::done(Message::Muted(Side::Output, on(value))),
+        "input-mute" => Task::done(Message::Muted(Side::Input, on(value))),
+        "output" => sound::named(state, Side::Output, value)
+            .map_or_else(Task::none, |at| Task::done(Message::Pick(Side::Output, at))),
+        "input" => sound::named(state, Side::Input, value)
+            .map_or_else(Task::none, |at| Task::done(Message::Pick(Side::Input, at))),
         // a network and a paired device are named, since neither list is in an order anyone typed
         "join" => {
             net::named(state, value).map_or_else(Task::none, |at| Task::done(Message::Join(at)))
@@ -536,6 +610,8 @@ fn subscription(_: &Settings) -> Subscription<Message> {
         terminal(),
         watch::network(),
         watch::bluetooth(),
+        watch::sound(),
+        watch::battery(),
     ])
 }
 
@@ -686,6 +762,8 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Wifi => net::wifi(state, look),
         Page::Network => net::wired(state, look),
         Page::Bluetooth => bluetooth::view(state, look),
+        Page::Sound => sound::view(state, look),
+        Page::Power => power::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),

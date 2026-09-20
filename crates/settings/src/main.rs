@@ -14,6 +14,8 @@ mod displays;
 mod icons;
 mod net;
 mod page;
+mod power;
+mod sound;
 mod theme;
 mod ui;
 mod watch;

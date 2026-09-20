@@ -188,16 +188,13 @@ impl Page {
     #[must_use]
     pub const fn note(self) -> &'static str {
         match self {
-            Self::Sound => {
-                "Sound devices are not in Settings yet. The system menu has the volume, and wpctl \
-                 picks the output from a terminal."
-            }
-            Self::Power => "Power is not in Settings yet.",
             Self::Wifi
             | Self::Network
             | Self::Bluetooth
-            | Self::Appearance
             | Self::Displays
+            | Self::Sound
+            | Self::Power
+            | Self::Appearance
             | Self::About => "",
             Self::Dock => {
                 "The dock is not in Settings yet. A right click on an app in the dock pins it or \
@@ -264,12 +261,14 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 6] = [
+    const REAL: [Page; 8] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
-        Page::Appearance,
         Page::Displays,
+        Page::Sound,
+        Page::Power,
+        Page::Appearance,
         Page::About,
     ];
 
