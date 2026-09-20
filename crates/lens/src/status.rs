@@ -1,52 +1,13 @@
 //! What the icons at the right of the bar and the system menu say: the network from
 //! `NetworkManager`, Bluetooth from `BlueZ` and the battery from `UPower`, all read off the system
-//! bus, and the volume and the brightness from the programs that own them, `wpctl` and
-//! `brightnessctl`. An icon is there only when the system has something to say, so a machine with
-//! no battery shows no battery.
-
-use std::collections::HashSet;
-use std::process::Command;
+//! bus, the volume from `librift::sound` and the brightness from `brightnessctl`. An icon is there
+//! only when the system has something to say, so a machine with no battery shows no battery.
 
 use librift::battery::{Battery, Charge};
 use librift::bluetooth;
 use librift::network::{self, Link};
-
-/// The default sink's volume, as a percentage, and whether it is muted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Volume {
-    /// Percent of full. `PipeWire` allows more than a hundred.
-    pub level: u16,
-    /// Muted, whatever the level is.
-    pub muted: bool,
-}
-
-impl Volume {
-    /// The name of the icon for this level.
-    #[must_use]
-    pub fn icon(self) -> &'static str {
-        if self.muted || self.level == 0 {
-            "audio-volume-muted-symbolic"
-        } else if self.level <= 33 {
-            "audio-volume-low-symbolic"
-        } else if self.level <= 66 {
-            "audio-volume-medium-symbolic"
-        } else if self.level <= 100 {
-            "audio-volume-high-symbolic"
-        } else {
-            "audio-volume-overamplified-symbolic"
-        }
-    }
-
-    /// The words `lens --state` prints for it.
-    #[must_use]
-    pub fn word(self) -> String {
-        if self.muted {
-            format!("{} muted", self.level)
-        } else {
-            self.level.to_string()
-        }
-    }
-}
+use librift::os::{ask, change};
+use librift::sound::{Side, Volume};
 
 /// Everything the right of the bar and the system menu show.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -77,7 +38,7 @@ impl Status {
             names.push("bluetooth-active-symbolic".to_string());
         }
         if let Some(volume) = self.volume {
-            names.push(volume.icon().to_string());
+            names.push(volume.icon(Side::Output).to_string());
         }
         if let Some(battery) = self.battery {
             names.push(battery_icon(battery));
@@ -198,108 +159,13 @@ pub fn battery_word(battery: Battery) -> String {
     format!("{}{state}", battery.level)
 }
 
-/// What a program printed, or `None` when it is not there or it failed.
-fn ask<const N: usize>(program: &str, args: [&str; N]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        None
-    }
-}
-
-/// Run a program that changes something, and say what went wrong when it did.
-fn change(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("Could not run {program}: {e}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let said = String::from_utf8_lossy(&output.stderr);
-    Err(said
-        .lines()
-        .next()
-        .filter(|line| !line.trim().is_empty())
-        .map_or_else(
-            || format!("{program} failed ({})", output.status),
-            |line| line.trim().to_string(),
-        ))
-}
-
-/// The sink `wpctl` means when it is not told which.
-const SINK: &str = "@DEFAULT_AUDIO_SINK@";
-
-/// The default sink's volume now.
-#[must_use]
-pub fn volume() -> Option<Volume> {
-    read_volume(&ask("wpctl", ["get-volume", SINK])?)
-}
-
-/// `wpctl get-volume @DEFAULT_AUDIO_SINK@` prints `Volume: 0.40` and `[MUTED]` when it is muted.
-fn read_volume(printed: &str) -> Option<Volume> {
-    let rest = printed.split_once("Volume:")?.1;
-    let share: f32 = rest.split_whitespace().next()?.parse().ok()?;
-    if !share.is_finite() || share < 0.0 {
-        return None;
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let level = (share * 100.0).round().min(f32::from(u16::MAX)) as u16;
-    Some(Volume {
-        level,
-        muted: printed.contains("[MUTED]"),
-    })
-}
-
-/// Set the default sink's volume, and unmute it: moving the slider is asking to hear something.
-///
-/// # Errors
-///
-/// When `wpctl` is not there or refuses.
-pub fn set_volume(percent: u8) -> Result<(), String> {
-    change("wpctl", &["set-volume", SINK, &fraction(percent)])?;
-    change("wpctl", &["set-mute", SINK, "0"])
-}
-
-/// A percentage as the fraction `wpctl` takes: 40 is `0.40`.
-fn fraction(percent: u8) -> String {
-    let percent = percent.min(100);
-    format!("{}.{:02}", percent / 100, percent % 100)
-}
-
-/// Mute the default sink, or unmute it.
-///
-/// # Errors
-///
-/// When `wpctl` is not there or refuses.
-pub fn toggle_mute() -> Result<(), String> {
-    change("wpctl", &["set-mute", SINK, "toggle"])
-}
-
-/// Turn the default sink up by a step, never past full, and unmute it: a key that turns the sound
-/// up is asking to hear something. Down is the same step the other way and leaves a muted sink
-/// muted.
-///
-/// # Errors
-///
-/// When `wpctl` is not there or refuses.
-pub fn step_volume(up: bool) -> Result<(), String> {
-    if up {
-        change("wpctl", &["set-mute", SINK, "0"])?;
-        change("wpctl", &["set-volume", SINK, "0.05+", "-l", "1.0"])
-    } else {
-        change("wpctl", &["set-volume", SINK, "0.05-"])
-    }
-}
-
 /// The backlight in percent, when the machine has one. Only the backlight class counts: the
 /// keyboard's lights are brightness devices too.
 #[must_use]
 pub fn brightness() -> Option<u8> {
     read_brightness(&ask(
         "brightnessctl",
-        ["--machine-readable", "--class=backlight", "info"],
+        &["--machine-readable", "--class=backlight", "info"],
     )?)
 }
 
@@ -351,114 +217,10 @@ pub fn set_brightness(percent: u8) -> Result<(), String> {
     )
 }
 
-/// Reads what `pw-mon` prints and says which of its lines mean the sound may have changed: a sink
-/// or a card that came, changed or went. A program connecting to `PipeWire` is an event too, and
-/// every `wpctl` the shell runs is one, so those are not.
-#[derive(Debug, Default)]
-pub struct Monitor {
-    /// The event the lines are about now.
-    event: Option<Event>,
-    /// The object it is about.
-    id: Option<u32>,
-    /// The nodes and devices seen so far, so their removal can be told from a program's.
-    audio: HashSet<u32>,
-}
-
-/// The three kinds of event `pw-mon` prints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Event {
-    Added,
-    Changed,
-    Removed,
-}
-
-impl Monitor {
-    /// Take one line in. True when the volume should be read again.
-    pub fn line(&mut self, line: &str) -> bool {
-        let line = line.trim();
-        let event = match line {
-            "added:" => Some(Event::Added),
-            "changed:" => Some(Event::Changed),
-            "removed:" => Some(Event::Removed),
-            _ => None,
-        };
-        if event.is_some() {
-            self.event = event;
-            self.id = None;
-            return false;
-        }
-        if let Some(id) = line
-            .strip_prefix("id: ")
-            .and_then(|id| id.trim().parse().ok())
-        {
-            self.id = Some(id);
-            // a removal says nothing after the id
-            return self.event == Some(Event::Removed) && self.audio.remove(&id);
-        }
-        if let Some(kind) = line.strip_prefix("type: ") {
-            let audio = kind.starts_with("PipeWire:Interface:Node")
-                || kind.starts_with("PipeWire:Interface:Device");
-            if !audio {
-                return false;
-            }
-            if let Some(id) = self.id {
-                self.audio.insert(id);
-            }
-            return matches!(self.event, Some(Event::Added | Event::Changed));
-        }
-        false
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use librift::network::{Network, Picture, Security, Wired, Wireless};
-
-    #[test]
-    fn the_volume_line_reads_back() {
-        assert_eq!(
-            read_volume("Volume: 0.40\n"),
-            Some(Volume {
-                level: 40,
-                muted: false
-            })
-        );
-        assert_eq!(
-            read_volume("Volume: 0.65 [MUTED]\n"),
-            Some(Volume {
-                level: 65,
-                muted: true
-            })
-        );
-        assert_eq!(
-            read_volume("Volume: 1.30\n"),
-            Some(Volume {
-                level: 130,
-                muted: false
-            })
-        );
-        assert_eq!(read_volume("Node 45 not found\n"), None);
-    }
-
-    #[test]
-    fn the_volume_icon_follows_the_level() {
-        let at = |level, muted| Volume { level, muted }.icon();
-        assert_eq!(at(0, false), "audio-volume-muted-symbolic");
-        assert_eq!(at(70, true), "audio-volume-muted-symbolic");
-        assert_eq!(at(20, false), "audio-volume-low-symbolic");
-        assert_eq!(at(50, false), "audio-volume-medium-symbolic");
-        assert_eq!(at(100, false), "audio-volume-high-symbolic");
-        assert_eq!(at(130, false), "audio-volume-overamplified-symbolic");
-    }
-
-    #[test]
-    fn a_percentage_is_the_fraction_wpctl_takes() {
-        assert_eq!(fraction(40), "0.40");
-        assert_eq!(fraction(5), "0.05");
-        assert_eq!(fraction(100), "1.00");
-        assert_eq!(fraction(200), "1.00");
-    }
 
     #[test]
     fn the_brightness_comes_from_the_backlight() {
@@ -606,27 +368,5 @@ mod tests {
                 "audio-volume-muted-symbolic"
             ]
         );
-    }
-
-    #[test]
-    fn a_sink_that_changes_is_worth_a_look_and_a_program_that_connects_is_not() {
-        let mut monitor = Monitor::default();
-        let feed = |monitor: &mut Monitor, lines: &str| {
-            lines
-                .lines()
-                .map(|line| monitor.line(line))
-                .filter(|wanted| *wanted)
-                .count()
-        };
-        let sink = "changed:\n\tid: 47\n\tpermissions: r-xm-\n\ttype: PipeWire:Interface:Node (version 3)\n";
-        assert_eq!(feed(&mut monitor, sink), 1);
-        // wpctl itself: a client comes and goes
-        let client = "added:\n\tid: 56\n\tpermissions: rwxm-\n\ttype: PipeWire:Interface:Client (version 3)\n\tproperties:\n\t\tapplication.name = \"wpctl\"\nremoved:\n\tid: 56\n";
-        assert_eq!(feed(&mut monitor, client), 0);
-        // the sink going away is worth a look, once
-        assert_eq!(feed(&mut monitor, "removed:\n\tid: 47\n"), 1);
-        assert_eq!(feed(&mut monitor, "removed:\n\tid: 47\n"), 0);
-        let card = "added:\n\tid: 46\n\ttype: PipeWire:Interface:Device (version 3)\n";
-        assert_eq!(feed(&mut monitor, card), 1);
     }
 }

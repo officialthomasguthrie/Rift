@@ -2,7 +2,8 @@
 //! with arguments and run as that program, never through a shell. Lens's field and the rift
 //! command both plan them here. The system tools do the work for now: nmcli, brightnessctl,
 //! wpctl, systemctl and horizon's own ipc. The D-Bus calls the decision record asks for come with
-//! the services that will answer them.
+//! the services that will answer them. Running one of those tools and reading what it printed is
+//! here too, since every module that asks one does it the same way.
 
 use std::process::Command;
 
@@ -208,10 +209,22 @@ fn power(args: &[&str]) -> Result<Action, &'static str> {
 ///
 /// When the program is missing, cannot start, or exits with a failure.
 pub fn run(action: &Action) -> Result<String, String> {
-    let output = Command::new(action.program)
-        .args(&action.args)
+    let args: Vec<&str> = action.args.iter().map(String::as_str).collect();
+    asked(action.program, &args)
+}
+
+/// Run a program and wait for it. Ok holds what it printed, Err one line on what went wrong. The
+/// programs the system tools are asked through all answer this way, so the shell, the rift command
+/// and Settings read them the same.
+///
+/// # Errors
+///
+/// When the program is missing, cannot start, or exits with a failure.
+pub fn asked(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
         .output()
-        .map_err(|e| format!("Could not run {}: {e}", action.program))?;
+        .map_err(|e| format!("Could not run {program}: {e}"))?;
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
     if output.status.success() {
         Ok(text(&output.stdout))
@@ -219,9 +232,24 @@ pub fn run(action: &Action) -> Result<String, String> {
         let why = text(&output.stderr);
         let why = why.lines().next().unwrap_or("");
         if why.is_empty() {
-            Err(format!("{} failed ({})", action.program, output.status))
+            Err(format!("{program} failed ({})", output.status))
         } else {
             Err(why.to_string())
         }
     }
+}
+
+/// What a program printed, or `None` when it is not there or it failed.
+#[must_use]
+pub fn ask(program: &str, args: &[&str]) -> Option<String> {
+    asked(program, args).ok()
+}
+
+/// Run a program that changes something, and say what went wrong when it did.
+///
+/// # Errors
+///
+/// When the program is missing, cannot start, or refuses.
+pub fn change(program: &str, args: &[&str]) -> Result<(), String> {
+    asked(program, args).map(|_| ())
 }

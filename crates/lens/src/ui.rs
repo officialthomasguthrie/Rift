@@ -20,6 +20,7 @@ use iced_layershell::settings::{LayerShellSettings, Settings};
 use librift::appearance;
 use librift::battery::Battery;
 use librift::os::{self, Action};
+use librift::sound::{self, Side, Volume};
 use librift::{bluetooth, network, quasar, session};
 
 use crate::access;
@@ -39,7 +40,7 @@ use crate::notice::{self, Effect, Fitted, Notices, Notification, Outbox};
 use crate::nu;
 use crate::popup::{self, Popup};
 use crate::route::{self, Interpretation};
-use crate::status::{self, Status, Volume};
+use crate::status::{self, Status};
 use crate::system;
 use crate::theme::Palette;
 use crate::watch::{self, Latest};
@@ -566,7 +567,7 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
         recording: access::running(access::Tool::Recorder).and_then(|(_, file)| file),
         keys: 0,
         dismissed: None,
-        volume: Latest::new(|level| report(status::set_volume(level))),
+        volume: Latest::new(|level| report(sound::set_volume(Side::Output, level))),
         brightness: Latest::new(|level| report(status::set_brightness(level))),
     };
     remember(&state);
@@ -655,7 +656,7 @@ fn ticker() -> Subscription<Message> {
                     return;
                 }
                 if sender
-                    .unbounded_send(Message::Sound(status::volume()))
+                    .unbounded_send(Message::Sound(sound::volume(Side::Output)))
                     .is_err()
                 {
                     return;
@@ -1074,7 +1075,7 @@ fn system_event(state: &mut Lens, event: system::Event) -> Task<Message> {
             }
             Task::none()
         }
-        Event::Mute => off_thread(status::toggle_mute, Message::Acted),
+        Event::Mute => off_thread(|| sound::toggle_mute(Side::Output), Message::Acted),
         Event::Brightness(level) => {
             if let Some(menu) = state.system.as_mut() {
                 menu.brightness = Some(level);

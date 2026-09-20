@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use iced::widget::{container, row, space};
 use iced::{Border, Element, Length, Theme, window};
+use librift::sound::{Side, Volume};
 
 use crate::control::Level;
 use crate::icons;
-use crate::status::Volume;
 use crate::theme::Palette;
 use crate::ui::Message;
 
@@ -53,7 +53,7 @@ pub fn icon(level: Level) -> &'static str {
             level: u16::from(level),
             muted,
         }
-        .icon(),
+        .icon(Side::Output),
         Level::Brightness(_) => "display-brightness-symbolic",
     }
 }

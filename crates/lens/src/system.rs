@@ -7,6 +7,7 @@ use iced::widget::{button, column, container, row, slider, space, text, toggler}
 use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Theme, window};
 use librift::battery::Battery;
 use librift::network::{Link, Network};
+use librift::sound::{Side, Volume};
 
 use crate::bar;
 use crate::icons;
@@ -276,11 +277,11 @@ fn part_view<'a>(
         Part::Volume => {
             let level = volume_level(status, menu);
             let muted = status.volume.is_some_and(|volume| volume.muted);
-            let icon = status::Volume {
+            let icon = Volume {
                 level: u16::from(level),
                 muted,
             }
-            .icon();
+            .icon(Side::Output);
             slider_row(
                 look,
                 icon,
@@ -663,7 +664,6 @@ pub fn fill(look: Palette, state: button::Status) -> button::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::Volume;
     use librift::battery::Charge;
     use librift::network::{Picture, Security, Wired, Wireless};
 

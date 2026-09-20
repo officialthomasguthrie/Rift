@@ -20,6 +20,19 @@ pub enum Charge {
     Idle,
 }
 
+impl Charge {
+    /// The word a state line prints for it.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Charging => "charging",
+            Self::Discharging => "discharging",
+            Self::Full => "charged",
+            Self::Idle => "idle",
+        }
+    }
+}
+
 /// The battery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Battery {
@@ -170,6 +183,22 @@ mod tests {
         // no estimate yet
         assert_eq!(at(Charge::Discharging, 0).time(), None);
         assert_eq!(at(Charge::Idle, 5_000).time(), None);
+    }
+
+    #[test]
+    fn each_state_has_a_word_of_its_own() {
+        let mut words = [
+            Charge::Charging,
+            Charge::Discharging,
+            Charge::Full,
+            Charge::Idle,
+        ]
+        .map(Charge::word);
+        words.sort_unstable();
+        let before = words.len();
+        let mut list = words.to_vec();
+        list.dedup();
+        assert_eq!(list.len(), before, "two states share a word");
     }
 
     #[test]

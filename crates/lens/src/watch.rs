@@ -11,9 +11,9 @@ use std::thread;
 use std::time::Duration;
 
 use iced::Subscription;
-use librift::{battery, bluetooth, bus, network};
+use librift::sound::{Monitor, Side};
+use librift::{battery, bluetooth, bus, network, sound};
 
-use crate::status::{self, Monitor};
 use crate::ui::Message;
 
 /// How long to wait before starting `pw-mon` again when it went away.
@@ -57,7 +57,7 @@ pub fn bluetooth() -> Subscription<Message> {
 /// The volume, now and whenever a sink or a card changes.
 pub fn sound() -> Subscription<Message> {
     Subscription::run_with("sound", |_| {
-        follow(monitor, || Message::Sound(status::volume()))
+        follow(monitor, || Message::Sound(sound::volume(Side::Output)))
     })
 }
 
