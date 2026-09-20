@@ -448,7 +448,8 @@ BOOT_STYLE_FILE = "rift/boot-style"
 # what rift-settings --state prints, one word each
 SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text", "terminal",
                  "greeting", "boot", "screen", "wifi", "networks", "network", "wired", "address",
-                 "bluetooth", "devices", "connected")
+                 "bluetooth", "devices", "connected", "volume", "mute", "output", "outputs",
+                 "input-volume", "input-mute", "input", "inputs", "battery")
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -4123,6 +4124,77 @@ def main():
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             ok(f"the Bluetooth page says this machine has no adapter, and BlueZ is {bluez}")
 
+            # the Sound and Power pages, over the two things the shell's system menu has a
+            # slider and a battery row for. the vm has one sink, through the emulated card, and no
+            # battery: the page names that sink, sets its volume and mutes it, and wpctl says the
+            # same on this same boot
+            run("rift-settings --page sound", "the Sound page")
+            if not wait_for(30, lambda: settings_state("the Sound page").get("page") == "sound"):
+                fail("rift-settings --page sound did not show that page")
+            sink_name = wait_for(60, lambda: next(
+                (found.get("output") for found in [settings_state("the sink on the Sound page")]
+                 if found.get("output", "none") not in ("none", "") and found.get("outputs") != "0"),
+                None))
+            if not sink_name:
+                said = settings_state("the sink on the Sound page")
+                fail(f"the Sound page says output {said.get('output')!r} of {said.get('outputs')!r}, "
+                     "and the vm has one sink")
+            _, output = run("wpctl inspect @DEFAULT_AUDIO_SINK@ | cat", "what PipeWire calls the sink")
+            inspected = without_console(output)
+            if sink_name not in inspected:
+                fail(f"the Sound page calls the sink {sink_name!r}, and wpctl inspect says "
+                     f"{inspected.strip()[-400:]!r}")
+
+            sound_before = volume_now()
+            if sound_before is None:
+                fail("wpctl reads no volume for the default sink while the Sound page is up")
+            sound_wanted = 25 if sound_before >= 0.5 else 75
+            status, output = run(f"rift-settings --set volume {sound_wanted}",
+                                 "the volume on the Sound page")
+            if status != 0:
+                fail(f"rift-settings --set volume exited with {status}: "
+                     f"{without_console(output).strip()[-300:]!r}")
+            if not wait_for(30, lambda: next(
+                    (True for level in [volume_now()]
+                     if level is not None and abs(level - sound_wanted / 100) <= 0.01), None)):
+                fail(f"the Sound page set the volume to {sound_wanted} and wpctl says "
+                     f"{volume_now()}, it was {sound_before}")
+            if not wait_for(30, lambda: settings_state("the level the page says").get("volume")
+                            == str(sound_wanted)):
+                fail(f"the Sound page says volume "
+                     f"{settings_state('the level again').get('volume')!r} after it was set to "
+                     f"{sound_wanted}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Sound page", f"{stem}-settings-sound{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+
+            run("rift-settings --set mute on", "the mute switch on the Sound page")
+            if not wait_for(30, lambda: settings_state("the mute switch").get("mute") == "on"):
+                fail(f"the Sound page says mute {settings_state('the switch again').get('mute')!r} "
+                     "after it was turned on")
+            _, output = run("wpctl get-volume @DEFAULT_AUDIO_SINK@", "whether the sink is muted")
+            if "MUTED" not in without_console(output):
+                fail(f"the Sound page muted the sink and wpctl says "
+                     f"{without_console(output).strip()!r}")
+            run("rift-settings --set mute off", "the mute switch off again")
+            if not wait_for(30, lambda: settings_state("the mute switch off").get("mute") == "off"):
+                fail("the Sound page still says mute on after the switch was turned off")
+            # and the level back where the rest of the test left it
+            run(f"rift-settings --set volume {round(sound_before * 100)}", "the volume back")
+            ok(f"the Sound page names the sink {sink_name}, set it to {sound_wanted} per cent and "
+               f"muted it, and wpctl says so on the same boot")
+
+            run("rift-settings --page power", "the Power page")
+            if not wait_for(30, lambda: settings_state("the Power page").get("page") == "power"):
+                fail("rift-settings --page power did not show that page")
+            if not wait_for(60, lambda: settings_state("the Power page").get("battery") == "none"):
+                said = settings_state("the Power page").get("battery")
+                fail(f"the Power page says battery {said!r}, and this machine has no battery")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Power page", f"{stem}-settings-power{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            ok("the Power page says this machine has no battery, which is what UPower answers")
+
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
             if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
@@ -4131,7 +4203,7 @@ def main():
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            for page in ("sound", "updates", "backups"):
+            for page in ("updates", "backups", "keyboard"):
                 run(f"rift-settings --page {page}", f"the {page} page")
                 if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
                     fail(f"rift-settings --page {page} did not show that page")
