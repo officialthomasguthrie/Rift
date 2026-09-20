@@ -449,7 +449,8 @@ BOOT_STYLE_FILE = "rift/boot-style"
 SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text", "terminal",
                  "greeting", "boot", "screen", "wifi", "networks", "network", "wired", "address",
                  "bluetooth", "devices", "connected", "volume", "mute", "output", "outputs",
-                 "input-volume", "input-mute", "input", "inputs", "battery")
+                 "input-volume", "input-mute", "input", "inputs", "battery", "ai", "model", "models",
+                 "tier", "search", "search-model", "indexed", "index", "indexing")
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -4198,6 +4199,118 @@ def main():
             look(f"{SETTINGS_APP} on the Power page", f"{stem}-settings-power{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             ok("the Power page says this machine has no battery, which is what UPower answers")
+
+            # the AI and Search pages, the two over Quasar. step 4 read the model and the tier off
+            # the bus and step 4c the embedding model and the index of home; each page says the same
+            # about the same boot, and the size of model this machine runs is a setting the page
+            # writes into the host profile through Orbit
+            if args.models:
+
+                def orbit_tier(what):
+                    """The size of model the host profile says, off Orbit's own interface."""
+                    _, told = run(f"busctl --system get-property {bus} {obj} {bus} AiTier", what)
+                    found = re.search(r's "(\w+)"', without_console(told))
+                    return found.group(1) if found else without_console(told).strip()[-100:]
+
+                def index_written(what):
+                    """When the search index was last written, in seconds since 1970."""
+                    _, told = run("stat -c written=%Y ~/.cache/rift/search.index", what)
+                    found = re.search(r"written=(\d+)", without_console(told))
+                    return found.group(1) if found else None
+
+                run("rift-settings --page ai", "the AI page")
+                if not wait_for(30, lambda: settings_state("the AI page").get("page") == "ai"):
+                    fail("rift-settings --page ai did not show that page")
+                ai_page = wait_for(60, lambda: next(
+                    (found for found in [settings_state("the model on the AI page")]
+                     if found.get("ai") == "ready" and found.get("tier")), None))
+                if not ai_page:
+                    said = settings_state("the model on the AI page")
+                    fail(f"the AI page says ai {said.get('ai')!r} with model {said.get('model')!r} for "
+                         f"tier {said.get('tier')!r}, and the bus says quasar is ready with "
+                         f"{quasar_model} for {quasar_tier}")
+                if ai_page.get("model") != quasar_model or ai_page.get("tier") != quasar_tier:
+                    fail(f"the AI page says model {ai_page.get('model')!r} for tier "
+                         f"{ai_page.get('tier')!r}, the bus says {quasar_model} for {quasar_tier}")
+                # the only model on the drive is the one the test put in @models, and the page counts it
+                if ai_page.get("models") != "1":
+                    fail(f"the AI page says {ai_page.get('models')!r} models are on the drive, and the "
+                         f"test put one there")
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                look(f"{SETTINGS_APP} on the AI page", f"{stem}-settings-ai{extension}", 60,
+                     apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+                ok(f"the AI page says quasar runs {quasar_model} for the {quasar_tier} tier, which is "
+                   f"what the bus says on this boot, with one model on the drive")
+
+                # the size is a setting: the page writes it through Orbit, which puts it in the host
+                # profile and says so on the bus. quasar picked its model when it started and keeps
+                # it, which is what the page says under the rows
+                other_tier = "medium" if quasar_tier != "medium" else "large"
+                run(f"rift-settings --set tier {other_tier}", f"the model size set to {other_tier}")
+                if not wait_for(60, lambda: settings_state("the size on the AI page").get("tier") == other_tier):
+                    said = settings_state("the size again").get("tier")
+                    _, printed = run("journalctl -b -u orbit --no-pager -n 20 -o cat | cat", "orbit's journal")
+                    print(f"\nboot-test: orbit's journal:\n{without_console(printed)}", flush=True)
+                    fail(f"the AI page says tier {said!r} after it was set to {other_tier}")
+                tier_on_the_bus = orbit_tier("the size of model on the bus")
+                if tier_on_the_bus != other_tier:
+                    fail(f"Orbit says the size of model is {tier_on_the_bus!r}, the page set {other_tier}")
+                if quasar_prop("Model") != quasar_model:
+                    fail(f"quasar runs {quasar_prop('Model')} after the size was set to {other_tier}, and "
+                         f"it picks a model when it starts, so it keeps {quasar_model}")
+                run(f"rift-settings --set tier {ai_tier}", "the model size back")
+                if not wait_for(60, lambda: settings_state("the size put back").get("tier") == ai_tier):
+                    fail(f"the AI page says tier {settings_state('the size once more').get('tier')!r} "
+                         f"after it was put back to {ai_tier}")
+                if orbit_tier("the size of model on the bus again") != ai_tier:
+                    fail(f"Orbit says the size of model is {orbit_tier('the size once more')!r} after it "
+                         f"was put back to {ai_tier}")
+                ok(f"the AI page set the model size to {other_tier} in the host profile and back to "
+                   f"{ai_tier}, and quasar keeps {quasar_model} until it starts again")
+
+                run("rift-settings --page search", "the Search page")
+                if not wait_for(30, lambda: settings_state("the Search page").get("page") == "search"):
+                    fail("rift-settings --page search did not show that page")
+                search_page = wait_for(60, lambda: next(
+                    (found for found in [settings_state("the index on the Search page")]
+                     if found.get("search") == "ready" and found.get("indexed", "none") != "none"),
+                    None))
+                if not search_page:
+                    said = settings_state("the index on the Search page")
+                    fail(f"the Search page says search {said.get('search')!r} with {said.get('indexed')!r} "
+                         f"files indexed, and step 4c indexed {len(documents)} files with {embedding}")
+                if search_page.get("search-model") != embedding:
+                    fail(f"the Search page says the model is {search_page.get('search-model')!r}, the bus "
+                         f"says {embedding}")
+                if int(search_page.get("indexed")) < len(documents):
+                    fail(f"the Search page says {search_page.get('indexed')} files are indexed, and step "
+                         f"4c wrote {len(documents)} of them into home")
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                look(f"{SETTINGS_APP} on the Search page", f"{stem}-settings-search{extension}", 60,
+                     apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+
+                # the button runs the command the timer runs, which writes the index file again
+                index_before = index_written("when the index was last written")
+                if not index_before:
+                    fail("stat says nothing about ~/.cache/rift/search.index, and step 4c wrote it")
+                run("rift-settings --set index now", "the index brought up to date from the page")
+                if not wait_for(240, lambda: index_written("when the index was written") != index_before):
+                    _, printed = run("journalctl --user -b -o cat -n 20 | cat", "the user manager's log")
+                    fail(f"the index was last written at {index_before} before the page was pressed and "
+                         f"{index_written('when the index was written')} after: "
+                         f"{without_console(printed).strip()[-400:]!r}")
+                indexed_again = wait_for(120, lambda: next(
+                    (found for found in [settings_state("the index after the update")]
+                     if found.get("indexing") == "off" and found.get("index") == "just now"), None))
+                if not indexed_again:
+                    said = settings_state("the index after the update")
+                    fail(f"the Search page says index {said.get('index')!r} with indexing "
+                         f"{said.get('indexing')!r} after it brought the index up to date")
+                if indexed_again.get("indexed") != search_page.get("indexed"):
+                    fail(f"the Search page says {indexed_again.get('indexed')!r} files are indexed after "
+                         f"the update, and it said {search_page.get('indexed')!r} before it")
+                ok(f"the Search page says {embedding} reads {search_page.get('indexed')} files of home, "
+                   f"and the button wrote the index again on this boot")
 
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
