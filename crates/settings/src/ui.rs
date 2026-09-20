@@ -434,19 +434,23 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
     Task::none()
 }
 
-/// Show a page. The Wi-Fi page asks the card to sweep as it comes up, so the list is what is
-/// around now rather than what was around when the window opened.
+/// Show a page. What went wrong on the page that was up, and what it was doing, belong to that
+/// page and are left behind. The Wi-Fi page asks the card to sweep as it comes up, so the list is
+/// what is around now rather than what was around when the window opened; leaving it drops a
+/// password half typed.
 fn show(state: &mut Settings, page: Page) -> Task<Message> {
     if state.page == page {
         return Task::none();
     }
     state.page = page;
     state.problem = None;
+    state.doing = None;
     if page == Page::Wifi {
         state.swept = true;
         return net::scan(state);
     }
     state.swept = false;
+    state.joining = None;
     Task::none()
 }
 
