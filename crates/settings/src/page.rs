@@ -209,8 +209,8 @@ impl Page {
                  have come in."
             }
             Self::Search => {
-                "Search is not in Settings yet. rift search indexes your home folder and answers \
-                 from it."
+                "Search is not in Settings yet. rift ai index reads your home folder and rift ai \
+                 search finds the files in it closest in meaning to the words."
             }
             Self::Keyboard => {
                 "Keyboard layouts and shortcuts are not in Settings yet. Mod+Shift+Slash shows \
@@ -240,11 +240,11 @@ impl Page {
                 "Region and language are not in Settings yet. The system is in British English."
             }
             Self::Updates => {
-                "Updates are not in Settings yet. rift update lists the versions on the drive and \
-                 installs the next one."
+                "Updates are not in Settings yet. sudo systemd-sysupdate list says which versions \
+                 are on the drive, and sudo systemd-sysupdate installs the next one."
             }
             Self::Backups => {
-                "Backups are not in Settings yet. rift timeline lists the snapshots Vault takes of \
+                "Backups are not in Settings yet. rift snapshot lists the snapshots Vault takes of \
                  your home folder, and rift backup copies them to a disk."
             }
             Self::Ai => {
