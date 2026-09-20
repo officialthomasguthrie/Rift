@@ -9,6 +9,7 @@
 mod about;
 mod ai;
 mod appearance;
+mod backups;
 mod bluetooth;
 mod control;
 mod displays;

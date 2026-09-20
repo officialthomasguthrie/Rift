@@ -25,7 +25,9 @@ use crate::net::Joining;
 use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
-use crate::{about, ai, appearance, bluetooth, displays, icons, net, power, search, sound, watch};
+use crate::{
+    about, ai, appearance, backups, bluetooth, displays, icons, net, power, search, sound, watch,
+};
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
 /// the boot test all know it by.
@@ -80,6 +82,13 @@ pub struct Settings {
     pub index: Option<Result<search::Look, String>>,
     /// Whether an update of the search index is running now.
     pub indexing: bool,
+    /// The snapshots of home Vault keeps, once it has answered.
+    pub snapshots: Option<Result<backups::Kept, String>>,
+    /// Where the backups go and what is there, once Vault has answered. It travels behind a
+    /// pointer, the way the pictures a service answers with do.
+    pub disk: Option<Box<backups::Disk>>,
+    /// Whether a snapshot or a backup is being made now.
+    pub making: backups::Making,
     /// The network being joined that asks for a password, and what has been typed for it.
     pub joining: Option<Joining>,
     /// What is happening: a join, or a device being connected.
@@ -143,6 +152,18 @@ pub enum Message {
     Indexed(Result<search::Look, String>),
     /// How bringing the index up to date went.
     Updated(Result<(), String>),
+    /// A snapshot of home was asked for.
+    Snapshot,
+    /// The snapshots Vault keeps now.
+    Snapshots(Result<backups::Kept, String>),
+    /// How taking a snapshot went.
+    Took(Result<(), String>),
+    /// A backup onto the backup disk was asked for.
+    BackUp,
+    /// Where the backups go and what is there now.
+    Backups(Box<backups::Disk>),
+    /// How making a backup went.
+    BackedUp(Result<(), String>),
     /// The Wi-Fi switch.
     Wifi(bool),
     /// The network at this place in the list was pressed.
@@ -258,6 +279,9 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
     if state.page == Page::Search {
         work.push(search::read());
     }
+    if state.page == Page::Backups {
+        work.push(backups::read());
+    }
     if start.screenshot.is_some() {
         work.push(shoot());
     }
@@ -303,6 +327,9 @@ impl Settings {
             quasar: None,
             index: None,
             indexing: false,
+            snapshots: None,
+            disk: None,
+            making: backups::Making::default(),
             joining: None,
             doing: None,
             swept: false,
@@ -361,6 +388,7 @@ impl Settings {
         .chain(power::state(self))
         .chain(ai::state(self))
         .chain(search::state(self))
+        .chain(backups::state(self))
         .collect::<Vec<_>>()
         .join("\n")
             + "\n"
@@ -424,6 +452,22 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             state.problem = None;
             state.indexing = true;
             return search::update();
+        }
+        Message::Snapshot => {
+            if state.making.snapshot {
+                return Task::none();
+            }
+            state.problem = None;
+            state.making.snapshot = true;
+            return backups::take();
+        }
+        Message::BackUp => {
+            if state.making.backup {
+                return Task::none();
+            }
+            state.problem = None;
+            state.making.backup = true;
+            return backups::back_up();
         }
         Message::Volume(side, level) => state.moving = Some((side, level)),
         Message::Volumed(side, level) => {
@@ -500,6 +544,16 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
             state.indexing = false;
             state.problem = said.err();
         }
+        Message::Snapshots(answer) => state.snapshots = Some(answer),
+        Message::Backups(answer) => state.disk = Some(answer),
+        Message::Took(said) => {
+            state.making.snapshot = false;
+            state.problem = said.err();
+        }
+        Message::BackedUp(said) => {
+            state.making.backup = false;
+            state.problem = said.err();
+        }
         Message::Acted(Ok(())) => {
             state.problem = None;
             state.doing = None;
@@ -558,6 +612,9 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         // the index is a file on the drive that a timer writes too, so it is read again every time
         // the page comes up rather than once when the window opened
         Page::Search => search::read(),
+        // the same for the snapshots, which a timer takes every hour, and the backups, which are
+        // on a disk the window would rather not mount before anyone asks for them
+        Page::Backups => backups::read(),
         _ => Task::none(),
     }
 }
@@ -620,6 +677,8 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
         "tier" => ai::named(value).map_or_else(Task::none, |tier| Task::done(Message::Tier(tier))),
         // the value is there to be typed, the way a switch takes on or off: there is one thing to do
         "index" => Task::done(Message::Index),
+        "snapshot" => Task::done(Message::Snapshot),
+        "backup" => Task::done(Message::BackUp),
         "wifi" => Task::done(Message::Wifi(on(value))),
         "bluetooth" => Task::done(Message::Power(on(value))),
         // moved, then let go, in that order, the way the slider itself does it
@@ -822,6 +881,7 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Power => power::view(state, look),
         Page::Ai => ai::view(state, look),
         Page::Search => search::view(state, look),
+        Page::Backups => backups::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),

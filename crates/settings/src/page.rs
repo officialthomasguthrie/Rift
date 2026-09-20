@@ -196,6 +196,7 @@ impl Page {
             | Self::Power
             | Self::Appearance
             | Self::Search
+            | Self::Backups
             | Self::Ai
             | Self::About => "",
             Self::Dock => {
@@ -241,10 +242,6 @@ impl Page {
                 "Updates are not in Settings yet. sudo systemd-sysupdate list says which versions \
                  are on the drive, and sudo systemd-sysupdate installs the next one."
             }
-            Self::Backups => {
-                "Backups are not in Settings yet. rift snapshot lists the snapshots Vault takes of \
-                 your home folder, and rift backup copies them to a disk."
-            }
         }
     }
 }
@@ -255,7 +252,7 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 10] = [
+    const REAL: [Page; 11] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
@@ -264,6 +261,7 @@ mod tests {
         Page::Power,
         Page::Appearance,
         Page::Search,
+        Page::Backups,
         Page::Ai,
         Page::About,
     ];

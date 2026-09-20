@@ -220,7 +220,9 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
     if let Some(why) = &state.problem {
         page = page.push(text(why).size(TEXT_SIZE).color(look.error));
     }
-    page = page.push(sizes(state, look, picture));
+    if !picture.sizes.is_empty() {
+        page = page.push(sizes(state, look, picture));
+    }
     if !picture.models.is_empty() {
         page = page.push(models(look, picture));
     }
