@@ -499,6 +499,10 @@ pub fn run(apps: Vec<App>) -> Result<(), iced_layershell::Error> {
         if let Err(why) = librift::orbit::follow() {
             eprintln!("lens: the screens: {why}");
         }
+        // and the mouse and the touchpad, written the way this image writes them
+        if let Err(why) = librift::pointer::apply() {
+            eprintln!("lens: the mouse and the touchpad: {why}");
+        }
     });
     iced_layershell::daemon(move || boot(chosen, apps.clone()), "lens", update, view)
         .theme(|state: &Lens, _| Theme::custom("Rift", palette(state.look)))
@@ -585,6 +589,7 @@ fn subscription(_: &Lens) -> Subscription<Message> {
         watch::battery(),
         watch::bluetooth(),
         watch::sound(),
+        watch::zone(),
         notice::serve(),
     ])
 }

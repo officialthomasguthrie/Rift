@@ -1,8 +1,8 @@
-//! The status sources, followed as they change. `NetworkManager`, `UPower` and `BlueZ` send signals
-//! on the system bus and `pw-mon` prints what `PipeWire` does; each is read on a thread of its own,
-//! and a burst of signals, which a scan or a sink coming up sends, turns into one reading once it
-//! has settled. A source that goes away is waited for. The waiting itself is `librift::bus`, which
-//! Settings follows the same services with.
+//! The status sources, followed as they change. `NetworkManager`, `UPower`, `BlueZ` and timedated
+//! send signals on the system bus and `pw-mon` prints what `PipeWire` does; each is read on a
+//! thread of its own, and a burst of signals, which a scan or a sink coming up sends, turns into
+//! one reading once it has settled. A source that goes away is waited for. The waiting itself is
+//! `librift::bus`, which Settings follows the same services with.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use iced::Subscription;
 use librift::sound::{Monitor, Side};
-use librift::{battery, bluetooth, bus, network, sound};
+use librift::{battery, bluetooth, bus, clock as zone, network, sound};
 
+use crate::clock;
 use crate::ui::Message;
 
 /// How long to wait before starting `pw-mon` again when it went away.
@@ -50,6 +51,17 @@ pub fn bluetooth() -> Subscription<Message> {
                 listen(poke, |each| bus::signals(bluetooth::SERVICE, each));
             },
             || Message::Bluetooth(bluetooth::read().ok().flatten()),
+        )
+    })
+}
+
+/// The clock again whenever timedated says something changed, which is the time zone: the bar reads
+/// the clock on the minute, and without this it would show the old zone until the next one.
+pub fn zone() -> Subscription<Message> {
+    Subscription::run_with("zone", |_| {
+        follow(
+            |poke| listen(poke, |each| bus::signals(zone::SERVICE, each)),
+            || Message::Tick(clock::now()),
         )
     })
 }
