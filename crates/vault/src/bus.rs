@@ -19,6 +19,7 @@ use zbus::message::Header;
 use crate::backup::Backups;
 use crate::boot::Esp;
 use crate::restore::{self, Account, Outcome, Problem};
+use crate::slots::Drive;
 use crate::timeline::{self, Timeline};
 
 /// The object that answers on the bus.
@@ -27,6 +28,7 @@ pub struct Vault {
     backups: Arc<Backups>,
     home: Arc<PathBuf>,
     esp: Arc<Esp>,
+    drive: Arc<Drive>,
 }
 
 #[zbus::interface(name = "dev.rift.Vault")]
@@ -159,6 +161,19 @@ impl Vault {
         println!("vault: the next boot of this drive is {}", wanted.word());
         Ok(())
     }
+
+    /// What the drive's two slots hold: the version running, the slot, the version and the name
+    /// of the uki on the esp for each slot, where updates come from, and the versions waiting
+    /// there. A uki's name carries the boots systemd-boot has left to try of it.
+    #[zbus(out_args("running", "slots", "source", "waiting"))]
+    async fn slots(&self) -> fdo::Result<librift::update::Answer> {
+        let drive = Arc::clone(&self.drive);
+        let esp = Arc::clone(&self.esp);
+        blocking::unblock(move || drive.slots(&esp))
+            .await
+            .map(|slots| slots.answer())
+            .map_err(fdo::Error::Failed)
+    }
 }
 
 /// The account that sent the message: its uid from the bus, its group from the password file.
@@ -204,7 +219,13 @@ fn answer(
 /// # Errors
 ///
 /// When the system bus is not there, or another process already owns the name.
-pub fn serve(timeline: Timeline, backups: Backups, home: PathBuf, esp: Esp) -> zbus::Result<()> {
+pub fn serve(
+    timeline: Timeline,
+    backups: Backups,
+    home: PathBuf,
+    esp: Esp,
+    drive: Drive,
+) -> zbus::Result<()> {
     backups.clear();
     let component = Component::Vault;
     let vault = Vault {
@@ -212,6 +233,7 @@ pub fn serve(timeline: Timeline, backups: Backups, home: PathBuf, esp: Esp) -> z
         backups: Arc::new(backups),
         home: Arc::new(home),
         esp: Arc::new(esp),
+        drive: Arc::new(drive),
     };
     let _connection = zbus::blocking::connection::Builder::system()?
         .name(component.dbus_name())?

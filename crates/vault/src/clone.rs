@@ -21,6 +21,7 @@ use librift::disk::{
     LSBLK, MACHINE_ID, STORE_SIZE, Slot, Table, VERITY_SIZE, disks_in, machine_id, needed,
     partition_node, read_lsblk, read_table, refuse, script, size,
 };
+use librift::update;
 
 use crate::timeline;
 
@@ -85,28 +86,6 @@ pub fn running_slot(
         verity: find(verity, format!("store-verity_{version}"))?,
         store: find(store, format!("store_{version}"))?,
     })
-}
-
-/// The uki of `version` among the file names in the esp's `EFI/Linux`: `rift_0.2.0.efi`, or one
-/// with a boot counter, `rift_0.2.0+2.efi` or `rift_0.2.0+1-2.efi`. The one without a counter
-/// first.
-pub fn uki(names: &[String], id: &str, version: &str) -> Option<String> {
-    let prefix = format!("{id}_{version}");
-    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
-    let counter = |text: &str| match text.split_once('-') {
-        Some((left, done)) => digits(left) && digits(done),
-        None => digits(text),
-    };
-    let mut found: Vec<&String> = names
-        .iter()
-        .filter(|name| {
-            name.strip_prefix(&prefix)
-                .and_then(|rest| rest.strip_suffix(".efi"))
-                .is_some_and(|rest| rest.is_empty() || rest.strip_prefix('+').is_some_and(counter))
-        })
-        .collect();
-    found.sort_by_key(|name| (name.len(), name.as_str()));
-    found.first().map(|name| (*name).clone())
 }
 
 /// `IMAGE_ID` and `IMAGE_VERSION` from the text of os-release, when both are plain words.
@@ -277,7 +256,7 @@ impl Cloner {
             .map_err(|e| format!("Could not read {}: {e}", linux.display()))?
             .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
             .collect();
-        let found = uki(&names, &id, &version).ok_or_else(|| {
+        let found = update::uki_of(&names, &id, &version).ok_or_else(|| {
             format!(
                 "There is no uki of version {version} in {}.",
                 linux.display()
@@ -618,38 +597,6 @@ mod tests {
             "{why}"
         );
         assert!(running_slot(&table, "/dev/sda2", "/dev/sda3", "0.2.0").is_err());
-    }
-
-    #[test]
-    fn the_running_uki_is_found_with_or_without_a_counter() {
-        let names = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
-        assert_eq!(
-            uki(
-                &names(&["rift_0.2.0.efi", "rift_0.3.0+0-3.efi"]),
-                "rift",
-                "0.2.0"
-            )
-            .as_deref(),
-            Some("rift_0.2.0.efi")
-        );
-        assert_eq!(
-            uki(&names(&["rift_0.1.0+2-1.efi"]), "rift", "0.1.0").as_deref(),
-            Some("rift_0.1.0+2-1.efi")
-        );
-        assert_eq!(
-            uki(&names(&["rift_0.1.0+3.efi"]), "rift", "0.1.0").as_deref(),
-            Some("rift_0.1.0+3.efi")
-        );
-        for other in [
-            "rift_0.1.0.1.efi",
-            "rift_0.1.0+.efi",
-            "rift_0.1.0+a-1.efi",
-            "rift_0.1.0+1-.efi",
-            "rift_0.1.0.efi.bak",
-            "other_0.1.0.efi",
-        ] {
-            assert_eq!(uki(&names(&[other]), "rift", "0.1.0"), None, "{other}");
-        }
     }
 
     #[test]

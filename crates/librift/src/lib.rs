@@ -27,6 +27,7 @@ pub mod search;
 pub mod session;
 pub mod sound;
 pub mod time;
+pub mod update;
 pub mod vault;
 pub mod wallpaper;
 

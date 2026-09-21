@@ -8,6 +8,8 @@ use std::time::Duration;
 #[cfg(feature = "bus")]
 use crate::boot::Style;
 #[cfg(feature = "bus")]
+use crate::update::{Answer, Slots};
+#[cfg(feature = "bus")]
 use crate::{Component, bus};
 
 /// How long taking a snapshot may take. The hourly one can hold the lock for a moment.
@@ -29,6 +31,10 @@ const BACKUP_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 /// How long reading or writing the boot style may take. Vault mounts the esp for it.
 #[cfg(feature = "bus")]
 const BOOT_STYLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long reading the two slots may take. Vault mounts the esp and reads the drive's table.
+#[cfg(feature = "bus")]
+const SLOTS_TIMEOUT: Duration = Duration::from_secs(60);
 
 const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
@@ -229,6 +235,23 @@ pub fn target() -> Result<Target, String> {
         .call("Target", &())
         .map_err(|e| bus::sentence(vault, e))?;
     Ok(Target { folder, disk })
+}
+
+/// What the drive's two slots hold, which version is running, where updates come from and the
+/// versions waiting there. All of it is root's to read, so Vault reads it.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, or the drive could not be read.
+#[cfg(feature = "bus")]
+pub fn slots() -> Result<Slots, String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(SLOTS_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    let answer: Answer = proxy
+        .call("Slots", &())
+        .map_err(|e| bus::sentence(vault, e))?;
+    Ok(Slots::from_answer(answer))
 }
 
 /// Backs up home now. Returns the backup's id and when it was made.

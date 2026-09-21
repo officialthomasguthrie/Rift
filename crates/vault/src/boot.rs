@@ -1,9 +1,10 @@
-//! The boot style on the esp of the drive this system started from.
+//! The esp of the drive this system started from: the boot style on it, and the ukis it holds.
 //!
-//! The esp is root's, mounted at /boot for root alone, so the owner cannot write the word that says
-//! how the next boot looks. Vault owns the drive and runs as root, so it does it for them: the two
-//! methods on the bus mount the esp under the service's own runtime directory, read or write the
-//! one file, and let it go again. The initrd reads the same file before plymouth starts.
+//! The esp is root's, mounted at /boot for root alone, so the owner can neither write the word
+//! that says how the next boot looks nor see which versions the drive is able to start. Vault owns
+//! the drive and runs as root, so it does both for them: the methods on the bus mount the esp under
+//! the service's own runtime directory, read or write it, and let it go again. The initrd reads the
+//! same file before plymouth starts.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,6 +17,9 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// The name udev gives the esp of the drive the running system is on. It names no host disk's.
 const ESP: &str = "esp";
+
+/// Where the ukis are on the esp, the folder systemd-boot reads its entries from.
+const LINUX: &str = "EFI/Linux";
 
 /// Where the esp is, and where it is mounted while Vault reads or writes it.
 pub struct Esp {
@@ -53,6 +57,25 @@ impl Esp {
         let esp = self.mount()?;
         style.write(esp.path())?;
         esp.unmount()
+    }
+
+    /// The file names in the esp's `EFI/Linux`, which are the ukis systemd-boot lists at the
+    /// start, each with the boot counter it has left.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when the esp is not there, could not be mounted, or has no `EFI/Linux`.
+    pub fn ukis(&self) -> Result<Vec<String>, String> {
+        let esp = self.mount()?;
+        let read = std::fs::read_dir(esp.path().join(LINUX))
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                    .collect()
+            })
+            .map_err(|e| format!("Could not read the boot partition: {e}"));
+        esp.unmount()?;
+        read
     }
 
     /// Mounts the esp under the runtime directory. It is mounted at /boot as well, on an automount

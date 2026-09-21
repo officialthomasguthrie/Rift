@@ -3,13 +3,15 @@
 //! `vault prune` runs the retention rules on demand. `vault target` chooses the folder on another
 //! disk that backups go to, `vault backup` makes one and `vault backups` lists them. `vault clone`
 //! writes a second drive onto a removable disk. The two boot style methods on the bus read and
-//! write the word on the esp that says how the next boot looks.
+//! write the word on the esp that says how the next boot looks, and `Slots` says what the drive's
+//! two slots hold.
 
 mod backup;
 mod boot;
 mod bus;
 mod clone;
 mod restore;
+mod slots;
 mod timeline;
 
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -20,6 +22,7 @@ use backup::Backups;
 use boot::Esp;
 use clone::Cloner;
 use restore::Source;
+use slots::Drive;
 use timeline::{Keep, Timeline};
 
 /// What is snapshotted, where the snapshots go, and where the snapshotted subvolume is mounted.
@@ -37,6 +40,8 @@ const DEVICES: &str = "/dev/disk/by-uuid";
 const BOOT: &str = "/boot";
 const DESIGNATORS: &str = "/dev/disk/by-designator";
 const CLONE_RUN: &str = "/run/vault-clone";
+/// The systemd-sysupdate transfer files, which say where updates come from.
+const TRANSFERS: &str = "/etc/sysupdate.d";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -67,6 +72,7 @@ struct Args {
     backups: Backups,
     cloner: Cloner,
     esp: Esp,
+    drive: Drive,
     home: PathBuf,
     replace: bool,
 }
@@ -78,6 +84,7 @@ fn main() -> ExitCode {
         backups,
         cloner,
         esp,
+        drive,
         home,
         replace,
     } = match parse_args(std::env::args().skip(1)) {
@@ -91,7 +98,7 @@ fn main() -> ExitCode {
     };
 
     let result = match command {
-        Command::Serve => bus::serve(timeline, backups, home, esp)
+        Command::Serve => bus::serve(timeline, backups, home, esp, drive)
             .map_err(|e| format!("vault: could not answer on the system bus: {e}")),
         Command::Take => timeline.take().map(|(name, dropped)| {
             println!("Took snapshot {name}.");
@@ -263,6 +270,15 @@ fn clone_drive(cloner: &Cloner, disk: &Path, serial: Option<&str>) -> Result<(),
     Ok(())
 }
 
+/// The drive the running system started from, which `serve` answers questions about.
+fn running_drive() -> Drive {
+    Drive::new(
+        PathBuf::from(DESIGNATORS),
+        PathBuf::from(librift::release::PATH),
+        PathBuf::from(TRANSFERS),
+    )
+}
+
 /// `Ok(None)` means the program already did what was asked (help or version).
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String> {
     let mut subvolume = PathBuf::from(SUBVOLUME);
@@ -350,6 +366,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
             devices,
         },
         esp: Esp::new(PathBuf::from(DESIGNATORS), PathBuf::from(RUN)),
+        drive: running_drive(),
         cloner: Cloner {
             persist,
             snapshots: snapshots.with_file_name("clone"),
