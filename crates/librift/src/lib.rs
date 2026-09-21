@@ -1,8 +1,9 @@
 //! Names, D-Bus addresses and paths shared by every Rift component, the OS commands Lens and
 //! the rift command run, the client side of the services on the system bus (Rift's own, and
-//! `NetworkManager`, `BlueZ`, `UPower` and logind for the system menu), the index for search by meaning,
-//! what the system calls itself, dark or light and the wallpaper, the sound `PipeWire` plays and
-//! hears, how the boot looks, and how a drive is written.
+//! `NetworkManager`, `BlueZ`, `UPower` and logind for the system menu, timedated and localed for
+//! the clock and the language), the index for search by meaning, what the system calls itself,
+//! dark or light and the wallpaper, the sound `PipeWire` plays and hears, how the boot looks, and
+//! how a drive is written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
 //! which the asking side of the bus turns on, brings in zbus, only the `disk` feature serde and
@@ -14,6 +15,7 @@ pub mod battery;
 pub mod bluetooth;
 pub mod boot;
 pub mod bus;
+pub mod clock;
 #[cfg(feature = "disk")]
 pub mod disk;
 #[cfg(feature = "models")]
@@ -22,6 +24,7 @@ pub mod network;
 pub mod orbit;
 pub mod os;
 pub mod quasar;
+pub mod region;
 pub mod release;
 pub mod search;
 pub mod session;

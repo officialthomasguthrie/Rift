@@ -4,7 +4,6 @@
 //! day it is, for the calendar in the clock menu.
 
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::calendar::{self, Day, Weekday};
 
@@ -60,35 +59,9 @@ pub fn first_weekday() -> Weekday {
         .unwrap_or(calendar::MONDAY)
 }
 
-/// How long until the next minute starts. A tick lands a little after the turn, so `date` never
-/// reads the minute that just ended.
-#[must_use]
-pub fn until_next_minute() -> Duration {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
-    until(seconds)
-}
-
-fn until(seconds: u64) -> Duration {
-    Duration::from_secs(60 - seconds % 60) + Duration::from_millis(200)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_tick_lands_just_after_the_turn_of_the_minute() {
-        assert_eq!(until(0), Duration::from_millis(60_200));
-        assert_eq!(until(59), Duration::from_millis(1_200));
-        assert_eq!(until(1_789_221_603), Duration::from_millis(57_200));
-        // never zero, so the thread cannot spin
-        for second in 0..120 {
-            assert!(until(second) >= Duration::from_millis(1_200));
-            assert!(until(second) <= Duration::from_millis(60_200));
-        }
-    }
 
     #[test]
     fn date_says_the_time_and_the_day() {

@@ -661,7 +661,7 @@ fn ticker() -> Subscription<Message> {
                 {
                     return;
                 }
-                std::thread::sleep(clock::until_next_minute());
+                std::thread::sleep(librift::time::until_next_minute());
             }
         });
         receiver
