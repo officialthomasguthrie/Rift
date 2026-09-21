@@ -58,7 +58,9 @@ The first boot draws the text splash, which is what a drive with no setting draw
 in the session, `rift-settings --set boot graphical` writes the word onto the esp through Vault, the
 test reads it back from /boot, and the vm reboots: the splash of that boot has to be the graphical one.
 It sets the style back to text from the page the same way, reboots again, and that splash has to be the
-text one. The two screendumps are saved beside the png --splash names. The test ends there.
+text one. The two screendumps are saved beside the png --splash names. Before each reboot the Date and
+time page sets a time zone, Pacific/Auckland and then UTC again, and the boot after it has to be in that
+zone, which timedated keeps on persist. The test ends there.
 
 The drive: the vm app writes it from the image into a sparse file with rift-flash, with an exchange
 partition when --exchange gives its size. Persist has to be luks2 with argon2id, the settings a person
@@ -452,7 +454,15 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "input-volume", "input-mute", "input", "inputs", "battery", "ai", "model", "models",
                  "tier", "search", "search-model", "indexed", "index", "indexing", "snapshots",
                  "snapshot", "backups", "backup", "backup-folder", "taking", "backing", "version",
-                 "slot", "slot-a", "slot-b", "tries-a", "tries-b", "updates", "waiting")
+                 "slot", "slot-a", "slot-b", "tries-a", "tries-b", "updates", "waiting", "timezone",
+                 "ntp", "synchronized", "rtc", "time", "date", "locale", "language", "formats",
+                 "paper", "keymap", "layout")
+# the time zone the Date and time page sets and puts back, with what date calls it at either time of
+# year. a drive where no zone was ever chosen is in UTC
+SETTINGS_ZONE = ("Pacific/Auckland", ("NZST", "NZDT"))
+# where timedated keeps the link to the zone, on persist, and the locale the image is in
+ZONE_LINK = "/var/lib/rift/localtime"
+SETTINGS_LOCALE = "en_GB.UTF-8"
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -1521,6 +1531,28 @@ def main():
                 fail(f"/boot/{BOOT_STYLE_FILE} holds {written!r} after the page was set to {style}")
             ok(f"the Appearance page set the boot style to {style}, and the drive's esp holds the word")
 
+        def choose_zone(zone):
+            """Set the time zone from the Date and time page, and read it back from timedated."""
+            status, output = run(f"rift-settings --set timezone {zone}", f"the time zone set to {zone}")
+            if status != 0:
+                fail(f"rift-settings --set timezone {zone} exited with {status}: "
+                     f"{without_console(output).strip()[-300:]!r}")
+            if not waited(60, lambda: page_state("the time zone").get("timezone") == zone):
+                said = page_state("the time zone").get("timezone")
+                fail(f"rift-settings --state says timezone {said!r} after the page was set to {zone}")
+            _, output = run("timedatectl show -p Timezone --value", "the zone timedated has")
+            if zone not in without_console(output).split():
+                fail(f"timedatectl says {without_console(output).strip()!r} after the page set {zone}")
+            ok(f"the Date and time page set the time zone to {zone}")
+
+        def zone_kept(zone, names):
+            """Check the boot that follows is in the zone the page chose before it."""
+            _, output = run("timedatectl show -p Timezone --value; date +%Z", "the zone after the reboot")
+            said = without_console(output).split()
+            if zone not in said or not any(name in said for name in names):
+                fail(f"timedatectl and date say {said!r} after the reboot, and the page chose {zone} before it")
+            ok(f"the boot after {zone} was chosen is in {zone}, which date calls {said[-1]}")
+
         def next_boot(style):
             """Reboot, and check the splash of the boot that follows is the style that was chosen."""
             png = f"{stem}-{style}{extension}"
@@ -1544,12 +1576,16 @@ def main():
         # graphical, which is not the style the image was built with, then text again
         open_settings()
         set_style("graphical")
+        choose_zone(SETTINGS_ZONE[0])
         next_boot("graphical")
         unlock()
+        zone_kept(*SETTINGS_ZONE)
         open_settings()
         set_style("text")
+        choose_zone("UTC")
         next_boot("text")
         unlock()
+        zone_kept("UTC", ("UTC",))
         reboot_action("shutdown")
         power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
@@ -4354,6 +4390,180 @@ def main():
                  apps=[SETTINGS_APP], journals=("horizon", "vault"), settle=3)
             ok(f"the Backups page took a snapshot, {snapshots_before} to {page_took.get('snapshots')} of "
                "them, which is what rift snapshot lists, and no backup disk is chosen yet")
+
+            # the Date and time page, over timedated. no zone was ever chosen on this drive, so it is
+            # in UTC, and the page says what timedatectl says on the same boot. whether a time server
+            # answers the vm's user network is not the test's to decide, so that part is compared with
+            # timedated rather than assumed. choosing a zone on the page writes the link timedated
+            # keeps on persist, and the clock of the whole desktop follows it, the bar's too; then it
+            # goes back to UTC for the rest of the test
+            def timedated_says(what):
+                """What timedatectl show prints, as a dict of its properties."""
+                _, told = run("timedatectl show | cat", what)
+                said = {}
+                for printed_line in without_console(told).splitlines():
+                    key, _, value = printed_line.strip().partition("=")
+                    if key and value:
+                        said[key] = value
+                return said
+
+            def clock_agrees(page, said):
+                """Whether the page says what timedated says about the zone, the time server and the
+                hardware clock."""
+                ntp = "none" if said.get("CanNTP") != "yes" else "on" if said.get("NTP") == "yes" else "off"
+                synchronized = "yes" if ntp == "on" and said.get("NTPSynchronized") == "yes" else "no"
+                return (page.get("timezone") == said.get("Timezone") and page.get("ntp") == ntp
+                        and page.get("synchronized") == synchronized
+                        and page.get("rtc") == ("local" if said.get("LocalRTC") == "yes" else "utc"))
+
+            def clock_in_vm(what):
+                """The minute and the day date in the vm is in, the way the page writes them."""
+                _, told = run("date '+%H:%M %F'", what)
+                found = re.search(r"(\d\d:\d\d) (\d{4}-\d\d-\d\d)", without_console(told))
+                return found.groups() if found else None
+
+            def page_clock_now(what):
+                """Whether the time and the day the page shows are the ones date says, before or after
+                the page is asked, since the minute can turn between the readings."""
+                clock_before = clock_in_vm(what)
+                shown = settings_state(what)
+                clock_after = clock_in_vm(what)
+                return (shown.get("time"), shown.get("date")) in (clock_before, clock_after)
+
+            def bar_follows(what):
+                """Whether the bar's clock says the minute date says, in whatever zone is set now."""
+                bar_before = vm_clock(what)
+                shown = bar_state(what).get("clock")
+                bar_after = vm_clock(what)
+                return shown in (bar_before, bar_after)
+
+            run("rift-settings --page datetime", "the Date and time page")
+            if not wait_for(30, lambda: settings_state("the Date and time page").get("page") == "datetime"):
+                fail("rift-settings --page datetime did not show that page")
+            # the page reads timedated again as every minute turns, and a time server can answer in
+            # between, so the two are given a minute to agree
+            clock_page = wait_for(70, lambda: next(
+                (found for found in [settings_state("the clock on the Date and time page")]
+                 if clock_agrees(found, timedated_says("what timedated says"))), None))
+            if not clock_page:
+                said = settings_state("the clock on the Date and time page again")
+                fail(f"the Date and time page says timezone {said.get('timezone')!r}, ntp {said.get('ntp')!r}, "
+                     f"synchronized {said.get('synchronized')!r} and rtc {said.get('rtc')!r}, and timedatectl "
+                     f"says {timedated_says('what timedated says again')}")
+            if clock_page.get("timezone") != "UTC":
+                fail(f"the Date and time page says timezone {clock_page.get('timezone')!r} on a drive where no "
+                     "zone was ever chosen")
+            if not wait_for(20, lambda: page_clock_now("the time on the Date and time page")):
+                said = settings_state("the time on the page again")
+                fail(f"the Date and time page says {said.get('time')!r} on {said.get('date')!r}, and date in "
+                     f"the vm says {clock_in_vm('the time in the vm')}")
+            ok(f"the Date and time page says the zone is UTC with ntp {clock_page.get('ntp')} and "
+               f"synchronized {clock_page.get('synchronized')}, which is what timedatectl says, and the time "
+               "date says")
+
+            chosen_zone, zone_names = SETTINGS_ZONE
+            status, output = run(f"rift-settings --set timezone {chosen_zone}", "the time zone on the Date and time page")
+            if status != 0:
+                fail(f"rift-settings --set timezone exited with {status}: {without_console(output).strip()[-300:]!r}")
+            if not wait_for(60, lambda: settings_state("the zone the page set").get("timezone") == chosen_zone):
+                said = settings_state("the zone the page set again")
+                _, printed = run("journalctl -b -u systemd-timedated --no-pager -n 20 -o cat | cat",
+                                 "timedated's journal")
+                fail(f"the Date and time page says timezone {said.get('timezone')!r} after it was set to "
+                     f"{chosen_zone}: {without_console(printed).strip()[-400:]!r}")
+            # timedated wrote its link onto persist, /etc/localtime points at that link, and date reads
+            # the zone through the two of them
+            _, output = run(f"timedatectl show -p Timezone --value; readlink {ZONE_LINK} /etc/localtime; "
+                            f"date +%Z; findmnt -n -o SOURCE -T {os.path.dirname(ZONE_LINK)}",
+                            "where the zone is kept")
+            zone_said = without_console(output).split()
+            zone_wanted = [chosen_zone, f"/etc/zoneinfo/{chosen_zone}", ZONE_LINK]
+            # findmnt is asked about the folder, since it follows a link: the folder is on persist, in
+            # the subvolume /var is
+            on_persist = any("persist" in word and "@var" in word for word in zone_said)
+            if (any(word not in zone_said for word in zone_wanted) or not on_persist
+                    or not any(name in zone_said for name in zone_names)):
+                fail(f"after the page set {chosen_zone}, timedatectl, the two links, date and findmnt say "
+                     f"{zone_said!r}")
+            if not wait_for(20, lambda: page_clock_now("the time on the page in the new zone")):
+                said = settings_state("the time on the page in the new zone again")
+                fail(f"the Date and time page says {said.get('time')!r} in {chosen_zone}, and date says "
+                     f"{clock_in_vm('the time in the new zone')}")
+            # the bar asks date on the minute, so it follows within one
+            if not wait_for(80, lambda: bar_follows("the bar's clock in the new zone")):
+                fail(f"the bar's clock says {bar_state('the bar in the new zone').get('clock')!r}, and date "
+                     f"says {vm_clock('the time in the new zone')!r} in {chosen_zone}")
+            # and a timedated started afresh reads the zone off the drive, not out of its memory
+            run("sudo systemctl stop systemd-timedated", "timedated stopped")
+            _, output = run("timedatectl show -p Timezone --value", "the zone a new timedated reads")
+            if chosen_zone not in without_console(output).split():
+                fail(f"a timedated started again says {without_console(output).strip()!r}, and the page set "
+                     f"{chosen_zone}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Date and time page", f"{stem}-settings-datetime{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            ok(f"the Date and time page set the zone to {chosen_zone}: timedated keeps it in {ZONE_LINK} on "
+               f"persist, date calls it {next((name for name in zone_said if name in zone_names), zone_said)}, "
+               "and the page and the bar say the time in it")
+
+            status, output = run("rift-settings --set timezone UTC", "the time zone back to UTC")
+            if not wait_for(60, lambda: settings_state("the zone put back").get("timezone") == "UTC"):
+                fail(f"the Date and time page says timezone "
+                     f"{settings_state('the zone put back again').get('timezone')!r} after it was set to UTC")
+            _, output = run(f"timedatectl show -p Timezone --value; readlink {ZONE_LINK}; date +%Z",
+                            "the zone put back")
+            zone_said = without_console(output).split()
+            if zone_said.count("UTC") < 2 or "/etc/zoneinfo/UTC" not in zone_said:
+                fail(f"after the page set UTC, timedatectl, the link and date say {zone_said!r}")
+            ok("the Date and time page put the zone back to UTC, and timedated's link says so")
+
+            # the Region and language page, over localed. the image is in British English, with the
+            # keymap and the layout every keyboard starts in, and the page says what localed says on
+            # the same boot, in the words the C library has for the locale
+            def localed_says(what, name):
+                """One property of localed, as the quoted strings busctl prints for it."""
+                _, told = run(f"busctl --system get-property org.freedesktop.locale1 /org/freedesktop/locale1 "
+                              f"org.freedesktop.locale1 {name} | cat", what)
+                return re.findall(r'"([^"]*)"', without_console(told))
+
+            run("rift-settings --page region", "the Region and language page")
+            if not wait_for(30, lambda: settings_state("the Region and language page").get("page") == "region"):
+                fail("rift-settings --page region did not show that page")
+            region_page = wait_for(60, lambda: next(
+                (found for found in [settings_state("the language on the Region and language page")]
+                 if found.get("locale")), None))
+            if not region_page:
+                fail("the Region and language page says nothing about the locale, and localed is there to ask")
+            region_locale = localed_says("the locale localed has", "Locale")
+            region_keymap = localed_says("the console's keymap", "VConsoleKeymap")
+            region_layout = localed_says("the desktop's layout", "X11Layout")
+            said_by_localed = {
+                "locale": " ".join(region_locale) or "none",
+                "keymap": "".join(region_keymap) or "none",
+                "layout": "".join(region_layout) or "none",
+            }
+            for localed_key, localed_value in said_by_localed.items():
+                if region_page.get(localed_key) != localed_value:
+                    fail(f"the Region and language page says {localed_key} {region_page.get(localed_key)!r}, "
+                         f"and localed says {localed_value!r}")
+            if region_page.get("locale") != f"LANG={SETTINGS_LOCALE}":
+                fail(f"the system's locale is {region_page.get('locale')!r}, and the image is in {SETTINGS_LOCALE}")
+            # the language in words comes from the C library's own data about the locale
+            _, output = run(f"env LC_ALL={SETTINGS_LOCALE} locale -k lang_name country_name",
+                            "what the C library calls the locale")
+            locale_names = re.findall(r'_name="([^"]*)"', without_console(output))
+            if len(locale_names) != 2 or region_page.get("language") != f"{locale_names[0]} ({locale_names[1]})":
+                fail(f"the Region and language page says language {region_page.get('language')!r}, and the C "
+                     f"library says {without_console(output).strip()[-200:]!r}")
+            if region_page.get("paper") != "A4" or region_page.get("formats") != SETTINGS_LOCALE:
+                fail(f"the Region and language page says formats {region_page.get('formats')!r} on "
+                     f"{region_page.get('paper')!r} paper, and {SETTINGS_LOCALE} is A4")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Region and language page", f"{stem}-settings-region{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            ok(f"the Region and language page says {region_page.get('language')} with "
+               f"{region_page.get('locale')}, keymap {region_page.get('keymap')} and layout "
+               f"{region_page.get('layout')}, which is what localed says on the same boot")
 
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
