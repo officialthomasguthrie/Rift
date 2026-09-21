@@ -61,9 +61,15 @@ let
   # writes it when the session starts and settings writes it again when the displays page changes
   # a scale, since the profile itself is root's
   screensPart = "~/.local/state/rift/displays.kdl";
+  # the part written from the owner's settings for the mouse and the touchpad, by settings when the
+  # Mouse and touchpad page changes one and by the shell when the session starts. its blocks take the
+  # place of the input blocks below, so the page's defaults are the ones written here
+  pointerPart = "~/.local/state/rift/pointer.kdl";
   # the system config. the binary still reads the niri paths: /etc/niri/config.kdl here, and a
   # file at ~/.config/niri/config.kdl replaces it for that user
   configFile = pkgs.writeText "horizon-config.kdl" ''
+    // the keyboard's layouts come from localed, which the Keyboard page writes, while xkb is empty.
+    // a touchpad clicks with a tap, scrolls the content, and ignores a palm while a key is typed
     input {
         keyboard {
             xkb {
@@ -72,6 +78,7 @@ let
         touchpad {
             tap
             natural-scroll
+            dwt
         }
     }
 
@@ -152,6 +159,7 @@ let
         Mod+Shift+Slash hotkey-overlay-title="Show these shortcuts" { show-hotkey-overlay; }
         Mod+T hotkey-overlay-title="Open a terminal" { spawn "ghostty"; }
         Mod+Space hotkey-overlay-title="Show the Applications menu" { spawn "lens" "--menu"; }
+        Mod+Shift+Space hotkey-overlay-title="Switch to the next keyboard layout" { switch-layout "next"; }
         Mod+Grave hotkey-overlay-title="Show or hide the console" { toggle-console app-id="${console.appId}" "${config.systemd.package}/bin/systemd-cat" "-t" "console" "ghostty" "--class=${console.appId}" "--window-decoration=none"; }
         // while the session is locked the key starts a lock screen again, in case the one that
         // locked it has gone. horizon turns a second one away while the first is still there
@@ -217,9 +225,11 @@ let
         Ctrl+Alt+Delete { quit; }
     }
 
-    // last, so the owner's theme and wallpaper take the place of the ones above
+    // last, so the owner's theme and wallpaper, and the mouse and the touchpad, take the place of the
+    // ones above
     include "${themePart}" optional=true
     include "${screensPart}" optional=true
+    include "${pointerPart}" optional=true
   '';
 in
 {
@@ -282,6 +292,9 @@ in
     services.displayManager.enable = false;
 
     environment.etc."niri/config.kdl".source = configFile;
+    # the layouts there are, with their names, which the Keyboard page lists. libxkbcommon reads the
+    # same data from the store, and this is where other programs look for it
+    environment.etc."X11/xkb".source = "${pkgs.xkeyboard-config}/etc/X11/xkb";
     # librift reads the system's wallpaper here when the owner has not picked one
     environment.etc."rift/wallpaper".text = "${cfg.wallpaper}\n";
     systemd.user.tmpfiles.rules = [

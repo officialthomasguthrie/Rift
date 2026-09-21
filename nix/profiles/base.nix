@@ -12,6 +12,8 @@ let
   # the folder on persist that holds the link to the time zone the owner chose, and the link
   zoneFolder = "/var/lib/rift/zone";
   zoneLink = "${zoneFolder}/localtime";
+  # and the folder that holds the file localed keeps the desktop's keyboard layouts in
+  keyboardFolder = "/var/lib/rift/keyboard";
 in
 {
   networking.hostName = "rift";
@@ -38,13 +40,27 @@ in
   # more place it may write. a new persist is made with the folder, since pid 1 watches it from its
   # first moment, and a drive made before it gets it here
   systemd.services.systemd-timedated.serviceConfig.ReadWritePaths = [ "-${zoneFolder}" ];
-  systemd.tmpfiles.rules = [ "d ${zoneFolder} 0755 root root -" ];
-  # timedated asks for an administrator's password before it changes the zone, and nothing in the
-  # session can answer that. the owner may change it from their own session without one, which is
-  # what GNOME's own rule gives an administrator for the clock
+  systemd.tmpfiles.rules = [
+    "d ${zoneFolder} 0755 root root -"
+    "d ${keyboardFolder} 0755 root root -"
+  ];
+  # the desktop's keyboard layouts are the owner's too, chosen on the Keyboard page. localed keeps
+  # them in its vconsole.conf, which NixOS points at the store, so localed writes a file of its own on
+  # persist instead, in a folder its sandbox may write the way timedated's may. horizon takes the
+  # layouts from localed and follows a change. nothing else reads that file: systemd-vconsole-setup
+  # reads /etc/vconsole.conf, the image's, in the initrd and after it, so the text console and the
+  # passphrase keep the image's keymap. a drive where no layout was chosen has no file, which
+  # localed reads as none and horizon as the layout every keyboard starts in
+  systemd.services.systemd-localed.environment.SYSTEMD_ETC_VCONSOLE_CONF =
+    lib.mkForce "${keyboardFolder}/vconsole.conf";
+  systemd.services.systemd-localed.serviceConfig.ReadWritePaths = [ "-${keyboardFolder}" ];
+  # timedated asks for an administrator's password before it changes the zone, and localed before it
+  # changes the layouts, and nothing in the session can answer that. the owner may change both from
+  # their own session without one, which is what GNOME's own rules give an administrator
   security.polkit.extraConfig = ''
     polkit.addRule(function (action, subject) {
-      if (action.id == "org.freedesktop.timedate1.set-timezone"
+      if ((action.id == "org.freedesktop.timedate1.set-timezone"
+           || action.id == "org.freedesktop.locale1.set-keyboard")
           && subject.local && subject.active && subject.isInGroup("wheel")) {
         return polkit.Result.YES;
       }
