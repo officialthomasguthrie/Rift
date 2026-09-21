@@ -1,0 +1,48 @@
+name: thinkpad-image
+
+on:
+  push:
+    branches: [thinkpad-image]
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: nix build .#image -L
+      - run: |
+          sudo apt-get install -y zstd >/dev/null
+          zstd -T0 -12 "$(ls result/*.raw | head -n1)" -o rift.raw.zst
+          sha256sum rift.raw.zst | tee rift.raw.zst.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thinkpad-image
+          path: |
+            rift.raw.zst
+            rift.raw.zst.sha256
+          compression-level: 0
+          retention-days: 7
+
+  flash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p rift-flash --bin rift-flash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thinkpad-flash
+          path: target/release/rift-flash
+          retention-days: 7
