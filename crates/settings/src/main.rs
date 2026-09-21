@@ -21,6 +21,7 @@ mod search;
 mod sound;
 mod theme;
 mod ui;
+mod updates;
 mod watch;
 mod widgets;
 

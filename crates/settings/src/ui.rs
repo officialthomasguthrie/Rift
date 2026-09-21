@@ -26,7 +26,8 @@ use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
 use crate::{
-    about, ai, appearance, backups, bluetooth, displays, icons, net, power, search, sound, watch,
+    about, ai, appearance, backups, bluetooth, displays, icons, net, power, search, sound, updates,
+    watch,
 };
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
@@ -89,6 +90,8 @@ pub struct Settings {
     pub disk: Option<Box<backups::Disk>>,
     /// Whether a snapshot or a backup is being made now.
     pub making: backups::Making,
+    /// What the drive's two slots hold, once Vault has answered.
+    pub slots: Option<Result<librift::update::Slots, String>>,
     /// The network being joined that asks for a password, and what has been typed for it.
     pub joining: Option<Joining>,
     /// What is happening: a join, or a device being connected.
@@ -164,6 +167,8 @@ pub enum Message {
     Backups(Box<backups::Disk>),
     /// How making a backup went.
     BackedUp(Result<(), String>),
+    /// What the drive's two slots hold now.
+    Slots(Result<librift::update::Slots, String>),
     /// The Wi-Fi switch.
     Wifi(bool),
     /// The network at this place in the list was pressed.
@@ -282,6 +287,9 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
     if state.page == Page::Backups {
         work.push(backups::read());
     }
+    if state.page == Page::Updates {
+        work.push(updates::read());
+    }
     if start.screenshot.is_some() {
         work.push(shoot());
     }
@@ -330,6 +338,7 @@ impl Settings {
             snapshots: None,
             disk: None,
             making: backups::Making::default(),
+            slots: None,
             joining: None,
             doing: None,
             swept: false,
@@ -389,6 +398,7 @@ impl Settings {
         .chain(ai::state(self))
         .chain(search::state(self))
         .chain(backups::state(self))
+        .chain(updates::state(self))
         .collect::<Vec<_>>()
         .join("\n")
             + "\n"
@@ -545,6 +555,7 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
             state.problem = said.err();
         }
         Message::Snapshots(answer) => state.snapshots = Some(answer),
+        Message::Slots(answer) => state.slots = Some(answer),
         Message::Backups(answer) => state.disk = Some(answer),
         Message::Took(said) => {
             state.making.snapshot = false;
@@ -615,6 +626,8 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         // the same for the snapshots, which a timer takes every hour, and the backups, which are
         // on a disk the window would rather not mount before anyone asks for them
         Page::Backups => backups::read(),
+        // and for the slots, since reading them mounts the esp
+        Page::Updates => updates::read(),
         _ => Task::none(),
     }
 }
@@ -882,6 +895,7 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Ai => ai::view(state, look),
         Page::Search => search::view(state, look),
         Page::Backups => backups::view(state, look),
+        Page::Updates => updates::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),

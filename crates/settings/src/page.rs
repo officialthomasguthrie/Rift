@@ -196,6 +196,7 @@ impl Page {
             | Self::Power
             | Self::Appearance
             | Self::Search
+            | Self::Updates
             | Self::Backups
             | Self::Ai
             | Self::About => "",
@@ -238,10 +239,6 @@ impl Page {
             Self::Region => {
                 "Region and language are not in Settings yet. The system is in British English."
             }
-            Self::Updates => {
-                "Updates are not in Settings yet. sudo systemd-sysupdate list says which versions \
-                 are on the drive, and sudo systemd-sysupdate installs the next one."
-            }
         }
     }
 }
@@ -252,7 +249,7 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 11] = [
+    const REAL: [Page; 12] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
@@ -261,6 +258,7 @@ mod tests {
         Page::Power,
         Page::Appearance,
         Page::Search,
+        Page::Updates,
         Page::Backups,
         Page::Ai,
         Page::About,
