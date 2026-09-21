@@ -65,6 +65,10 @@ pub const SUBVOLUMES: [&str; 6] = [
 pub const PERSIST_OPTIONS: &str = "compress=zstd:3,noatime";
 /// Where the system keeps its machine id, in `@var`.
 pub const MACHINE_ID: &str = "lib/rift/machine-id";
+/// The folder timedated keeps the link to the time zone in, in `@var`. It is made with persist,
+/// since pid 1 watches it from its first moment and a missing folder is an error it cannot recover
+/// from until the next boot.
+pub const ZONE: &str = "lib/rift/zone";
 /// The owner's account: the name of its home in `@home`, its user id and its group id.
 pub const OWNER: (&str, u32, u32) = ("rift", 1000, 100);
 

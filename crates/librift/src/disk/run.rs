@@ -327,8 +327,8 @@ impl Persist {
         self.top.path()
     }
 
-    /// Makes what a new persist holds: its subvolumes, a new machine id in `@var` and the owner's
-    /// home in `@home`.
+    /// Makes what a new persist holds: its subvolumes, a new machine id and the folder for the time
+    /// zone in `@var`, and the owner's home in `@home`.
     ///
     /// # Errors
     ///
@@ -351,6 +351,8 @@ impl Persist {
             fs::create_dir_all(parent).map_err(|e| making(parent, e))?;
         }
         fs::write(&id, super::machine_id(random()?)).map_err(|e| making(&id, e))?;
+        let zone = top.join("@var").join(super::ZONE);
+        fs::create_dir_all(&zone).map_err(|e| making(&zone, e))?;
         let (owner, uid, gid) = super::OWNER;
         let home = top.join("@home").join(owner);
         fs::create_dir(&home)
