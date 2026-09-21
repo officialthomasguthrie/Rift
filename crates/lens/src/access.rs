@@ -1,19 +1,21 @@
 //! The three things a key turns on: the screen recorder, the screen reader and the on-screen
 //! keyboard. Horizon runs `lens --record`, `lens --screen-reader` and `lens --keyboard` for the
-//! keys, and the Applications menu has a row for the last two. Each of them starts a program, and
-//! stops it again when it is already running.
+//! keys, the Applications menu has a row for the last two, and the Accessibility page in Settings
+//! runs the same two. Each of them starts a program, and stops it again when it is already running.
 //!
 //! What is running is remembered in the session's runtime directory, one file per program holding
-//! its process id and, for a recording, the file it is writing. The runtime directory belongs to
-//! one person and is emptied when the session ends, so the note outlives the shell but never the
-//! login. The shell reads the same notes for `lens --state`, and the recorder tells it over the
-//! socket, so the bar shows a mark while the screen is being recorded.
+//! its process id and, for a recording, the file it is writing; `librift::access` reads the notes,
+//! so Settings asks the same question the shell does. The runtime directory belongs to one person
+//! and is emptied when the session ends, so the note outlives the shell but never the login. The
+//! recorder tells the shell over the socket, so the bar shows a mark while the screen is being
+//! recorded.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
+pub use librift::access::{Tool, running};
 use librift::appearance::{Accent, Theme};
 
 use crate::control::{self, Recording};
@@ -30,53 +32,6 @@ const KEYBOARD: u32 = 260;
 const STOPPING: Duration = Duration::from_secs(10);
 /// How often to look while waiting for that.
 const LOOK: Duration = Duration::from_millis(100);
-
-/// One of the three.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tool {
-    /// The screen recorder.
-    Recorder,
-    /// The screen reader.
-    Reader,
-    /// The on-screen keyboard.
-    Keyboard,
-}
-
-impl Tool {
-    /// The word `lens --state` prints it under.
-    #[must_use]
-    pub const fn word(self) -> &'static str {
-        match self {
-            Self::Recorder => "recording",
-            Self::Reader => "screen-reader",
-            Self::Keyboard => "keyboard",
-        }
-    }
-
-    /// The program it starts.
-    const fn program(self) -> &'static str {
-        match self {
-            Self::Recorder => "wf-recorder",
-            Self::Reader => "orca",
-            Self::Keyboard => "wvkbd-mobintl",
-        }
-    }
-
-    /// The signal that stops it. The recorder writes the end of the file when it is interrupted,
-    /// the way it does for Ctrl+C in a terminal, so anything harsher leaves a file nothing plays.
-    const fn signal(self) -> &'static str {
-        match self {
-            Self::Recorder => "-INT",
-            Self::Reader | Self::Keyboard => "-TERM",
-        }
-    }
-
-    /// The note in the runtime directory that says it is running.
-    fn note(self) -> Option<PathBuf> {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")?;
-        Some(PathBuf::from(dir).join(format!("lens-{}", self.word())))
-    }
-}
 
 /// What a key left behind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,24 +94,6 @@ fn switch(tool: Tool) -> Result<Change, String> {
         .map(|()| Change { on: true, file })
 }
 
-/// The process id of the program, and the file it is writing, when it is running. A note whose
-/// process is gone, or has been taken by something else, is cleared away.
-#[must_use]
-pub fn running(tool: Tool) -> Option<(u32, Option<String>)> {
-    let note = tool.note()?;
-    let line = fs::read_to_string(&note).ok()?;
-    let (pid, file) = match line.trim().split_once(' ') {
-        Some((pid, file)) => (pid, Some(file.to_string())),
-        None => (line.trim(), None),
-    };
-    let pid: u32 = pid.parse().ok()?;
-    if runs(pid, tool.program()) {
-        return Some((pid, file));
-    }
-    let _ = fs::remove_file(&note);
-    None
-}
-
 /// The lines `lens --state` prints for the three, whether the shell is drawing anything for them
 /// or not: the file a recording is being written to, or `off`.
 #[must_use]
@@ -174,14 +111,6 @@ pub fn lines() -> String {
         lines.push('\n');
     }
     lines
-}
-
-/// Whether the process with this id is still the program the note was written for. The kernel cuts
-/// the name it keeps to fifteen characters and a wrapper runs under a name of its own, so the whole
-/// command line is what is read: it holds the path the program was started from.
-fn runs(pid: u32, program: &str) -> bool {
-    fs::read(format!("/proc/{pid}/cmdline"))
-        .is_ok_and(|line| String::from_utf8_lossy(&line).contains(program))
 }
 
 /// Whether there is a process with this id at all.
@@ -310,24 +239,6 @@ fn stop(tool: Tool, pid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn each_one_has_its_own_word_and_program() {
-        let tools = [Tool::Recorder, Tool::Reader, Tool::Keyboard];
-        for (i, one) in tools.iter().enumerate() {
-            for other in &tools[i + 1..] {
-                assert_ne!(one.word(), other.word());
-                assert_ne!(one.program(), other.program());
-            }
-        }
-    }
-
-    #[test]
-    fn the_recorder_is_interrupted_and_the_rest_are_asked_to_end() {
-        assert_eq!(Tool::Recorder.signal(), "-INT");
-        assert_eq!(Tool::Reader.signal(), "-TERM");
-        assert_eq!(Tool::Keyboard.signal(), "-TERM");
-    }
 
     #[test]
     fn a_colour_of_the_shell_is_six_hex_digits() {
