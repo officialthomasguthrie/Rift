@@ -148,8 +148,10 @@ let
       command: "spawn-at-startup " + lib.concatMapStringsSep " " (word: ''"${word}"'') command
     ) cfg.startup}
 
+    // the list of shortcuts shows the keys that are bound, each with a title of its own below
     hotkey-overlay {
         skip-at-startup
+        hide-not-bound
     }
 
     // screen recordings are written beside these, in ~/Videos, by lens
@@ -169,21 +171,21 @@ let
         Mod+Q hotkey-overlay-title="Close the window" { close-window; }
         Mod+O repeat=false hotkey-overlay-title="Show all workspaces" { toggle-overview; }
 
-        Mod+Left { focus-column-left; }
-        Mod+Right { focus-column-right; }
+        Mod+Left hotkey-overlay-title="Focus the column on the left" { focus-column-left; }
+        Mod+Right hotkey-overlay-title="Focus the column on the right" { focus-column-right; }
         Mod+Up { focus-window-up; }
         Mod+Down { focus-window-down; }
-        Mod+Ctrl+Left { move-column-left; }
-        Mod+Ctrl+Right { move-column-right; }
+        Mod+Ctrl+Left hotkey-overlay-title="Move the column left" { move-column-left; }
+        Mod+Ctrl+Right hotkey-overlay-title="Move the column right" { move-column-right; }
         Mod+Ctrl+Up { move-window-up; }
         Mod+Ctrl+Down { move-window-down; }
         Mod+Home { focus-column-first; }
         Mod+End { focus-column-last; }
 
-        Mod+Page_Down { focus-workspace-down; }
-        Mod+Page_Up { focus-workspace-up; }
-        Mod+Ctrl+Page_Down { move-column-to-workspace-down; }
-        Mod+Ctrl+Page_Up { move-column-to-workspace-up; }
+        Mod+Page_Down hotkey-overlay-title="Switch to the workspace below" { focus-workspace-down; }
+        Mod+Page_Up hotkey-overlay-title="Switch to the workspace above" { focus-workspace-up; }
+        Mod+Ctrl+Page_Down hotkey-overlay-title="Move the column to the workspace below" { move-column-to-workspace-down; }
+        Mod+Ctrl+Page_Up hotkey-overlay-title="Move the column to the workspace above" { move-column-to-workspace-up; }
         Mod+1 { focus-workspace 1; }
         Mod+2 { focus-workspace 2; }
         Mod+3 { focus-workspace 3; }

@@ -293,7 +293,8 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                 let mut layers = Vec::new();
                 for output in state.niri.global_space.outputs() {
                     let name = output.name();
-                    for surface in layer_map_for_output(output).layers() {
+                    let map = layer_map_for_output(output);
+                    for surface in map.layers() {
                         let layer = match surface.layer() {
                             Layer::Background => niri_ipc::Layer::Background,
                             Layer::Bottom => niri_ipc::Layer::Bottom,
@@ -313,11 +314,25 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                                 }
                             };
 
+                        // where the surface was placed, which is how a shell's panel can tell
+                        // the edge it stands on and the size it was given
+                        let geometry =
+                            map.layer_geometry(surface)
+                                .map(|geo| niri_ipc::LayerSurfaceGeometry {
+                                    x: geo.loc.x,
+                                    y: geo.loc.y,
+                                    width: geo.size.w,
+                                    height: geo.size.h,
+                                });
+                        let exclusive_zone = i32::from(surface.cached_state().exclusive_zone);
+
                         layers.push(niri_ipc::LayerSurface {
                             namespace: surface.namespace().to_owned(),
                             output: name.clone(),
                             layer,
                             keyboard_interactivity,
+                            geometry,
+                            exclusive_zone,
                         });
                     }
                 }

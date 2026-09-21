@@ -1534,6 +1534,26 @@ pub struct LayerSurface {
     pub layer: Layer,
     /// The surface's keyboard interactivity mode.
     pub keyboard_interactivity: LayerSurfaceKeyboardInteractivity,
+    /// Where the surface is on its output and how big it is, once the compositor has placed it.
+    pub geometry: Option<LayerSurfaceGeometry>,
+    /// How much of the output the surface keeps for itself along the edge it is anchored to, in
+    /// logical pixels: 0 when it keeps none, and -1 when it asks to be placed as if no other surface
+    /// kept any.
+    pub exclusive_zone: i32,
+}
+
+/// Where a layer-shell surface is on its output and how big it is, in logical pixels.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct LayerSurfaceGeometry {
+    /// Distance of the surface's left edge from the output's left edge.
+    pub x: i32,
+    /// Distance of the surface's top edge from the output's top edge.
+    pub y: i32,
+    /// Width of the surface.
+    pub width: i32,
+    /// Height of the surface.
+    pub height: i32,
 }
 
 /// A screencast.

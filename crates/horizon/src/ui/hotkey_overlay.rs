@@ -25,7 +25,7 @@ const PADDING: i32 = 8;
 const FONT: &str = "sans 14px";
 const BORDER: i32 = 4;
 const LINE_INTERVAL: i32 = 2;
-const TITLE: &str = "Important Hotkeys";
+const TITLE: &str = "Keyboard shortcuts";
 
 pub struct HotkeyOverlay {
     is_open: bool,

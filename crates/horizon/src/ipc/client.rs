@@ -228,6 +228,13 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                     niri_ipc::LayerSurfaceKeyboardInteractivity::OnDemand => "on-demand",
                 };
                 println!("      Keyboard interactivity: {interactivity}");
+                if let Some(geo) = surface.geometry {
+                    println!(
+                        "      Placed at: {}, {}, {} x {}",
+                        geo.x, geo.y, geo.width, geo.height
+                    );
+                }
+                println!("      Exclusive zone: {}", surface.exclusive_zone);
             };
 
             let print_layer = |iter: &mut Peekable<slice::Iter<niri_ipc::LayerSurface>>,
