@@ -196,6 +196,8 @@ impl Page {
             | Self::Power
             | Self::Appearance
             | Self::Search
+            | Self::Printers
+            | Self::Accessibility
             | Self::DateTime
             | Self::Region
             | Self::Updates
@@ -219,14 +221,6 @@ impl Page {
                  every shortcut the desktop has."
             }
             Self::Pointer => "The mouse and the touchpad are not in Settings yet.",
-            Self::Printers => {
-                "Printers are not in Settings yet. The print dialog of an app finds a printer on \
-                 the network, and Document Scanner finds a scanner."
-            }
-            Self::Accessibility => {
-                "Accessibility is not in Settings yet. Mod+Alt+S starts the screen reader and \
-                 Mod+Alt+K the on-screen keyboard."
-            }
             Self::Privacy => {
                 "Privacy and security are not in Settings yet. Mod+L locks the screen, and an app \
                  asks before it takes the camera."
@@ -244,7 +238,7 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 14] = [
+    const REAL: [Page; 16] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
@@ -253,6 +247,8 @@ mod tests {
         Page::Power,
         Page::Appearance,
         Page::Search,
+        Page::Printers,
+        Page::Accessibility,
         Page::DateTime,
         Page::Region,
         Page::Updates,

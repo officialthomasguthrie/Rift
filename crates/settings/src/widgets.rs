@@ -177,12 +177,23 @@ pub fn choice<'a, M: Clone + 'a>(
     if let Some(under) = under {
         left = left.push(note(colors, under));
     }
+    pressable(colors, left.into(), beside, chosen, press)
+}
+
+/// The same row with whatever is at its left, for a row whose words are worked out as it is drawn.
+pub fn pressable<'a, M: Clone + 'a>(
+    colors: Colors,
+    left: Element<'a, M>,
+    beside: Option<Element<'a, M>>,
+    chosen: bool,
+    press: M,
+) -> Element<'a, M> {
     let mark: Element<'a, M> = if chosen {
         crate::icons::symbolic(colors.accent, "object-select-symbolic", 16.0)
     } else {
         space().width(16.0).height(16.0).into()
     };
-    let mut inside = row![left.width(Fill)]
+    let mut inside = row![container(left).width(Fill)]
         .align_y(Center)
         .spacing(GAP)
         .width(Fill);

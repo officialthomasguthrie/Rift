@@ -11,6 +11,7 @@ use iced::widget::{button, column, container, row, space, text};
 use iced::{
     Border, Center, Color, Element, Fill, Length, Size, Subscription, Task, Theme, theme, window,
 };
+use librift::access::Tool;
 use librift::appearance::{Accent, Look, Scheme, Theme as Mode};
 use librift::battery::Battery;
 use librift::bluetooth as bluetooth_picture;
@@ -19,6 +20,7 @@ use librift::clock::Zone;
 use librift::models::Tier;
 use librift::network;
 use librift::orbit::Host;
+use librift::printers::Printers;
 use librift::sound::{self as sound_picture, Side};
 
 use crate::control::{self, Command};
@@ -27,8 +29,8 @@ use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
 use crate::{
-    about, ai, appearance, backups, bluetooth, datetime, displays, icons, net, power, region,
-    search, sound, updates, watch,
+    about, accessibility, ai, appearance, backups, bluetooth, datetime, displays, icons, net,
+    power, printers, region, search, sound, updates, watch,
 };
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
@@ -103,6 +105,12 @@ pub struct Settings {
     /// What localed says the system is set to and what that means, once the Region and language
     /// page has asked.
     pub region: Option<Box<region::Picture>>,
+    /// What CUPS says about the printers and the jobs, once the Printers page has asked, and again
+    /// every two seconds while it is up.
+    pub printers: Option<Result<Printers, String>>,
+    /// Whether the screen reader and the on-screen keyboard are running, once the Accessibility
+    /// page has looked, and again every second while it is up.
+    pub access: Option<accessibility::Running>,
     /// The network being joined that asks for a password, and what has been typed for it.
     pub joining: Option<Joining>,
     /// What is happening: a join, or a device being connected.
@@ -189,6 +197,14 @@ pub enum Message {
     Zone(String),
     /// What localed says now, and what it means.
     Region(Box<region::Picture>),
+    /// What CUPS says about the printers and the jobs now.
+    Printers(Result<Printers, String>),
+    /// A printer or a job was pressed on the Printers page.
+    Printer(printers::Asked),
+    /// Which of the screen reader and the on-screen keyboard is running now.
+    Access(accessibility::Running),
+    /// The switch of the screen reader or the on-screen keyboard.
+    Turn(Tool, bool),
     /// The Wi-Fi switch.
     Wifi(bool),
     /// The network at this place in the list was pressed.
@@ -288,8 +304,9 @@ fn window(screenshot: bool) -> window::Settings {
 }
 
 fn boot(start: &Start) -> (Settings, Task<Message>) {
+    let page = start.page.unwrap_or(Page::FIRST);
     let state = Settings {
-        page: start.page.unwrap_or(Page::FIRST),
+        page,
         look: Look::read(),
         greeting: librift::appearance::greeting(),
         boot: None,
@@ -297,6 +314,8 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         zones: librift::clock::installed(),
         host: None,
         release: about::release(),
+        // Lens's notes are read at once, so a switch is never drawn off while its program runs
+        access: (page == Page::Accessibility).then(accessibility::running),
         problem: None,
         screenshot: start.screenshot.clone(),
         ..Settings::bare()
@@ -367,6 +386,8 @@ impl Settings {
             zones: Vec::new(),
             finding: String::new(),
             region: None,
+            printers: None,
+            access: None,
             joining: None,
             doing: None,
             swept: false,
@@ -429,6 +450,8 @@ impl Settings {
         .chain(updates::state(self))
         .chain(datetime::state(self))
         .chain(region::state(self))
+        .chain(printers::state(self))
+        .chain(accessibility::state(self))
         .collect::<Vec<_>>()
         .join("\n")
             + "\n"
@@ -542,6 +565,8 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Device(at) => return bluetooth::connect(state, at),
         Message::Find(typed) => state.finding = typed,
         Message::Zone(zone) => return datetime::choose(state, zone),
+        Message::Printer(asked) => return printers::asked(state, asked),
+        Message::Turn(tool, on) => return accessibility::turn(state, tool, on),
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
             state.greeting = on;
@@ -590,6 +615,8 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Slots(answer) => state.slots = Some(answer),
         Message::Clock(reading) => state.clock = Some(*reading),
         Message::Region(picture) => state.region = Some(picture),
+        Message::Printers(answer) => state.printers = Some(answer),
+        Message::Access(running) => state.access = Some(running),
         Message::Backups(answer) => state.disk = Some(answer),
         Message::Took(said) => {
             state.making.snapshot = false;
@@ -664,8 +691,15 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         // and for the slots, since reading them mounts the esp
         Page::Updates => updates::read(),
         // the language and the formats are part of the image, and asking for them runs programs.
-        // the clock is read by a subscription of its own, which turns with the minute
+        // the clock and the printers are read by subscriptions of their own, which ask again while
+        // their page is up
         Page::Region => region::read(),
+        // Lens's notes are two small files, read at once so a switch is never drawn off while its
+        // program runs, and again every second by a subscription while the page is up
+        Page::Accessibility => {
+            state.access = Some(accessibility::running());
+            Task::none()
+        }
         _ => Task::none(),
     }
 }
@@ -728,6 +762,19 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
         "tier" => ai::named(value).map_or_else(Task::none, |tier| Task::done(Message::Tier(tier))),
         // a zone by its name in the database, which timedated checks: `--set timezone Europe/London`
         "timezone" => Task::done(Message::Zone(value.trim().to_string())),
+        // a printer by the name of its queue and a job by its number, which CUPS checks
+        "printer" => Task::done(Message::Printer(printers::Asked::Default(
+            value.trim().to_string(),
+        ))),
+        "resume" => Task::done(Message::Printer(printers::Asked::Resume(
+            value.trim().to_string(),
+        ))),
+        "cancel" => value.trim().parse().map_or_else(
+            |_| Task::none(),
+            |job| Task::done(Message::Printer(printers::Asked::Cancel(job))),
+        ),
+        "screen-reader" => Task::done(Message::Turn(Tool::Reader, on(value))),
+        "on-screen-keyboard" => Task::done(Message::Turn(Tool::Keyboard, on(value))),
         // the value is there to be typed, the way a switch takes on or off: there is one thing to do
         "index" => Task::done(Message::Index),
         "snapshot" => Task::done(Message::Snapshot),
@@ -781,9 +828,14 @@ fn subscription(state: &Settings) -> Subscription<Message> {
         watch::battery(),
         watch::quasar(),
     ];
-    // the clock turns with the minute, and only while its page is up
-    if state.page == Page::DateTime {
-        followed.push(datetime::ticking());
+    // the clock turns with the minute, the printers and the jobs are asked for every two seconds,
+    // and whether the screen reader and the keyboard are running every second, each only while its
+    // page is up
+    match state.page {
+        Page::DateTime => followed.push(datetime::ticking()),
+        Page::Printers => followed.push(printers::following()),
+        Page::Accessibility => followed.push(accessibility::following()),
+        _ => {}
     }
     Subscription::batch(followed)
 }
@@ -943,6 +995,8 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Updates => updates::view(state, look),
         Page::DateTime => datetime::view(state, look),
         Page::Region => region::view(state, look),
+        Page::Printers => printers::view(state, look),
+        Page::Accessibility => accessibility::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),
