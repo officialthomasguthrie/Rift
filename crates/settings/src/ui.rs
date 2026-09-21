@@ -32,8 +32,8 @@ use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
 use crate::{
-    about, accessibility, ai, appearance, backups, bluetooth, datetime, displays, icons, keyboard,
-    net, pointer, power, printers, region, search, sound, updates, watch,
+    about, accessibility, ai, appearance, backups, bluetooth, datetime, displays, dock, icons,
+    keyboard, net, notifications, pointer, power, printers, region, search, sound, updates, watch,
 };
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
@@ -123,6 +123,15 @@ pub struct Settings {
     /// Whether the screen reader and the on-screen keyboard are running, once the Accessibility
     /// page has looked, and again every second while it is up.
     pub access: Option<accessibility::Running>,
+    /// The apps the desktop entries name, for the Dock and Notifications pages, read as either page
+    /// comes up.
+    pub apps: Vec<librift::apps::App>,
+    /// What the dock keeps and where it stands, once the Dock page has read it, and again every
+    /// second while it is up.
+    pub dock: Option<dock::Picture>,
+    /// Do not disturb and the apps that have sent a notification, once the Notifications page has
+    /// read them, and again every second while it is up.
+    pub notices: Option<notifications::Picture>,
     /// The network being joined that asks for a password, and what has been typed for it.
     pub joining: Option<Joining>,
     /// What is happening: a join, or a device being connected.
@@ -215,6 +224,14 @@ pub enum Message {
     Printer(printers::Asked),
     /// Which of the screen reader and the on-screen keyboard is running now.
     Access(accessibility::Running),
+    /// What the dock keeps and where it stands now.
+    Docked(dock::Picture),
+    /// An app was pinned, moved or taken off the dock, or one of its settings changed.
+    Dock(dock::Asked),
+    /// Do not disturb and the apps that have sent a notification now.
+    Noticed(notifications::Picture),
+    /// Do not disturb, or an app's banners, from the Notifications page.
+    Notices(notifications::Asked),
     /// What localed says about the keyboard now.
     Layouts(Result<Region, String>),
     /// A layout was added, taken off or put first, or the shortcuts were asked for.
@@ -336,8 +353,16 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         pointer: Pointer::read(),
         host: None,
         release: about::release(),
-        // Lens's notes are read at once, so a switch is never drawn off while its program runs
+        // Lens's notes are read at once, so a switch is never drawn off while its program runs, and
+        // the same for the dock's files and the notification settings, which are as small
         access: (page == Page::Accessibility).then(accessibility::running),
+        apps: if matches!(page, Page::Dock | Page::Notifications) {
+            librift::apps::load()
+        } else {
+            Vec::new()
+        },
+        dock: (page == Page::Dock).then(dock::reading),
+        notices: (page == Page::Notifications).then(notifications::reading),
         problem: None,
         screenshot: start.screenshot.clone(),
         ..Settings::bare()
@@ -417,6 +442,9 @@ impl Settings {
             region: None,
             printers: None,
             access: None,
+            apps: Vec::new(),
+            dock: None,
+            notices: None,
             joining: None,
             doing: None,
             swept: false,
@@ -483,6 +511,8 @@ impl Settings {
         .chain(accessibility::state(self))
         .chain(keyboard::state(self))
         .chain(pointer::state(self))
+        .chain(dock::state(self))
+        .chain(notifications::state(self))
         // what went wrong last, which the page shows in red under everything else
         .chain(self.problem.as_ref().map(|why| format!("problem {why}")))
         .collect::<Vec<_>>()
@@ -541,14 +571,7 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             state.problem = None;
             return ai::set_size(tier);
         }
-        Message::Index => {
-            if state.indexing {
-                return Task::none();
-            }
-            state.problem = None;
-            state.indexing = true;
-            return search::update();
-        }
+        Message::Index => return search::start(state),
         Message::Snapshot => {
             if state.making.snapshot {
                 return Task::none();
@@ -601,6 +624,8 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Printer(asked) => return printers::asked(state, asked),
         Message::Turn(tool, on) => return accessibility::turn(state, tool, on),
         Message::Keyboard(asked) => return keyboard::asked(state, &asked),
+        Message::Dock(asked) => return dock::asked(state, asked),
+        Message::Notices(asked) => return notifications::asked(state, &asked),
         Message::Pointer(changed) => pointer::update(state, changed),
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
@@ -652,6 +677,8 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Region(picture) => state.region = Some(picture),
         Message::Printers(answer) => state.printers = Some(answer),
         Message::Access(running) => state.access = Some(running),
+        Message::Docked(picture) => state.dock = Some(picture),
+        Message::Noticed(picture) => state.notices = Some(picture),
         Message::Layouts(answer) => state.keyboard = Some(answer),
         Message::Devices(answer) => state.devices = Some(answer),
         Message::Backups(answer) => state.disk = Some(answer),
@@ -737,6 +764,18 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         // program runs, and again every second by a subscription while the page is up
         Page::Accessibility => {
             state.access = Some(accessibility::running());
+            Task::none()
+        }
+        // the same for the dock's files and the notification settings, and the apps the two pages
+        // name, which are a walk of a few folders
+        Page::Dock => {
+            state.apps = librift::apps::load();
+            state.dock = Some(dock::reading());
+            Task::none()
+        }
+        Page::Notifications => {
+            state.apps = librift::apps::load();
+            state.notices = Some(notifications::reading());
             Task::none()
         }
         _ => Task::none(),
@@ -825,6 +864,12 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
             value.trim().to_string(),
         ))),
         "shortcuts" => Task::done(Message::Keyboard(keyboard::Asked::Shortcuts)),
+        // the dock's settings by their words and its apps by their ids, and Do not disturb and an
+        // app's banners, which the pages check
+        name if dock::NAMES.contains(&name) => dock::named(state, name, value)
+            .map_or_else(Task::none, |asked| Task::done(Message::Dock(asked))),
+        "do-not-disturb" | "app-banners" => notifications::named(state, name, value)
+            .map_or_else(Task::none, |asked| Task::done(Message::Notices(asked))),
         // the mouse and the touchpad, by the names their file has, for a device this machine has
         name if librift::pointer::NAMES.contains(&name) => pointer::named(state, name, value)
             .map_or_else(Task::none, |chosen| {
@@ -884,13 +929,16 @@ fn subscription(state: &Settings) -> Subscription<Message> {
         watch::quasar(),
     ];
     // the clock turns with the minute, the printers and the jobs are asked for every two seconds,
-    // whether the screen reader and the keyboard are running every second, and which mice and
-    // touchpads are plugged in every two seconds, each only while its page is up
+    // whether the screen reader and the keyboard are running every second, which mice and touchpads
+    // are plugged in every two seconds, and the dock's files and the notification settings every
+    // second, each only while its page is up
     match state.page {
         Page::DateTime => followed.push(datetime::ticking()),
         Page::Printers => followed.push(printers::following()),
         Page::Accessibility => followed.push(accessibility::following()),
         Page::Pointer => followed.push(pointer::following()),
+        Page::Dock => followed.push(dock::following()),
+        Page::Notifications => followed.push(notifications::following()),
         _ => {}
     }
     Subscription::batch(followed)
@@ -996,14 +1044,19 @@ fn sidebar(state: &Settings, look: Colors) -> Element<'_, Message> {
     for page in Page::ALL {
         let here = page == state.page;
         let colour = if here { look.on_accent } else { look.text };
+        // a button lays its content out at the top of its box, so the row is centred by hand, the
+        // way the shell's bar centres its buttons
         rows = rows.push(
             button(
-                row![
-                    icons::symbolic(colour, page.icon(), 16.0),
-                    text(page.label()).size(TEXT_SIZE).color(colour),
-                ]
-                .align_y(Center)
-                .spacing(10),
+                container(
+                    row![
+                        icons::symbolic(colour, page.icon(), 16.0),
+                        text(page.label()).size(TEXT_SIZE).color(colour),
+                    ]
+                    .align_y(Center)
+                    .spacing(10),
+                )
+                .center_y(Fill),
             )
             .width(Fill)
             .height(Length::Fixed(ROW))
@@ -1055,6 +1108,8 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Accessibility => accessibility::view(state, look),
         Page::Keyboard => keyboard::view(state, look),
         Page::Pointer => pointer::view(state, look),
+        Page::Dock => dock::view(state, look),
+        Page::Notifications => notifications::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),

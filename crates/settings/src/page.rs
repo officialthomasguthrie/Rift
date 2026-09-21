@@ -195,6 +195,8 @@ impl Page {
             | Self::Sound
             | Self::Power
             | Self::Appearance
+            | Self::Dock
+            | Self::Notifications
             | Self::Search
             | Self::Keyboard
             | Self::Pointer
@@ -206,17 +208,9 @@ impl Page {
             | Self::Backups
             | Self::Ai
             | Self::About => "",
-            Self::Dock => {
-                "The dock is not in Settings yet. A right click on an app in the dock pins it or \
-                 takes it off."
-            }
             Self::Apps => {
                 "Default apps and app permissions are not in Settings yet. xdg-mime picks the app \
                  for a kind of file, and rift run puts an app in a sandbox."
-            }
-            Self::Notifications => {
-                "Notification settings are not in Settings yet. The clock menu keeps the ones that \
-                 have come in."
             }
             Self::Privacy => {
                 "Privacy and security are not in Settings yet. Mod+L locks the screen, and an app \
@@ -235,7 +229,7 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 18] = [
+    const REAL: [Page; 20] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
@@ -243,6 +237,8 @@ mod tests {
         Page::Sound,
         Page::Power,
         Page::Appearance,
+        Page::Dock,
+        Page::Notifications,
         Page::Search,
         Page::Keyboard,
         Page::Pointer,

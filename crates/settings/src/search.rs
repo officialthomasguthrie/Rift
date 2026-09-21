@@ -91,10 +91,20 @@ pub fn read() -> Task<Message> {
     })
 }
 
+/// The button: bring the index up to date, unless that is running already.
+pub fn start(state: &mut Settings) -> Task<Message> {
+    if state.indexing {
+        return Task::none();
+    }
+    state.problem = None;
+    state.indexing = true;
+    update()
+}
+
 /// Bring the index up to date, by running the command the timer runs, and read it again afterwards.
 /// The reading is asked for inside the closure, so its thread starts once the update has finished
 /// rather than beside it.
-pub fn update() -> Task<Message> {
+fn update() -> Task<Message> {
     let (sender, receiver) = oneshot::channel();
     thread::spawn(move || {
         let _ = sender.send(ran());
