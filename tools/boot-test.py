@@ -451,7 +451,8 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "bluetooth", "devices", "connected", "volume", "mute", "output", "outputs",
                  "input-volume", "input-mute", "input", "inputs", "battery", "ai", "model", "models",
                  "tier", "search", "search-model", "indexed", "index", "indexing", "snapshots",
-                 "snapshot", "backups", "backup", "backup-folder", "taking", "backing")
+                 "snapshot", "backups", "backup", "backup-folder", "taking", "backing", "version",
+                 "slot", "slot-a", "slot-b", "tries-a", "tries-b", "updates", "waiting")
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -4362,7 +4363,7 @@ def main():
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            for page in ("updates", "printers", "keyboard"):
+            for page in ("dock", "printers", "keyboard"):
                 run(f"rift-settings --page {page}", f"the {page} page")
                 if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
                     fail(f"rift-settings --page {page} did not show that page")
@@ -5013,18 +5014,30 @@ def main():
     # uuids in their names and puts the uki on the esp with three tries. then the vm reboots into it
     if args.updates:
 
-        def install(directory, running, slot):
-            """Install the version in this directory of the updates drive while running runs. Its
-            partitions have to land in slot under the uuids in the file names, running stays in the
-            other slot, and the uki is on the esp with all its tries. Returns the new version."""
+        def mount_updates(directory, what):
+            """Put the files of one version of the updates drive where sysupdate and the Updates
+            page look for them, and return their names."""
             status, output = run(f"sudo mkdir -p {UPDATES_DRIVE} {UPDATES}; "
                                  f"and sudo mount -o ro /dev/disk/by-label/updates {UPDATES_DRIVE}; "
                                  f"and sudo mount --bind -o ro {UPDATES_DRIVE}/{directory} {UPDATES}; and ls -1 {UPDATES}",
-                                 f"the update files in {directory}")
+                                 what)
             names = without_console(output).split()
             if status != 0:
                 fail(f"{directory} on the updates drive could not be mounted on {UPDATES}: {without_console(output).strip()!r}")
             print(f"\nboot-test: {UPDATES} holds:\n" + "\n".join(names), flush=True)
+            return names
+
+        def umount_updates(what):
+            status, output = run(f"sudo umount {UPDATES} {UPDATES_DRIVE}", what)
+            if status != 0:
+                print(f"\nboot-test: {what} exited with {status}: "
+                      f"{without_console(output).strip()[-200:]!r}", flush=True)
+
+        def install(directory, running, slot):
+            """Install the version in this directory of the updates drive while running runs. Its
+            partitions have to land in slot under the uuids in the file names, running stays in the
+            other slot, and the uki is on the esp with all its tries. Returns the new version."""
+            names = mount_updates(directory, f"the update files in {directory}")
             new = next((found.group(1) for found in (re.fullmatch(r"rift_([^_]+)\.efi", name) for name in names)
                         if found), None)
             if not new or version_key(new) <= version_key(running):
@@ -5073,7 +5086,7 @@ def main():
             if written != wanted or [name for name, _ in kept] != [f"store-verity_{running}", f"store_{running}"]:
                 fail(f"the partitions after the update are {table}, expected {wanted} in slot {slot} and {running} "
                      f"in the other")
-            run(f"sudo umount {UPDATES} {UPDATES_DRIVE}", "unmounting the updates drive")
+            umount_updates("unmounting the updates drive")
             ok(f"systemd-sysupdate installed {new} in {took:.0f}s: verity {verity_uuid} and store {store_uuid} in "
                f"slot {slot}, {fresh} on the esp")
             return new
@@ -5084,7 +5097,74 @@ def main():
             ok(f"passphrase prompt {what}")
             unlock()
 
+        # 7b. the Updates page, over the same two slots. step 5m closed the window, so this opens
+        # it again on the page. Vault reads the esp and the drive's partition table for it, which
+        # only root can do, and the page reads all of it when it comes up, so a page that has to
+        # say something new is left and opened again
+        def updates_state(what, ready):
+            """Wait for the Updates page to say something, leaving it and showing it again so it
+            reads the drive afresh: it reads when it comes up and not after that. The window has to
+            be open already, since rift-settings with no window opens one and does not come back."""
+            run("rift-settings --page appearance", f"another page before {what}")
+            run("rift-settings --page updates", f"the Updates page for {what}")
+            return wait_for(180, lambda: next(
+                (found for found in [settings_state(what)]
+                 if found.get("page") == "updates" and ready(found)), None))
+
+        if args.desktop:
+            run("systemd-run --user --quiet --collect -- rift-settings --page updates",
+                "Settings on the Updates page")
+            updates_page = wait_for(300, lambda: next(
+                (found for found in [settings_state("the slots on the Updates page")]
+                 if found.get("page") == "updates" and found.get("version")), None))
+            if not updates_page:
+                said = settings_state("the Updates page once more")
+                _, log = run("journalctl -b -u vault --no-pager -n 20 -o cat | cat", "vault's journal")
+                fail(f"the Updates page says version {said.get('version')!r} on the {said.get('page')!r} "
+                     f"page, and this drive runs {running}: {without_console(log).strip()[-400:]!r}")
+            wanted_page = {"version": running, "slot": "a", "slot-a": running, "tries-a": "none",
+                           "slot-b": "none", "tries-b": "none", "updates": UPDATES, "waiting": "none"}
+            updates_wrong = {key: updates_page.get(key) for key, value in wanted_page.items()
+                             if updates_page.get(key) != value}
+            if updates_wrong:
+                fail(f"the Updates page says {updates_wrong}, expected {wanted_page}")
+            shot(f"{stem}-settings-updates{extension}", "updates-page")
+
+            # and with the files of the next version in that folder it says which one is waiting.
+            # the install mounts them again for itself
+            updates_names = mount_updates("next", "the update files for the Updates page")
+            updates_waiting = updates_state("the version waiting on the Updates page",
+                                            lambda found: found.get("waiting", "none") != "none")
+            umount_updates("unmounting the updates drive again")
+            if not updates_waiting or version_key(updates_waiting["waiting"]) <= version_key(running):
+                said = settings_state("the Updates page once more").get("waiting")
+                fail(f"the Updates page says waiting {said!r} with {len(updates_names)} update files "
+                     f"in {UPDATES}, expected a version after {running}")
+            ok(f"the Updates page says {running} runs from slot a with slot b empty, updates come from "
+               f"{UPDATES}, and {updates_waiting['waiting']} is waiting there")
+
         new = install("next", running, "b")
+
+        # the same page after the install: the new version is in slot b with all its tries, and the
+        # running one has not moved
+        if args.desktop:
+            updates_after = updates_state("the slots after the install",
+                                          lambda found: found.get("slot-b", "none") != "none")
+            wanted_page = {"version": running, "slot": "a", "slot-a": running, "tries-a": "none",
+                           "slot-b": new, "tries-b": str(TRIES)}
+            updates_wrong = {key: (updates_after or {}).get(key) for key, value in wanted_page.items()
+                             if (updates_after or {}).get(key) != value}
+            shot(f"{stem}-settings-updates-installed{extension}", "updates-page-installed")
+            if updates_wrong:
+                fail(f"the Updates page says {updates_wrong} after the install, expected {wanted_page}, "
+                     f"see {stem}-settings-updates-installed{extension}")
+            if updates_waiting["waiting"] != new:
+                fail(f"the Updates page said {updates_waiting['waiting']} was waiting and sysupdate "
+                     f"installed {new}")
+            close_app(SETTINGS_APP, SETTINGS_APP_ID)
+            ok(f"the Updates page says {new} is in slot b with {TRIES} tries and {running} still runs "
+               f"from slot a")
+
         reboot_action("reset")
         reboot("after the update")
         reboot_action("shutdown")
