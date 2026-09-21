@@ -20,7 +20,9 @@ in
   networking.firewall.enable = true;
 
   time.timeZone = lib.mkDefault "UTC"; # orbit and first boot set the real one
-  i18n.defaultLocale = "en_US.UTF-8";
+  # british english, which is what rift's own words are written in: day before month, a 24 hour
+  # clock, weeks that start on monday, a4 paper and metric measures. en_US stays installed beside it
+  i18n.defaultLocale = "en_GB.UTF-8";
 
   services.pipewire = {
     enable = true;
