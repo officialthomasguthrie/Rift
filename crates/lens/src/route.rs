@@ -157,7 +157,7 @@ mod tests {
             terminal,
             icon: Some(program.into()),
             wm_class: None,
-            category: crate::launcher::Category::Accessories,
+            category: librift::apps::Category::Accessories,
         }
     }
 

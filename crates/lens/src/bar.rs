@@ -1,7 +1,8 @@
 //! The top bar, laid out like Tails: the Applications button at the left, the clock in the middle
 //! of the screen, which opens the clock menu, and the status icons at the right, which are one
-//! button that opens the system menu. The sizes and the colours below are the ones the boot test
-//! counts.
+//! button that opens the system menu. With two keyboard layouts or more, the one in use stands
+//! before the status icons by its short name, the way GNOME shows its input source. The sizes and
+//! the colours below are the ones the boot test counts.
 
 use iced::widget::{button, column, container, row, space, stack, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
@@ -28,6 +29,8 @@ pub const TEXT_SIZE: f32 = 14.0;
 const ICON: f32 = 16.0;
 /// The gap between two status icons.
 const ICON_GAP: f32 = 8.0;
+/// The gap between the keyboard layout and the status icons.
+const BUTTON_GAP: f32 = 4.0;
 
 /// The button at the left, and the menu it opens.
 pub const APPLICATIONS: &str = "Applications";
@@ -47,7 +50,8 @@ pub struct Open {
 }
 
 /// The bar. With Do not disturb on, its icon is at the left of the clock; while the screen is
-/// being recorded, the mark for that is the first of the status icons.
+/// being recorded, the mark for that is the first of the status icons; while there are two
+/// keyboard layouts or more, the short name of the one in use is before the status icons.
 pub fn view<'a>(
     look: Palette,
     clock: &'a str,
@@ -55,11 +59,16 @@ pub fn view<'a>(
     open: Open,
     quiet: bool,
     recording: bool,
+    layout: Option<&'a str>,
 ) -> Element<'a, Message> {
+    let mut right = row![].spacing(BUTTON_GAP).align_y(iced::Center);
+    if let Some(name) = layout {
+        right = right.push(layout_button(look, name));
+    }
     let items = row![
         applications(look, open.applications),
         space().width(Length::Fill),
-        status_button(look, status, open.system, recording),
+        right.push(status_button(look, status, open.system, recording)),
     ]
     .align_y(iced::Center)
     .height(Length::Fill);
@@ -112,6 +121,17 @@ fn clock_button(look: Palette, clock: &str, open: bool, quiet: bool) -> Element<
         .padding([0, PAD])
         .on_press(Message::ToggleClock)
         .style(move |_: &Theme, state| fill(look, open, state))
+        .into()
+}
+
+/// The keyboard layout in use, by its short name. A click switches to the next one, the way
+/// Mod+Shift+Space does.
+fn layout_button(look: Palette, name: &str) -> Element<'_, Message> {
+    button(container(text(name).size(TEXT_SIZE).color(look.text)).center_y(Length::Fill))
+        .height(ITEM)
+        .padding([0, PAD])
+        .on_press(Message::NextLayout)
+        .style(move |_: &Theme, state| fill(look, false, state))
         .into()
 }
 

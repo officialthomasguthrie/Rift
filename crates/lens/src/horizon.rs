@@ -1,7 +1,7 @@
-//! What Horizon has open: the windows and the workspaces the dock draws, read from the
-//! compositor's event stream, and the actions a click on the dock sends back. The stream is read
-//! on a thread of its own, like the clock's, and every event turns into a new picture of what is
-//! open.
+//! What Horizon has open: the windows and the workspaces the dock draws and the keyboard layouts
+//! the bar names, read from the compositor's event stream, and the actions a click on the dock or
+//! the bar sends back. The stream is read on a thread of its own, like the clock's, and every event
+//! turns into a new picture of what is open.
 
 // the dock is what draws this, and the dock is linux only
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -11,7 +11,10 @@ use std::io;
 use std::time::Duration;
 
 use niri_ipc::socket::Socket;
-use niri_ipc::{Action, Event, Reply, Request, Response, Window, Workspace, WorkspaceReferenceArg};
+use niri_ipc::{
+    Action, Event, KeyboardLayouts, LayoutSwitchTarget, Reply, Request, Response, Window,
+    Workspace, WorkspaceReferenceArg,
+};
 
 use crate::launcher::App;
 
@@ -41,14 +44,18 @@ pub struct Space {
     pub active: bool,
 }
 
-/// What Horizon has open now: the windows in the order they opened and the workspaces of the
-/// screen the owner is looking at.
+/// What Horizon has open now: the windows in the order they opened, the workspaces of the screen
+/// the owner is looking at, and the keyboard layouts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Open {
     /// Every window, oldest first, so the dock walks an app's windows in the same order twice.
     pub windows: Vec<Win>,
     /// The workspaces of the focused output, in their order.
     pub spaces: Vec<Space>,
+    /// The keyboard layouts by the names Horizon gives them, "English (UK)", in their order.
+    pub layouts: Vec<String>,
+    /// The place in that list of the one in use.
+    pub layout: usize,
 }
 
 impl Open {
@@ -65,10 +72,11 @@ impl Open {
 struct Tracked {
     windows: HashMap<u64, Window>,
     spaces: HashMap<u64, Workspace>,
+    layouts: Option<KeyboardLayouts>,
 }
 
 impl Tracked {
-    /// Take one event in. `false` when it was not one of the dock's.
+    /// Take one event in. `false` when it was not one the dock or the bar draws from.
     fn apply(&mut self, event: Event) -> bool {
         match event {
             Event::WindowsChanged { windows } => {
@@ -92,6 +100,14 @@ impl Tracked {
                     .collect();
             }
             Event::WorkspaceActivated { id, focused } => self.activate(id, focused),
+            Event::KeyboardLayoutsChanged { keyboard_layouts } => {
+                self.layouts = Some(keyboard_layouts);
+            }
+            Event::KeyboardLayoutSwitched { idx } => {
+                if let Some(layouts) = self.layouts.as_mut() {
+                    layouts.current_idx = idx;
+                }
+            }
             _ => return false,
         }
         true
@@ -118,8 +134,8 @@ impl Tracked {
         }
     }
 
-    /// What the dock draws: the windows oldest first, and the workspaces of the screen the owner
-    /// is looking at, which is the only screen the shell draws on.
+    /// What the dock and the bar draw: the windows oldest first, the workspaces of the screen the
+    /// owner is looking at, which is the only screen the shell draws on, and the layouts.
     fn picture(&self) -> Open {
         let mut windows: Vec<&Window> = self.windows.values().collect();
         windows.sort_by_key(|win| win.id);
@@ -151,6 +167,15 @@ impl Tracked {
                     active: space.is_active,
                 })
                 .collect(),
+            layouts: self
+                .layouts
+                .as_ref()
+                .map(|layouts| layouts.names.clone())
+                .unwrap_or_default(),
+            layout: self
+                .layouts
+                .as_ref()
+                .map_or(0, |layouts| usize::from(layouts.current_idx)),
         }
     }
 }
@@ -223,6 +248,17 @@ pub fn activate(space: u8) -> Result<(), String> {
     })
 }
 
+/// Switch to the next keyboard layout, what Mod+Shift+Space does.
+///
+/// # Errors
+///
+/// When the compositor is not there or refuses.
+pub fn next_layout() -> Result<(), String> {
+    act(Action::SwitchLayout {
+        layout: LayoutSwitchTarget::Next,
+    })
+}
+
 /// One action over a connection of its own. The socket is in the session's runtime directory and
 /// the answer comes back at once, so this is a round trip of a few microseconds.
 fn act(action: Action) -> Result<(), String> {
@@ -266,7 +302,7 @@ pub fn owner<'a>(apps: &'a [App], app_id: &str) -> Option<&'a App> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launcher::Category;
+    use librift::apps::Category;
 
     fn app(id: &str, program: &str) -> App {
         App {
@@ -392,6 +428,22 @@ mod tests {
 
         // an event the dock does not draw from is not one of its own
         assert!(!tracked.apply(Event::OverviewOpenedOrClosed { is_open: true }));
+    }
+
+    #[test]
+    fn the_layouts_follow_what_horizon_says() {
+        let mut tracked = Tracked::default();
+        assert!(tracked.picture().layouts.is_empty());
+        assert!(tracked.apply(Event::KeyboardLayoutsChanged {
+            keyboard_layouts: KeyboardLayouts {
+                names: vec!["English (US)".to_string(), "English (UK)".to_string()],
+                current_idx: 0,
+            },
+        }));
+        assert!(tracked.apply(Event::KeyboardLayoutSwitched { idx: 1 }));
+        let open = tracked.picture();
+        assert_eq!(open.layouts, ["English (US)", "English (UK)"]);
+        assert_eq!(open.layout, 1);
     }
 
     #[test]

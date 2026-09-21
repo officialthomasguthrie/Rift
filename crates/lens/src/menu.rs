@@ -4,11 +4,12 @@
 
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Border, Color, Element, Font, Length, Shadow, Theme, window};
+use librift::apps::Category;
 use librift::os::Action;
 
 use crate::bar;
 use crate::icons;
-use crate::launcher::{App, Category};
+use crate::launcher::App;
 use crate::route;
 use crate::theme::Palette;
 use crate::ui::{FONT, HEADING, MONO, Message};
@@ -535,7 +536,7 @@ pub fn focus_field() -> iced::Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launcher::Category;
+    use librift::apps::Category;
 
     fn app(name: &str, category: Category) -> App {
         App {

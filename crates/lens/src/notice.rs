@@ -92,7 +92,7 @@ impl Notification {
     #[must_use]
     pub fn read(
         id: u32,
-        app: String,
+        app: &str,
         icon: String,
         summary: &str,
         body: &str,
@@ -130,7 +130,8 @@ impl Notification {
         }
         Self {
             id,
-            app,
+            // one line, the way the apps that sent one are remembered and turned quiet
+            app: app.split_whitespace().collect::<Vec<_>>().join(" "),
             icon: image.or_else(|| Some(icon).filter(|icon| !icon.trim().is_empty())),
             entry,
             // a summary is one line
@@ -150,35 +151,6 @@ impl Notification {
             .as_deref()
             .map(|icon| icon.strip_prefix("file://").unwrap_or(icon))
     }
-}
-
-/// Where Do not disturb is kept between sessions: `on`, or anything else for off.
-fn quiet_file() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/rift/do-not-disturb"))
-}
-
-/// Whether the owner left Do not disturb on.
-#[must_use]
-pub fn quiet() -> bool {
-    quiet_file()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .is_some_and(|text| text.trim() == "on")
-}
-
-/// Keep Do not disturb as the owner set it, for the next time the shell starts.
-///
-/// # Errors
-///
-/// When there is no home to keep it in, or the file cannot be written.
-pub fn keep_quiet(on: bool) -> Result<(), String> {
-    let path = quiet_file().ok_or("There is no home folder to keep Do not disturb in.")?;
-    if let Some(folder) = path.parent() {
-        std::fs::create_dir_all(folder)
-            .map_err(|e| format!("Could not make {}: {e}", folder.display()))?;
-    }
-    std::fs::write(&path, if on { "on\n" } else { "off\n" })
-        .map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
 /// A number a hint holds, whichever integer type the app sent it as.
@@ -244,7 +216,7 @@ impl Server {
     #[allow(clippy::too_many_arguments)]
     fn notify(
         &self,
-        app_name: String,
+        app_name: &str,
         replaces_id: u32,
         app_icon: String,
         summary: &str,
@@ -431,6 +403,8 @@ pub struct Notices {
     pub kept: Vec<Kept>,
     /// Do not disturb: only critical notifications show.
     pub quiet: bool,
+    /// The apps whose banners the owner keeps off the screen, the same way.
+    pub muted: Vec<String>,
     /// Counts the runs of every notification's time.
     epoch: u64,
 }
@@ -439,13 +413,21 @@ pub struct Notices {
 pub const GAP: u32 = 8;
 
 impl Notices {
-    /// No notifications yet, with Do not disturb as the owner left it.
+    /// No notifications yet, with Do not disturb and the apps kept quiet as the owner left them.
     #[must_use]
-    pub fn new(quiet: bool) -> Self {
+    pub fn new(quiet: bool, muted: Vec<String>) -> Self {
         Self {
             quiet,
+            muted,
             ..Self::default()
         }
+    }
+
+    /// Whether a notification that is not critical stays off the screen: Do not disturb is on, or
+    /// its app is one the owner keeps quiet.
+    #[must_use]
+    pub fn hushed(&self, app: &str) -> bool {
+        self.quiet || self.muted.iter().any(|muted| muted == app)
     }
 
     /// A notification came in, with its height on screen and the minute it came in.
@@ -491,7 +473,7 @@ impl Notices {
             effects.extend(self.restack());
             return effects;
         }
-        if self.quiet && !critical {
+        if self.hushed(&notification.app) && !critical {
             effects.push(Effect::Signal(Signal::Closed(id, Reason::Expired)));
             return effects;
         }
@@ -662,7 +644,7 @@ mod tests {
     fn sent(id: u32, summary: &str, hints: &[(&str, OwnedValue)]) -> Notification {
         Notification::read(
             id,
-            "notify-send".into(),
+            "notify-send",
             String::new(),
             summary,
             "The body.",
@@ -738,7 +720,7 @@ mod tests {
     fn actions_come_in_pairs_and_the_default_one_is_no_button() {
         let notification = Notification::read(
             7,
-            "mail".into(),
+            "mail",
             "mail-unread".into(),
             "Two\nlines",
             "  body  ",
@@ -759,7 +741,7 @@ mod tests {
 
     #[test]
     fn notifications_stack_under_the_bar_and_the_oldest_makes_room() {
-        let mut notices = Notices::new(false);
+        let mut notices = Notices::new(false, Vec::new());
         let first = notices.arrive(sent(1, "One", &[]), Fitted::default(), 60, "09:00");
         assert_eq!(opened(&first), [(60, GAP)]);
         assert_eq!(timer(&first).map(|(id, _)| id), Some(1));
@@ -779,7 +761,7 @@ mod tests {
 
     #[test]
     fn time_runs_out_unless_it_is_critical_or_under_the_pointer() {
-        let mut notices = Notices::new(false);
+        let mut notices = Notices::new(false, Vec::new());
         let effects = notices.arrive(sent(1, "One", &[]), Fitted::default(), 60, "09:00");
         let (id, epoch) = timer(&effects).expect("a timer");
         // the pointer holds it
@@ -801,7 +783,7 @@ mod tests {
 
     #[test]
     fn closing_pressing_and_recalling_take_it_out_of_the_list() {
-        let mut notices = Notices::new(false);
+        let mut notices = Notices::new(false, Vec::new());
         let mut with_buttons = sent(1, "Buttons", &[]);
         with_buttons.actions = vec![("open".into(), "Open".into())];
         with_buttons.default = true;
@@ -849,7 +831,7 @@ mod tests {
 
     #[test]
     fn a_notification_sent_again_is_replaced_where_it_is() {
-        let mut notices = Notices::new(false);
+        let mut notices = Notices::new(false, Vec::new());
         notices.arrive(sent(1, "One", &[]), Fitted::default(), 60, "09:00");
         notices.arrive(sent(2, "Two", &[]), Fitted::default(), 60, "09:00");
         let replaced = notices.arrive(sent(1, "One again", &[]), Fitted::default(), 80, "09:05");
@@ -863,8 +845,30 @@ mod tests {
     }
 
     #[test]
+    fn an_app_kept_quiet_goes_into_the_list_without_showing() {
+        let mut notices = Notices::new(false, vec!["notify-send".to_string()]);
+        let quiet = notices.arrive(sent(1, "Quiet", &[]), Fitted::default(), 60, "09:00");
+        assert!(opened(&quiet).is_empty());
+        assert_eq!(signals(&quiet), [Signal::Closed(1, Reason::Expired)]);
+        assert_eq!(notices.kept.len(), 1);
+        // a critical one still shows, the way it does with Do not disturb
+        assert_eq!(
+            opened(&notices.arrive(critical(2), Fitted::default(), 60, "09:00")),
+            [(60, GAP)]
+        );
+        // and another app's shows as ever
+        let mut other = sent(3, "Other", &[]);
+        other.app = "Firefox".to_string();
+        assert_eq!(
+            opened(&notices.arrive(other, Fitted::default(), 60, "09:00")).len(),
+            1
+        );
+        assert!(!notices.hushed("Firefox") && notices.hushed("notify-send"));
+    }
+
+    #[test]
     fn do_not_disturb_keeps_all_but_critical_ones_off_the_screen() {
-        let mut notices = Notices::new(true);
+        let mut notices = Notices::new(true, Vec::new());
         let quiet = notices.arrive(sent(1, "Quiet", &[]), Fitted::default(), 60, "09:00");
         assert!(opened(&quiet).is_empty());
         assert_eq!(signals(&quiet), [Signal::Closed(1, Reason::Expired)]);

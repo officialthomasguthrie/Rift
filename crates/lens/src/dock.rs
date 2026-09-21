@@ -1,12 +1,13 @@
-//! The dock along the bottom of the screen: the apps that stay in it, then the ones that are
-//! running, each with its own icon, a mark per open window and the focused one marked out. At the
-//! right the workspaces. What it lists comes from the desktop entries and from Horizon's event
-//! stream, and a click goes back to Horizon.
-
-use std::path::PathBuf;
+//! The dock: the apps that stay in it, then the ones that are running, each with its own icon, a
+//! mark per open window and the focused one marked out, and at the right the workspaces. What it
+//! lists comes from the desktop entries and from Horizon's event stream, and a click goes back to
+//! Horizon. It stands along the bottom of the screen from one side to the other with 32 pixel
+//! icons, or where the owner put it on the Dock page: along the top, only as wide as what it holds
+//! in the middle of its edge, with bigger icons.
 
 use iced::widget::{button, column, container, mouse_area, row, space, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme, window};
+use librift::dock::{Edge, Options, Size};
 
 use crate::bar;
 use crate::horizon::{self, Open, Space};
@@ -15,19 +16,19 @@ use crate::launcher::App;
 use crate::theme::Palette;
 use crate::ui::Message;
 
-/// How tall the dock is in logical pixels. It is the exclusive zone as well, so windows sit over
-/// it and nothing is ever hidden behind it.
-pub const HEIGHT: u32 = 44;
-/// The hairline along the top edge of the dock, inside its height.
+/// The hairline along the edge of the dock that faces the windows, inside its height, and the
+/// border around a dock that does not reach the sides.
 const LINE: u32 = 1;
+/// The room between an item and the dock's edges, above and under it together.
+const ROOM: u32 = 3;
 /// The padding at each end of the dock.
 const PAD: u16 = 6;
-/// One app in it.
-const ITEM: u32 = 40;
 /// The gap between two items.
 const GAP: u32 = 4;
-/// The app's icon inside an item.
-const ICON: f32 = 32.0;
+/// The space between the apps and the workspaces, in a dock only as wide as what it holds.
+const BETWEEN: u32 = 12;
+/// How far a dock that does not reach the sides stands off its edge: the gap between two windows.
+pub const OFF_EDGE: u32 = 8;
 /// The gap between the icon and the marks under it.
 const ICON_GAP: u32 = 3;
 /// One mark: a dot per open window.
@@ -54,14 +55,20 @@ const MENU_INSIDE: u16 = 8;
 /// One row of it.
 const MENU_ROW: u32 = 28;
 
-/// The apps the dock keeps whether or not they are running, until the owner has a list of their
-/// own. The three the image ships that a person opens first.
-const KEPT: [&str; 4] = [
-    "firefox",
-    "com.mitchellh.ghostty",
-    "dev.zed.Zed",
-    "dev.rift.Settings",
-];
+/// How big one app in the dock is with icons of this size: the icon, the marks under it and the
+/// line under those.
+#[must_use]
+pub const fn item(size: Size) -> u32 {
+    size.icon() + ICON_GAP + DOT + MARK
+}
+
+/// How tall the dock is with icons of this size, in logical pixels: 44 with the small ones. It is
+/// what the dock keeps of the screen as well, so windows stand clear of it and nothing is ever
+/// hidden behind it.
+#[must_use]
+pub const fn height(size: Size) -> u32 {
+    item(size) + LINE + ROOM
+}
 
 /// One app in the dock: pinned, running, or both.
 #[derive(Debug, Clone)]
@@ -177,6 +184,8 @@ pub fn menu_height(rows: usize) -> u32 {
 pub struct Dock {
     /// The surface it draws on.
     pub id: window::Id,
+    /// Where it stands and how big its icons are.
+    pub options: Options,
     /// The apps it keeps, in the order they are in.
     pub pinned: Vec<String>,
     /// What Horizon has open.
@@ -193,7 +202,8 @@ impl Dock {
     pub fn new(id: window::Id, apps: &[App]) -> Self {
         let mut dock = Self {
             id,
-            pinned: pinned(),
+            options: Options::read(),
+            pinned: librift::dock::pinned(),
             open: Open::default(),
             items: Vec::new(),
             menu: None,
@@ -216,8 +226,35 @@ impl Dock {
         } else {
             self.pinned.push(key.to_string());
         }
-        save(&self.pinned);
+        if let Err(why) = librift::dock::save(&self.pinned) {
+            eprintln!("lens: {why}");
+        }
         self.build(apps);
+    }
+
+    /// Read the list and the settings again, which Settings has just written.
+    pub fn reload(&mut self, apps: &[App]) {
+        self.options = Options::read();
+        self.pinned = librift::dock::pinned();
+        self.build(apps);
+    }
+
+    /// How tall it is, in logical pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        height(self.options.size)
+    }
+
+    /// How wide it is when it does not reach the sides: its padding and its border at each end,
+    /// the apps, and the workspaces after a space.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        let count = |length: usize| u32::try_from(length).unwrap_or(0);
+        let (items, spaces) = (count(self.items.len()), count(self.open.spaces.len()));
+        let apps = items * item(self.options.size) + items.saturating_sub(1) * GAP;
+        let workspaces = spaces * SPACE + spaces.saturating_sub(1) * SPACE_GAP;
+        let between = if items > 0 && spaces > 0 { BETWEEN } else { 0 };
+        2 * (u32::from(PAD) + LINE) + apps + between + workspaces
     }
 
     /// The item with this key.
@@ -226,17 +263,23 @@ impl Dock {
         self.items.iter().find(|item| item.key == key)
     }
 
-    /// Where the left edge of an item is, counted from the left edge of the screen, which is
-    /// where the menu of a right click on it hangs.
+    /// Where the left edge of an item is, counted from the left edge of a screen this wide, which
+    /// is where the menu of a right click on it hangs. A dock that does not reach the sides stands
+    /// in the middle, inside its border.
     #[must_use]
-    pub fn left_of(&self, key: &str) -> i32 {
+    pub fn left_of(&self, key: &str, screen: u32) -> i32 {
         let at = self
             .items
             .iter()
             .position(|item| item.key == key)
             .unwrap_or(0);
         let at = u32::try_from(at).unwrap_or(0);
-        i32::try_from(u32::from(PAD) + at * (ITEM + GAP)).unwrap_or(0)
+        let start = if self.options.extend {
+            0
+        } else {
+            screen.saturating_sub(self.width()) / 2 + LINE
+        };
+        i32::try_from(start + u32::from(PAD) + at * (item(self.options.size) + GAP)).unwrap_or(0)
     }
 
     /// One `key value` line for `lens --state`: what the dock lists, each with how many windows
@@ -318,67 +361,44 @@ pub fn items(apps: &[App], pinned: &[String], open: &Open) -> Vec<Item> {
     items
 }
 
-/// Where the pinned list is kept.
-fn path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::Path::new(&home).join(".config/rift/dock"))
-}
-
-/// The apps the dock keeps, one id per line. The four the image ships with when the owner has
-/// not said otherwise.
-#[must_use]
-pub fn pinned() -> Vec<String> {
-    match path().and_then(|path| std::fs::read_to_string(path).ok()) {
-        Some(text) => read(&text),
-        None => KEPT.iter().map(|&key| key.to_string()).collect(),
-    }
-}
-
-/// The pinned list a file holds: one app id per line, blank lines and notes left out.
-#[must_use]
-pub fn read(text: &str) -> Vec<String> {
-    let mut keys: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if !keys.iter().any(|kept| kept == line) {
-            keys.push(line.to_string());
-        }
-    }
-    keys
-}
-
-/// Write the pinned list back, so a restart of the shell finds it as the owner left it.
-pub fn save(pinned: &[String]) {
-    let Some(path) = path() else { return };
-    if let Some(parent) = path.parent() {
-        if let Err(why) = std::fs::create_dir_all(parent) {
-            eprintln!("lens: could not make {}: {why}", parent.display());
-            return;
-        }
-    }
-    let mut text = String::new();
-    for key in pinned {
-        text.push_str(key);
-        text.push('\n');
-    }
-    if let Err(why) = std::fs::write(&path, text) {
-        eprintln!("lens: could not write {}: {why}", path.display());
-    }
-}
-
-/// The dock: the apps at the left, the workspaces at the right, on the bar's gray under a
-/// hairline.
+/// The dock: the apps at the left, the workspaces at the right, on the bar's gray. One that runs
+/// from side to side has a hairline along the edge that faces the windows, and one that is only as
+/// wide as what it holds a border all round, like a menu.
 pub fn view(look: Palette, dock: &Dock) -> Element<'_, Message> {
+    let size = dock.options.size;
     let mut apps = row![].spacing(GAP).align_y(iced::Center);
     for item in &dock.items {
-        apps = apps.push(item_view(look, item));
+        apps = apps.push(item_view(look, item, size));
     }
     let mut spaces = row![].spacing(SPACE_GAP).align_y(iced::Center);
     for workspace in &dock.open.spaces {
         spaces = spaces.push(space_view(look, *workspace));
+    }
+    let background = move |_: &Theme| container::Style {
+        background: Some(look.bar.into()),
+        text_color: Some(look.text),
+        ..container::Style::default()
+    };
+    if !dock.options.extend {
+        let mut inside = row![apps].align_y(iced::Center).height(Length::Fill);
+        if !dock.items.is_empty() && !dock.open.spaces.is_empty() {
+            inside = inside.push(space().width(BETWEEN));
+        }
+        // the border is drawn over the edge of the padding, so the padding takes it in and what is
+        // inside stands in the middle of the width worked out for it
+        return container(inside.push(spaces))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([0, PAD + 1])
+            .style(move |theme: &Theme| container::Style {
+                border: Border {
+                    color: look.edge,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..background(theme)
+            })
+            .into();
     }
     let hairline = container(space().width(Length::Fill).height(LINE)).style(move |_: &Theme| {
         container::Style {
@@ -392,37 +412,39 @@ pub fn view(look: Palette, dock: &Dock) -> Element<'_, Message> {
             .height(Length::Fill),
     )
     .width(Length::Fill)
-    .height(HEIGHT - LINE)
+    .height(dock.height() - LINE)
     .padding([0, PAD])
-    .style(move |_: &Theme| container::Style {
-        background: Some(look.bar.into()),
-        text_color: Some(look.text),
-        ..container::Style::default()
-    });
-    column![hairline, content].into()
+    .style(background);
+    match dock.options.edge {
+        Edge::Bottom => column![hairline, content].into(),
+        Edge::Top => column![content, hairline].into(),
+    }
 }
 
 /// One app: its icon, a mark per window under it, and the accent line under the one being used. A
 /// left click starts it or goes to its window, a middle click opens another window, a right click
 /// opens the menu.
-fn item_view(look: Palette, item: &Item) -> Element<'static, Message> {
+fn item_view(look: Palette, item: &Item, size: Size) -> Element<'static, Message> {
+    let whole = self::item(size);
+    #[allow(clippy::cast_precision_loss)]
+    let icon = size.icon() as f32;
     let body = column![
-        icons::draw(look.text, item.icon.as_deref(), ICON),
+        icons::draw(look.text, item.icon.as_deref(), icon),
         space().height(ICON_GAP),
         marks(look, item.windows.len()),
-        under(look, item.is_focused(), ITEM),
+        under(look, item.is_focused(), whole),
     ]
     .align_x(iced::Center);
     let inside = container(body)
-        .width(ITEM)
-        .height(ITEM)
+        .width(whole)
+        .height(whole)
         .align_x(iced::Center)
         .align_y(iced::Center)
         .clip(true);
     let focused = item.is_focused();
     let pressed = button(inside)
-        .width(ITEM)
-        .height(ITEM)
+        .width(whole)
+        .height(whole)
         .padding(0)
         .on_press(Message::Dock(item.key.clone()))
         .style(move |_: &Theme, status| fill(look, focused, status));
@@ -561,7 +583,7 @@ fn menu_row(look: Palette, row: &Row) -> Element<'static, Message> {
 mod tests {
     use super::*;
     use crate::horizon::Win;
-    use crate::launcher::Category;
+    use librift::apps::Category;
 
     fn app(id: &str, name: &str) -> App {
         App {
@@ -599,13 +621,14 @@ mod tests {
     #[test]
     fn the_item_sizes_add_up_to_the_dock() {
         // the icon, the marks under it and the line under those are the whole item, and the item
-        // stands inside the dock under its hairline
-        const {
-            assert!(ICON_GAP + DOT + MARK + 32 == ITEM);
-            assert!(ITEM + LINE < HEIGHT);
-            assert!(SPACE < ITEM);
+        // stands inside the dock with its hairline. the small dock is the one the image has
+        assert_eq!((item(Size::Small), height(Size::Small)), (40, 44));
+        assert_eq!(height(Size::Large), 60);
+        for size in Size::ALL {
+            assert_eq!(item(size), size.icon() + ICON_GAP + DOT + MARK);
+            assert!(item(size) + LINE < height(size));
+            assert!(SPACE < item(size));
         }
-        assert!((f64::from(ICON) - 32.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -617,6 +640,7 @@ mod tests {
                 win(3, "Helix", false),
             ],
             spaces: Vec::new(),
+            ..Open::default()
         };
         let listed = items(&apps(), &kept(), &open);
         assert_eq!(
@@ -641,6 +665,7 @@ mod tests {
         let open = Open {
             windows: vec![win(1, "org.gnome.Nautilus", true)],
             spaces: Vec::new(),
+            ..Open::default()
         };
         let listed = items(&apps(), &[], &open);
         assert_eq!(listed.len(), 1);
@@ -667,6 +692,7 @@ mod tests {
                 win(3, "Helix", false),
             ],
             spaces: Vec::new(),
+            ..Open::default()
         };
         // the one after the one that has the focus, and round the end
         assert_eq!(items(&apps(), &[], &open)[0].next(), Some(3));
@@ -674,6 +700,7 @@ mod tests {
         let open = Open {
             windows: vec![win(1, "Helix", false), win(2, "Helix", false)],
             spaces: Vec::new(),
+            ..Open::default()
         };
         assert_eq!(
             items(&apps(), &[], &open)[0].next(),
@@ -690,6 +717,7 @@ mod tests {
         let open = Open {
             windows: vec![win(7, "firefox", true)],
             spaces: Vec::new(),
+            ..Open::default()
         };
         let listed = items(&apps(), &kept(), &open);
         assert_eq!(
@@ -724,9 +752,11 @@ mod tests {
                     active: false,
                 },
             ],
+            ..Open::default()
         };
         let mut dock = Dock {
             id: window::Id::unique(),
+            options: Options::default(),
             pinned: kept(),
             open: Open::default(),
             items: Vec::new(),
@@ -736,18 +766,19 @@ mod tests {
         assert_eq!(dock.line(), "firefox:0 com.mitchellh.ghostty:1* Helix:1");
         assert_eq!(dock.spaces_line(), "1* 2");
         // and the menu of a right click hangs where the item is
-        assert_eq!(dock.left_of("firefox"), i32::from(PAD));
-        assert_eq!(
-            dock.left_of("Helix"),
-            i32::from(PAD) + 2 * i32::try_from(ITEM + GAP).unwrap()
-        );
-    }
+        let step = i32::try_from(item(Size::Small) + GAP).unwrap();
+        assert_eq!(dock.left_of("firefox", 1280), i32::from(PAD));
+        assert_eq!(dock.left_of("Helix", 1280), i32::from(PAD) + 2 * step);
 
-    #[test]
-    fn the_pinned_list_is_one_id_per_line() {
-        let text = "# the apps in the dock\nfirefox\n\n  com.mitchellh.ghostty  \nfirefox\n";
-        assert_eq!(read(text), ["firefox", "com.mitchellh.ghostty"]);
-        assert!(read("").is_empty());
+        // a dock only as wide as what it holds: three apps, the space, two workspaces, and the
+        // padding and the border at each end, in the middle of the screen
+        dock.options.extend = false;
+        assert_eq!(dock.width(), 2 * (6 + 1) + 3 * 40 + 2 * 4 + 12 + 2 * 24 + 4);
+        let left = i32::try_from((1280 - dock.width()) / 2 + 1).unwrap();
+        assert_eq!(dock.left_of("firefox", 1280), left + i32::from(PAD));
+        // and it grows with its icons
+        dock.options.size = Size::Large;
+        assert_eq!(dock.width(), 2 * (6 + 1) + 3 * 56 + 2 * 4 + 12 + 2 * 24 + 4);
     }
 
     #[test]
@@ -755,6 +786,7 @@ mod tests {
         let known = apps();
         let mut dock = Dock {
             id: window::Id::unique(),
+            options: Options::default(),
             pinned: kept(),
             open: Open::default(),
             items: Vec::new(),

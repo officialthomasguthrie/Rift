@@ -19,6 +19,8 @@ use iced_layershell::reexport::{
 use iced_layershell::settings::{LayerShellSettings, Settings};
 use librift::appearance;
 use librift::battery::Battery;
+use librift::dock::Edge;
+use librift::notifications::{self, Sender};
 use librift::os::{self, Action};
 use librift::sound::{self, Side, Volume};
 use librift::{bluetooth, network, quasar, session};
@@ -100,6 +102,16 @@ const REOPEN: Duration = Duration::from_millis(400);
 /// How long a network may take to come up after it was picked.
 const JOIN_WAIT: Duration = Duration::from_secs(45);
 
+/// Where the dock's surface stands and how much of the screen it keeps, in the pixels the
+/// compositor places surfaces in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    anchor: Anchor,
+    size: (u32, u32),
+    margin: (i32, i32, i32, i32),
+    zone: i32,
+}
+
 /// The shell's state. The bar and the dock are always there; a menu, a dialog, a notification or the
 /// key popup comes and goes with its surface.
 struct Lens {
@@ -121,11 +133,21 @@ struct Lens {
     datemenu: Option<datemenu::Menu>,
     dialog: Option<Dialog>,
     dock: Dock,
+    /// Where the dock's surface was last asked to stand.
+    placed: Place,
     /// The bar's own surface, once the compositor has opened it. It is the one surface the shell
     /// does not open itself, so it has no id until then.
     bar: Option<window::Id>,
+    /// How wide the screen is in the shell's own pixels, which is how wide the bar is.
+    screen: u32,
+    /// The keyboard layouts there are, for the short name the bar gives the one in use.
+    keymaps: Vec<librift::keyboard::Layout>,
+    /// The short name of the layout in use, while there are two or more.
+    layout: Option<String>,
     /// The notifications on screen and the ones kept.
     notices: Notices,
+    /// The apps that have sent a notification, which the Notifications page lists.
+    senders: Vec<Sender>,
     /// Where the signals about them go out on the bus, once the server has the name.
     outbox: Option<Outbox>,
     /// The key popup, while it is up.
@@ -226,10 +248,18 @@ pub enum Message {
     DockRow(dock::Row),
     /// A click on a workspace button.
     Space(u8),
-    /// Open the dock's surface.
-    OpenDock(window::Id),
-    /// Open the menu of a dock item, this tall, with its left edge here.
-    OpenItemMenu(window::Id, u32, i32),
+    /// A click on the name of the keyboard layout in the bar: the next one.
+    NextLayout,
+    /// Open the dock's surface, standing here.
+    OpenDock(window::Id, Place),
+    /// Stand the dock on these edges at this size.
+    Shape(window::Id, Anchor, (u32, u32)),
+    /// Stand the dock this far off its edges.
+    Margins(window::Id, (i32, i32, i32, i32)),
+    /// Keep this much of the screen for the dock.
+    Zone(window::Id, i32),
+    /// Open the menu of a dock item, this tall, with its left edge here, on the dock's edge.
+    OpenItemMenu(window::Id, u32, i32, Edge),
     /// Open the menu's surface, this tall.
     Open(window::Id, u32),
     /// Open the system menu's surface, this tall.
@@ -248,8 +278,10 @@ pub enum Message {
     Resize(window::Id, u32, u32),
     /// A bar has to keep this much of the screen for itself.
     Reserve(window::Id, u32),
-    /// A surface opened.
-    Opened(window::Id),
+    /// A surface opened, this wide in the shell's own pixels.
+    Opened(window::Id, f32),
+    /// A surface is this wide now, in the shell's own pixels.
+    Sized(window::Id, f32),
     /// Close a surface.
     Close(window::Id),
     /// A surface took or lost the keyboard.
@@ -272,17 +304,29 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
                     id,
                 },
             )),
-            Message::OpenDock(id) => Ok(Self::new(
+            Message::OpenDock(id, place) => Ok(Self::new(
                 None,
                 LayerShellCustomAction::NewLayerShell {
-                    settings: dock_surface(),
+                    settings: dock_surface(place),
                     id,
                 },
             )),
-            Message::OpenItemMenu(id, height, left) => Ok(Self::new(
+            Message::Shape(id, anchor, size) => Ok(Self::new(
+                Some(id),
+                LayerShellCustomAction::AnchorSizeChange(anchor, size),
+            )),
+            Message::Margins(id, margins) => Ok(Self::new(
+                Some(id),
+                LayerShellCustomAction::MarginChange(margins),
+            )),
+            Message::Zone(id, zone) => Ok(Self::new(
+                Some(id),
+                LayerShellCustomAction::ExclusiveZoneChange(zone),
+            )),
+            Message::OpenItemMenu(id, height, left, edge) => Ok(Self::new(
                 None,
                 LayerShellCustomAction::NewLayerShell {
-                    settings: item_menu_surface(height, left),
+                    settings: item_menu_surface(height, left, edge),
                     id,
                 },
             )),
@@ -339,16 +383,21 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
     }
 }
 
-/// The menu's surface: on the overlay layer, hanging under the bar inside the working area, its
-/// left edge under the Applications button. It takes the keyboard on demand, which the compositor
-/// gives it as it appears and takes away as soon as anything else is clicked.
+/// How a menu of the bar stands under it: on no one's working area but the screen's, and the bar's
+/// height down from the top, so a dock along the top edge does not push the menu down from the
+/// button that opened it. It stands over the dock instead, the way a menu does.
+const UNDER_THE_BAR: i32 = -1;
+
+/// The menu's surface: on the overlay layer, hanging under the bar, its left edge under the
+/// Applications button. It takes the keyboard on demand, which the compositor gives it as it
+/// appears and takes away as soon as anything else is clicked.
 fn menu_surface(height: u32) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((scaled(menu::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Left,
-        exclusive_zone: Some(0),
-        margin: Some((0, 0, 0, margin(menu::PAD))),
+        exclusive_zone: Some(UNDER_THE_BAR),
+        margin: Some((margin(bar::HEIGHT), 0, 0, margin(menu::PAD))),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -356,15 +405,44 @@ fn menu_surface(height: u32) -> NewLayerShellSettings {
     }
 }
 
-/// The dock's surface: along the bottom edge, full width, with its own height reserved so that a
-/// window sits over it and nothing is ever hidden behind it. A bar never takes the keyboard.
-fn dock_surface() -> NewLayerShellSettings {
+/// Where the dock stands: along its edge from one side of the screen to the other, or only as wide
+/// as what it holds in the middle of its edge and a gap off it. Either way it keeps its height of
+/// the screen, so a window stands clear of it and nothing is ever hidden behind it; the compositor
+/// adds the gap to what it keeps.
+fn dock_place(dock: &Dock) -> Place {
+    let edge = match dock.options.edge {
+        Edge::Bottom => Anchor::Bottom,
+        Edge::Top => Anchor::Top,
+    };
+    let zone = margin(dock.height());
+    if dock.options.extend {
+        return Place {
+            anchor: edge | Anchor::Left | Anchor::Right,
+            size: (0, scaled(dock.height())),
+            margin: (0, 0, 0, 0),
+            zone,
+        };
+    }
+    let gap = margin(dock::OFF_EDGE);
+    Place {
+        anchor: edge,
+        size: (scaled(dock.width()), scaled(dock.height())),
+        margin: match dock.options.edge {
+            Edge::Bottom => (0, 0, gap, 0),
+            Edge::Top => (gap, 0, 0, 0),
+        },
+        zone,
+    }
+}
+
+/// The dock's surface, standing where `dock_place` says. A bar never takes the keyboard.
+fn dock_surface(place: Place) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((0, scaled(dock::HEIGHT))),
+        size: Some(place.size),
         layer: Layer::Top,
-        anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
-        exclusive_zone: Some(margin(dock::HEIGHT)),
-        margin: None,
+        anchor: place.anchor,
+        exclusive_zone: Some(place.zone),
+        margin: Some(place.margin),
         keyboard_interactivity: KeyboardInteractivity::None,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -372,15 +450,19 @@ fn dock_surface() -> NewLayerShellSettings {
     }
 }
 
-/// The menu a right click on a dock item opens: standing on the dock, its left edge where the item
-/// is. A surface that reserves nothing is placed inside the working area, so the dock's own height
-/// is already taken off and the margin under it is nothing. It takes the keyboard the same way the
-/// Applications menu does, so a click anywhere else closes it.
-fn item_menu_surface(height: u32, left: i32) -> NewLayerShellSettings {
+/// The menu a right click on a dock item opens: standing on the dock, or hanging from it when the
+/// dock is along the top, its left edge where the item is. A surface that reserves nothing is
+/// placed inside the working area, so the dock's own height is already taken off and the margin
+/// towards it is nothing. It takes the keyboard the same way the Applications menu does, so a click
+/// anywhere else closes it.
+fn item_menu_surface(height: u32, left: i32, edge: Edge) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((scaled(dock::MENU_WIDTH), scaled(height))),
         layer: Layer::Overlay,
-        anchor: Anchor::Bottom | Anchor::Left,
+        anchor: match edge {
+            Edge::Bottom => Anchor::Bottom,
+            Edge::Top => Anchor::Top,
+        } | Anchor::Left,
         exclusive_zone: Some(0),
         margin: Some((0, 0, 0, margin(u32::try_from(left).unwrap_or(0)))),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
@@ -390,16 +472,16 @@ fn item_menu_surface(height: u32, left: i32) -> NewLayerShellSettings {
     }
 }
 
-/// The system menu's surface: on the overlay layer, hanging under the bar inside the working area,
-/// its right edge under the status icons. It takes the keyboard the way the Applications menu
-/// does, so a click anywhere else closes it.
+/// The system menu's surface: on the overlay layer, hanging under the bar, its right edge under
+/// the status icons. It takes the keyboard the way the Applications menu does, so a click anywhere
+/// else closes it.
 fn system_surface(height: u32) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((scaled(system::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Right,
-        exclusive_zone: Some(0),
-        margin: Some((0, margin(system::PAD), 0, 0)),
+        exclusive_zone: Some(UNDER_THE_BAR),
+        margin: Some((margin(bar::HEIGHT), margin(system::PAD), 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -424,16 +506,16 @@ fn dialog_surface(height: u32) -> NewLayerShellSettings {
     }
 }
 
-/// The clock menu's surface: on the overlay layer, hanging under the bar inside the working area and
-/// anchored to no side, so it is in the middle of the screen under the clock. It takes the keyboard
-/// the way the other menus do, so a click anywhere else closes it.
+/// The clock menu's surface: on the overlay layer, hanging under the bar and anchored to no side,
+/// so it is in the middle of the screen under the clock. It takes the keyboard the way the other
+/// menus do, so a click anywhere else closes it.
 fn clock_surface(height: u32) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((scaled(datemenu::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top,
-        exclusive_zone: Some(0),
-        margin: None,
+        exclusive_zone: Some(UNDER_THE_BAR),
+        margin: Some((margin(bar::HEIGHT), 0, 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -547,7 +629,8 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
     // the dock is made here, not when something opens it: it is a part of the shell like the bar,
     // and it takes its own height from the screen before the first window is placed
     let dock = Dock::new(window::Id::unique(), &apps);
-    let opening = Task::done(Message::OpenDock(dock.id));
+    let placed = dock_place(&dock);
+    let opening = Task::done(Message::OpenDock(dock.id, placed));
     let now = clock::now();
     let accent = appearance::Accent::read();
     let state = Lens {
@@ -564,8 +647,13 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
         datemenu: None,
         dialog: None,
         dock,
+        placed,
         bar: None,
-        notices: Notices::new(notice::quiet()),
+        screen: 0,
+        keymaps: librift::keyboard::installed(),
+        layout: None,
+        notices: Notices::new(notifications::quiet(), notifications::quiet_apps()),
+        senders: notifications::senders(),
         outbox: None,
         popup: None,
         recording: access::running(access::Tool::Recorder).and_then(|(_, file)| file),
@@ -614,7 +702,10 @@ fn keys() -> Subscription<Message> {
 // before the keyboard reaches it, so the cursor goes in the field on either event
 fn focus() -> Subscription<Message> {
     event::listen_with(|event, _, id| match event {
-        iced::Event::Window(window::Event::Opened { .. }) => Some(Message::Opened(id)),
+        iced::Event::Window(window::Event::Opened { size, .. }) => {
+            Some(Message::Opened(id, size.width))
+        }
+        iced::Event::Window(window::Event::Resized(size)) => Some(Message::Sized(id, size.width)),
         iced::Event::Window(window::Event::Focused) => Some(Message::Focus(id, true)),
         iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(id, false)),
         _ => None,
@@ -752,8 +843,117 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             .as_mut()
             .map_or_else(Task::none, |menu| answered(menu, result)),
         Message::Typed(command) => typed(state, command),
+        Message::Windows(_)
+        | Message::NextLayout
+        | Message::Dock(_)
+        | Message::DockNew(_)
+        | Message::DockMenu(_)
+        | Message::DockRow(_)
+        | Message::Space(_) => horizon_said(state, message),
+        Message::Focus(..) | Message::Opened(..) | Message::Sized(..) => surface(state, &message),
+        // the runtime takes these before update ever sees them
+        Message::Open(..)
+        | Message::OpenDock(..)
+        | Message::Shape(..)
+        | Message::Margins(..)
+        | Message::Zone(..)
+        | Message::OpenItemMenu(..)
+        | Message::OpenSystem(..)
+        | Message::OpenDialog(..)
+        | Message::OpenClock(..)
+        | Message::OpenBanner(..)
+        | Message::OpenPopup(_)
+        | Message::Place(..)
+        | Message::Resize(..)
+        | Message::Reserve(..)
+        | Message::Close(..) => Task::none(),
+    };
+    let grow = resize(state);
+    let stand = place_dock(state);
+    remember(state);
+    Task::batch([task, grow, stand])
+}
+
+/// Stand the dock where its settings say when that is not where it stands: a new edge, a new size
+/// of icons or text, or the width of a dock only as wide as what it holds, which follows the apps.
+/// The anchor and the size go in one request, because a surface as wide as nothing has to be
+/// anchored to both sides in the same commit.
+fn place_dock(state: &mut Lens) -> Task<Message> {
+    let wanted = dock_place(&state.dock);
+    let had = state.placed;
+    if wanted == had {
+        return Task::none();
+    }
+    state.placed = wanted;
+    let id = state.dock.id;
+    let mut work = Vec::new();
+    if (wanted.anchor, wanted.size) != (had.anchor, had.size) {
+        work.push(Task::done(Message::Shape(id, wanted.anchor, wanted.size)));
+    }
+    if wanted.margin != had.margin {
+        work.push(Task::done(Message::Margins(id, wanted.margin)));
+    }
+    if wanted.zone != had.zone {
+        work.push(Task::done(Message::Zone(id, wanted.zone)));
+    }
+    Task::batch(work)
+}
+
+/// The short name of the keyboard layout in use, while there are two or more to switch between.
+fn layout_name(state: &Lens) -> Option<String> {
+    let open = &state.dock.open;
+    if open.layouts.len() < 2 {
+        return None;
+    }
+    librift::keyboard::short_names(&state.keymaps, &open.layouts)
+        .into_iter()
+        .nth(open.layout)
+}
+
+/// A surface opened, took or lost the keyboard, or changed its width.
+fn surface(state: &mut Lens, message: &Message) -> Task<Message> {
+    match *message {
+        Message::Focus(id, has) => focused(state, id, has),
+        // the bar is the one surface the shell does not open itself: the runtime makes it from the
+        // settings and names it when it maps, which is before anything can open a menu. its id is
+        // what a new interface text size is sent to
+        Message::Opened(id, width) => {
+            if state.bar.is_none() && id != state.dock.id {
+                state.bar = Some(id);
+            }
+            measured(state, id, width);
+            focused(state, id, true)
+        }
+        Message::Sized(id, width) => {
+            measured(state, id, width);
+            Task::none()
+        }
+        _ => Task::none(),
+    }
+}
+
+/// A surface is this wide. The bar runs from one side of the screen to the other, so its width is
+/// the screen's, which is where the menu of an item in a dock in the middle of its edge hangs from.
+fn measured(state: &mut Lens, id: window::Id, width: f32) {
+    if state.bar == Some(id) {
+        // a width is a few thousand pixels at most, and never less than none
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let wide = width.max(0.0).round() as u32;
+        state.screen = wide;
+    }
+}
+
+/// What Horizon has open, and a press on the dock or on the layout in the bar, which goes back to
+/// Horizon.
+fn horizon_said(state: &mut Lens, message: Message) -> Task<Message> {
+    match message {
         Message::Windows(open) => {
             state.dock.changed(&state.apps, open);
+            state.layout = layout_name(state);
+            Task::none()
+        }
+        Message::NextLayout => {
+            report(horizon::next_layout());
             Task::none()
         }
         Message::Dock(key) => dock_click(state, &key),
@@ -767,33 +967,8 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             report(horizon::activate(number));
             Task::none()
         }
-        Message::Focus(id, has) => focused(state, id, has),
-        // the bar is the one surface the shell does not open itself: the runtime makes it from the
-        // settings and names it when it maps, which is before anything can open a menu. its id is
-        // what a new interface text size is sent to
-        Message::Opened(id) => {
-            if state.bar.is_none() && id != state.dock.id {
-                state.bar = Some(id);
-            }
-            focused(state, id, true)
-        }
-        // the runtime takes these before update ever sees them
-        Message::Open(..)
-        | Message::OpenDock(_)
-        | Message::OpenItemMenu(..)
-        | Message::OpenSystem(..)
-        | Message::OpenDialog(..)
-        | Message::OpenClock(..)
-        | Message::OpenBanner(..)
-        | Message::OpenPopup(_)
-        | Message::Place(..)
-        | Message::Resize(..)
-        | Message::Reserve(..)
-        | Message::Close(..) => Task::none(),
-    };
-    let grow = resize(state);
-    remember(state);
-    Task::batch([task, grow])
+        _ => Task::none(),
+    }
 }
 
 /// What the clock and the status sources said: the bar and the menus draw from it.
@@ -908,7 +1083,7 @@ fn clock_event(state: &mut Lens, event: datemenu::Event) -> Task<Message> {
         }
         datemenu::Event::Quiet(on) => {
             state.notices.quiet = on;
-            report(notice::keep_quiet(on));
+            report(notifications::keep_quiet(on));
             Task::none()
         }
     }
@@ -917,6 +1092,15 @@ fn clock_event(state: &mut Lens, event: datemenu::Event) -> Task<Message> {
 /// A notification came in: its icon is found and its words are cut to fit here, once, and then it
 /// shows under the bar and goes in the list.
 fn notified(state: &mut Lens, notification: Notification) -> Task<Message> {
+    // an app that has sent one is one the Notifications page offers a switch for
+    if let Some(grown) = notifications::with_sender(
+        &state.senders,
+        &notification.app,
+        notification.entry.as_deref(),
+    ) {
+        report(notifications::save_senders(&grown));
+        state.senders = grown;
+    }
     let icon = banner::icon(&state.apps, &notification);
     let (summary, body, lines) = banner::texts(&notification, icon.is_some());
     let (row_summary, row_body) = datemenu::texts(&notification, icon.is_some());
@@ -1379,7 +1563,7 @@ fn dock_menu(state: &mut Lens, key: &str) -> Task<Message> {
     if rows.is_empty() {
         return closing;
     }
-    let left = state.dock.left_of(key);
+    let left = state.dock.left_of(key, state.screen);
     let height = dock::menu_height(rows.len());
     let id = window::Id::unique();
     state.dock.menu = Some(dock::Menu {
@@ -1387,7 +1571,11 @@ fn dock_menu(state: &mut Lens, key: &str) -> Task<Message> {
         key: key.to_string(),
         rows,
     });
-    Task::batch([closing, Task::done(Message::OpenItemMenu(id, height, left))])
+    let edge = state.dock.options.edge;
+    Task::batch([
+        closing,
+        Task::done(Message::OpenItemMenu(id, height, left, edge)),
+    ])
 }
 
 /// A row of that menu. Every one of them closes it.
@@ -1500,6 +1688,17 @@ fn typed(state: &mut Lens, command: Command) -> Task<Message> {
         Command::Popup(level) => show_popup(state, level),
         Command::Record(recording) => record(state, &recording),
         Command::Look => look(state),
+        Command::Dock => {
+            // the menu of an item hangs where the item was, so it goes with the old dock
+            let closing = close_item_menu(state);
+            state.dock.reload(&state.apps);
+            closing
+        }
+        Command::Notifications => {
+            state.notices.quiet = notifications::quiet();
+            state.notices.muted = notifications::quiet_apps();
+            Task::none()
+        }
         // answered on the socket's own thread, from the lines remember() keeps
         Command::State => Task::none(),
     }
@@ -1516,17 +1715,16 @@ fn look(state: &mut Lens) -> Task<Message> {
     if SCALE.swap(text, Ordering::Relaxed) == text {
         return Task::none();
     }
-    // a menu is made when it opens and is asked for at the new size then; the bar and the dock are
-    // there all session, so each is told its height and how much of the screen it keeps
-    let mut work = vec![
-        Task::done(Message::Resize(state.dock.id, 0, dock::HEIGHT)),
-        Task::done(Message::Reserve(state.dock.id, dock::HEIGHT)),
-    ];
-    if let Some(id) = state.bar {
-        work.push(Task::done(Message::Resize(id, 0, bar::HEIGHT)));
-        work.push(Task::done(Message::Reserve(id, bar::HEIGHT)));
-    }
-    Task::batch(work)
+    // a menu is made when it opens and is asked for at the new size then; the bar is there all
+    // session, so it is told its height and how much of the screen it keeps, and the dock is stood
+    // at its new size after this message the way it is after every other
+    let Some(id) = state.bar else {
+        return Task::none();
+    };
+    Task::batch([
+        Task::done(Message::Resize(id, 0, bar::HEIGHT)),
+        Task::done(Message::Reserve(id, bar::HEIGHT)),
+    ])
 }
 
 /// The screen recorder started or stopped. While it runs the bar carries the mark every desktop
@@ -1671,7 +1869,12 @@ fn remember(state: &Lens) {
         }
     }
     line("dock", &state.dock.line());
+    for setting in state.dock.options.lines() {
+        let (key, value) = setting.split_once(' ').unwrap_or((&setting, ""));
+        line(key, value);
+    }
     line("workspaces", &state.dock.spaces_line());
+    line("layout", state.layout.as_deref().unwrap_or("none"));
     if let Some(menu) = &state.dock.menu {
         line("item", &format!("{} {}", menu.key, menu.rows.len()));
     }
@@ -1890,6 +2093,7 @@ fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
         },
         state.notices.quiet,
         state.recording.is_some(),
+        state.layout.as_deref(),
     ))
     .width(Length::Fill)
     .height(Length::Fill)

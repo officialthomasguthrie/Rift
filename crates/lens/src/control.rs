@@ -1,9 +1,9 @@
 //! The shell, driven from a terminal. Lens listens on a socket in the session's runtime
-//! directory; `lens --type`, `lens --enter`, `lens --escape`, `lens --menu`, `lens --look` and
-//! `lens --state` write one line to it, and `--state` reads the answer back. `lens --volume` and
-//! `lens --brightness`, which the keys for them run, write the level they left behind, and the
-//! shell shows it in the key popup. The runtime directory belongs to one person, so only that
-//! person can type into their field.
+//! directory; `lens --type`, `lens --enter`, `lens --escape`, `lens --menu`, `lens --look`,
+//! `lens --dock`, `lens --notifications` and `lens --state` write one line to it, and `--state`
+//! reads the answer back. `lens --volume` and `lens --brightness`, which the keys for them run,
+//! write the level they left behind, and the shell shows it in the key popup. The runtime
+//! directory belongs to one person, so only that person can type into their field.
 
 // only the shell listens on the socket, and the shell is linux only
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -31,6 +31,12 @@ pub enum Command {
     /// Read the appearance settings again and draw with them. Settings sends this when the owner
     /// changes the theme or the accent.
     Look,
+    /// Read the dock's apps and its settings again, and stand it where they say. Settings sends
+    /// this from the Dock page.
+    Dock,
+    /// Read Do not disturb and the apps kept quiet again. Settings sends this from the
+    /// Notifications page.
+    Notifications,
     /// Show the key popup with this level: a volume or a brightness key was pressed.
     Popup(Level),
     /// A screen recording started, or stopped and left a file behind.
@@ -134,13 +140,15 @@ impl Command {
             Self::Menu => "menu".to_string(),
             Self::State => "state".to_string(),
             Self::Look => "look".to_string(),
+            Self::Dock => "dock".to_string(),
+            Self::Notifications => "notifications".to_string(),
             Self::Popup(level) => format!("popup {}", level.words()),
             Self::Record(recording) => format!("record {}", recording.words()),
         }
     }
 }
 
-/// Read one line of the protocol. `None` when it is not one of the eight.
+/// Read one line of the protocol. `None` when it is not one of the ten.
 #[must_use]
 pub fn parse(line: &str) -> Option<Command> {
     let line = line.trim_end_matches(['\r', '\n']);
@@ -152,6 +160,8 @@ pub fn parse(line: &str) -> Option<Command> {
         "menu" => Some(Command::Menu),
         "state" => Some(Command::State),
         "look" => Some(Command::Look),
+        "dock" => Some(Command::Dock),
+        "notifications" => Some(Command::Notifications),
         "popup" => Level::read(rest).map(Command::Popup),
         "record" => Recording::read(rest).map(Command::Record),
         _ => None,
@@ -306,6 +316,9 @@ mod tests {
             Command::Escape,
             Command::Menu,
             Command::State,
+            Command::Look,
+            Command::Dock,
+            Command::Notifications,
             Command::Popup(Level::Volume {
                 level: 100,
                 muted: true,
