@@ -461,7 +461,7 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
 # year. a drive where no zone was ever chosen is in UTC
 SETTINGS_ZONE = ("Pacific/Auckland", ("NZST", "NZDT"))
 # where timedated keeps the link to the zone, on persist, and the locale the image is in
-ZONE_LINK = "/var/lib/rift/localtime"
+ZONE_LINK = "/var/lib/rift/zone/localtime"
 SETTINGS_LOCALE = "en_GB.UTF-8"
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
@@ -4479,7 +4479,7 @@ def main():
             zone_said = without_console(output).split()
             zone_wanted = [chosen_zone, f"/etc/zoneinfo/{chosen_zone}", ZONE_LINK]
             # findmnt is asked about the folder, since it follows a link: the folder is on persist, in
-            # the subvolume /var is
+            # the subvolume /var is. timedated writes nothing else outside /etc
             on_persist = any("persist" in word and "@var" in word for word in zone_said)
             if (any(word not in zone_said for word in zone_wanted) or not on_persist
                     or not any(name in zone_said for name in zone_names)):

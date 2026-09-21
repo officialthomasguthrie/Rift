@@ -9,8 +9,9 @@
 let
   system = pkgs.stdenv.hostPlatform.system;
   riftWorkspace = self.packages.${system}.workspace;
-  # the link to the time zone the owner chose, on persist
-  zoneLink = "/var/lib/rift/localtime";
+  # the folder on persist that holds the link to the time zone the owner chose, and the link
+  zoneFolder = "/var/lib/rift/zone";
+  zoneLink = "${zoneFolder}/localtime";
 in
 {
   networking.hostName = "rift";
@@ -33,6 +34,11 @@ in
   };
   systemd.services.systemd-timedated.environment.SYSTEMD_ETC_LOCALTIME = zoneLink;
   systemd.managerEnvironment.SYSTEMD_ETC_LOCALTIME = zoneLink;
+  # timedated runs with the whole system read only but /etc, so the folder of its own is the one
+  # more place it may write. a new persist is made with the folder, since pid 1 watches it from its
+  # first moment, and a drive made before it gets it here
+  systemd.services.systemd-timedated.serviceConfig.ReadWritePaths = [ "-${zoneFolder}" ];
+  systemd.tmpfiles.rules = [ "d ${zoneFolder} 0755 root root -" ];
   # timedated asks for an administrator's password before it changes the zone, and nothing in the
   # session can answer that. the owner may change it from their own session without one, which is
   # what GNOME's own rule gives an administrator for the clock
