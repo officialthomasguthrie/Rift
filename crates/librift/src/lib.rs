@@ -15,6 +15,9 @@
 pub mod access;
 pub mod airlock;
 pub mod appearance;
+// desktop entries and icon themes are how a freedesktop session finds its apps, which rift-flash
+// has no use for when it is built for Windows
+#[cfg(unix)]
 pub mod apps;
 pub mod battery;
 pub mod bluetooth;
@@ -24,6 +27,7 @@ pub mod clock;
 #[cfg(feature = "disk")]
 pub mod disk;
 pub mod dock;
+#[cfg(unix)]
 pub mod icons;
 pub mod keyboard;
 #[cfg(feature = "models")]
