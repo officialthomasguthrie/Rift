@@ -1,10 +1,12 @@
 //! Names, D-Bus addresses and paths shared by every Rift component, the OS commands Lens and
 //! the rift command run, the client side of the services on the system bus (Rift's own, and
 //! `NetworkManager`, `BlueZ`, `UPower` and logind for the system menu, timedated and localed for
-//! the clock, the language and the keyboard layouts), the printers CUPS has a queue for, which of
-//! the programs the shell's keys start is running, the index for search by meaning, what the
-//! system calls itself, dark or light and the wallpaper, the mouse and the touchpad, the sound
-//! `PipeWire` plays and hears, how the boot looks, and how a drive is written.
+//! the clock, the language and the keyboard layouts), the printers CUPS has a queue for, the apps
+//! the desktop entries name and where their icons are, what the dock keeps and where it stands, Do
+//! not disturb and the apps whose banners stay off, which of the programs the shell's keys start is
+//! running, the index for search by meaning, what the system calls itself, dark or light and the
+//! wallpaper, the mouse and the touchpad, the sound `PipeWire` plays and hears, how the boot looks,
+//! and how a drive is written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
 //! which the asking side of the bus turns on, brings in zbus, only the `disk` feature serde and
@@ -13,6 +15,7 @@
 pub mod access;
 pub mod airlock;
 pub mod appearance;
+pub mod apps;
 pub mod battery;
 pub mod bluetooth;
 pub mod boot;
@@ -20,10 +23,13 @@ pub mod bus;
 pub mod clock;
 #[cfg(feature = "disk")]
 pub mod disk;
+pub mod dock;
+pub mod icons;
 pub mod keyboard;
 #[cfg(feature = "models")]
 pub mod models;
 pub mod network;
+pub mod notifications;
 pub mod orbit;
 pub mod os;
 pub mod pointer;

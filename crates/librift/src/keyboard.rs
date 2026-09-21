@@ -210,6 +210,39 @@ pub fn find<'a>(list: &'a [Layout], typed: &str, chosen: &[Layout]) -> Vec<&'a L
     found
 }
 
+/// A short name for each of the layouts the compositor names, for the bar: its code in capitals,
+/// `GB`, and a number after the second and later of one code, `US2`, the way GNOME numbers two
+/// layouts of one language. A name the list does not have is its first three letters.
+#[must_use]
+pub fn short_names(list: &[Layout], names: &[String]) -> Vec<String> {
+    let codes: Vec<String> = names
+        .iter()
+        .map(|name| {
+            list.iter().find(|layout| layout.name == *name).map_or_else(
+                || {
+                    name.chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .take(3)
+                        .collect()
+                },
+                |layout| layout.code.to_ascii_uppercase(),
+            )
+        })
+        .collect();
+    codes
+        .iter()
+        .enumerate()
+        .map(|(at, code)| {
+            let before = codes[..at].iter().filter(|other| *other == code).count();
+            if before == 0 {
+                code.clone()
+            } else {
+                format!("{code}{}", before + 1)
+            }
+        })
+        .collect()
+}
+
 /// The layouts localed says the desktop has, out of its two lists: `us,gb` and `,dvorak`. A desktop
 /// where none was chosen types with the one every keyboard starts in.
 #[must_use]
@@ -334,6 +367,29 @@ mod tests {
 
     fn listed() -> Vec<Layout> {
         parse(SAMPLE)
+    }
+
+    #[test]
+    fn a_layout_is_short_in_the_bar() {
+        let names = |these: &[&str]| {
+            these
+                .iter()
+                .map(|&name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            short_names(&listed(), &names(&["English (US)", "English (UK)"])),
+            ["US", "GB"]
+        );
+        // two of one code are numbered, and a name the list has not got is cut short
+        assert_eq!(
+            short_names(
+                &listed(),
+                &names(&["English (US)", "English (Dvorak)", "Klingon"])
+            ),
+            ["US", "US2", "Kli"]
+        );
+        assert!(short_names(&listed(), &[]).is_empty());
     }
 
     #[test]
