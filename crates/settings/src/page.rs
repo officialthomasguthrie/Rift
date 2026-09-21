@@ -196,6 +196,8 @@ impl Page {
             | Self::Power
             | Self::Appearance
             | Self::Search
+            | Self::DateTime
+            | Self::Region
             | Self::Updates
             | Self::Backups
             | Self::Ai
@@ -232,13 +234,6 @@ impl Page {
             Self::Owner => {
                 "The owner is not in Settings yet. rift host says what this machine is to the drive."
             }
-            Self::DateTime => {
-                "The clock and the time zone are not in Settings yet. timedatectl sets them from a \
-                 terminal."
-            }
-            Self::Region => {
-                "Region and language are not in Settings yet. The system is in British English."
-            }
         }
     }
 }
@@ -249,7 +244,7 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 12] = [
+    const REAL: [Page; 14] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
@@ -258,6 +253,8 @@ mod tests {
         Page::Power,
         Page::Appearance,
         Page::Search,
+        Page::DateTime,
+        Page::Region,
         Page::Updates,
         Page::Backups,
         Page::Ai,

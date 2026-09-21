@@ -15,6 +15,7 @@ use librift::appearance::{Accent, Look, Scheme, Theme as Mode};
 use librift::battery::Battery;
 use librift::bluetooth as bluetooth_picture;
 use librift::boot::Style;
+use librift::clock::Zone;
 use librift::models::Tier;
 use librift::network;
 use librift::orbit::Host;
@@ -26,8 +27,8 @@ use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
 use crate::{
-    about, ai, appearance, backups, bluetooth, displays, icons, net, power, search, sound, updates,
-    watch,
+    about, ai, appearance, backups, bluetooth, datetime, displays, icons, net, power, region,
+    search, sound, updates, watch,
 };
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
@@ -92,6 +93,16 @@ pub struct Settings {
     pub making: backups::Making,
     /// What the drive's two slots hold, once Vault has answered.
     pub slots: Option<Result<librift::update::Slots, String>>,
+    /// What timedated says about the clock and what `date` says the time is, once the Date and
+    /// time page has read them, and again every minute while it is up.
+    pub clock: Option<datetime::Reading>,
+    /// The time zones there are to choose from, out of the database the image carries.
+    pub zones: Vec<Zone>,
+    /// What has been typed into the search for a time zone.
+    pub finding: String,
+    /// What localed says the system is set to and what that means, once the Region and language
+    /// page has asked.
+    pub region: Option<Box<region::Picture>>,
     /// The network being joined that asks for a password, and what has been typed for it.
     pub joining: Option<Joining>,
     /// What is happening: a join, or a device being connected.
@@ -169,6 +180,15 @@ pub enum Message {
     BackedUp(Result<(), String>),
     /// What the drive's two slots hold now.
     Slots(Result<librift::update::Slots, String>),
+    /// What timedated and `date` say about the clock now. It travels behind a pointer, the way the
+    /// pictures a service answers with do.
+    Clock(Box<datetime::Reading>),
+    /// The search for a time zone was typed into.
+    Find(String),
+    /// A time zone was chosen, by its name in the database.
+    Zone(String),
+    /// What localed says now, and what it means.
+    Region(Box<region::Picture>),
     /// The Wi-Fi switch.
     Wifi(bool),
     /// The network at this place in the list was pressed.
@@ -274,6 +294,7 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         greeting: librift::appearance::greeting(),
         boot: None,
         choices: appearance::choices(),
+        zones: librift::clock::installed(),
         host: None,
         release: about::release(),
         problem: None,
@@ -289,6 +310,9 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
     }
     if state.page == Page::Updates {
         work.push(updates::read());
+    }
+    if state.page == Page::Region {
+        work.push(region::read());
     }
     if start.screenshot.is_some() {
         work.push(shoot());
@@ -339,6 +363,10 @@ impl Settings {
             disk: None,
             making: backups::Making::default(),
             slots: None,
+            clock: None,
+            zones: Vec::new(),
+            finding: String::new(),
+            region: None,
             joining: None,
             doing: None,
             swept: false,
@@ -399,6 +427,8 @@ impl Settings {
         .chain(search::state(self))
         .chain(backups::state(self))
         .chain(updates::state(self))
+        .chain(datetime::state(self))
+        .chain(region::state(self))
         .collect::<Vec<_>>()
         .join("\n")
             + "\n"
@@ -510,6 +540,8 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
             return bluetooth::set_powered(state, on);
         }
         Message::Device(at) => return bluetooth::connect(state, at),
+        Message::Find(typed) => state.finding = typed,
+        Message::Zone(zone) => return datetime::choose(state, zone),
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
             state.greeting = on;
@@ -556,6 +588,8 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         }
         Message::Snapshots(answer) => state.snapshots = Some(answer),
         Message::Slots(answer) => state.slots = Some(answer),
+        Message::Clock(reading) => state.clock = Some(*reading),
+        Message::Region(picture) => state.region = Some(picture),
         Message::Backups(answer) => state.disk = Some(answer),
         Message::Took(said) => {
             state.making.snapshot = false;
@@ -605,7 +639,7 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
 /// Show a page. What went wrong on the page that was up, and what it was doing, belong to that
 /// page and are left behind. The Wi-Fi page asks the card to sweep as it comes up, so the list is
 /// what is around now rather than what was around when the window opened; leaving it drops a
-/// password half typed.
+/// password half typed, and a search for a time zone.
 fn show(state: &mut Settings, page: Page) -> Task<Message> {
     if state.page == page {
         return Task::none();
@@ -615,6 +649,7 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
     state.doing = None;
     state.swept = false;
     state.joining = None;
+    state.finding.clear();
     match page {
         Page::Wifi => {
             state.swept = true;
@@ -628,6 +663,9 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         Page::Backups => backups::read(),
         // and for the slots, since reading them mounts the esp
         Page::Updates => updates::read(),
+        // the language and the formats are part of the image, and asking for them runs programs.
+        // the clock is read by a subscription of its own, which turns with the minute
+        Page::Region => region::read(),
         _ => Task::none(),
     }
 }
@@ -688,6 +726,8 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
             }),
         "greeting" => Task::done(Message::Greeting(!value.trim().eq_ignore_ascii_case("off"))),
         "tier" => ai::named(value).map_or_else(Task::none, |tier| Task::done(Message::Tier(tier))),
+        // a zone by its name in the database, which timedated checks: `--set timezone Europe/London`
+        "timezone" => Task::done(Message::Zone(value.trim().to_string())),
         // the value is there to be typed, the way a switch takes on or off: there is one thing to do
         "index" => Task::done(Message::Index),
         "snapshot" => Task::done(Message::Snapshot),
@@ -731,8 +771,8 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
     }
 }
 
-fn subscription(_: &Settings) -> Subscription<Message> {
-    Subscription::batch([
+fn subscription(state: &Settings) -> Subscription<Message> {
+    let mut followed = vec![
         window::close_requests().map(|_| Message::Close),
         terminal(),
         watch::network(),
@@ -740,7 +780,12 @@ fn subscription(_: &Settings) -> Subscription<Message> {
         watch::sound(),
         watch::battery(),
         watch::quasar(),
-    ])
+    ];
+    // the clock turns with the minute, and only while its page is up
+    if state.page == Page::DateTime {
+        followed.push(datetime::ticking());
+    }
+    Subscription::batch(followed)
 }
 
 /// The socket in the runtime directory, read on a thread of its own. The state query is answered
@@ -896,6 +941,8 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Search => search::view(state, look),
         Page::Backups => backups::view(state, look),
         Page::Updates => updates::view(state, look),
+        Page::DateTime => datetime::view(state, look),
+        Page::Region => region::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),
