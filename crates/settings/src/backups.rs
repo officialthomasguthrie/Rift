@@ -169,8 +169,8 @@ pub fn state(state: &Settings) -> Vec<String> {
         lines.push(format!(
             "backups {}",
             match &disk.made {
-                Ok(kept) if kept.count > 0 => kept.count.to_string(),
-                _ => "none".to_string(),
+                Ok(kept) => kept.count.to_string(),
+                Err(_) => "none".to_string(),
             }
         ));
         if let Some(ago) = disk.made.as_ref().ok().and_then(|kept| kept.ago()) {
@@ -411,6 +411,18 @@ mod tests {
         // and a failure is on the page, not in the state
         let broken = settings(Some(Err("Vault is not running.".to_string())), None);
         assert_eq!(state(&broken), ["taking off", "backing off"]);
+    }
+
+    #[test]
+    fn a_disk_with_nothing_backed_up_to_it_yet_says_none_of_them() {
+        let kept = settings(
+            None,
+            Some(Disk {
+                target: Ok(target()),
+                made: Ok(Kept::default()),
+            }),
+        );
+        assert_eq!(state(&kept)[..2], ["backups 0", "backup-folder /Rift"]);
     }
 
     #[test]
