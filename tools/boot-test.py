@@ -126,8 +126,8 @@ after five seconds and stays in the list. A click on the clock opens the clock m
 its Do not disturb switch keeps the next one off the screen, and a second click closes the menu. The
 volume key sent over qmp turns the sink up and shows the key popup over the dock. Killing the shell
 brings it back, since it is a user unit that restarts, and the apps it started keep their windows
-through a restart, since each runs in a scope of its own. Then Firefox and Ghostty, started from the dock,
-stand side by side between the bar and the dock, each with the title bar it draws itself and a close
+through a restart, since each runs in a scope of its own. Then Firefox and Ghostty, started from the
+dock, stand side by side between the bar and the dock, each with the title bar it draws itself and a close
 button at its right. KeePassXC, the first Qt app, started from the Applications menu, stands there with
 the Adwaita title bar Qt draws for it in dark. The everyday apps follow, one at a time from the same menu:
 pictures, documents, video, sound, the calculator, archives, the disks, where the space went and the
@@ -5222,6 +5222,9 @@ def main():
                 page_said = (dock_page(f"the page after {what}") or ([], {}))[1]
                 if page_said.get(setting) != value:
                     fail(f"after {what} the Dock page says {page_said}")
+                written = without_console(run(f"cat {DOCK_OPTIONS}", f"the dock's settings after {what}")[1])
+                if f"{setting} {value}" not in written.splitlines():
+                    fail(f"after {what} {DOCK_OPTIONS} says {written.strip()[-200:]!r}")
                 drawn = wait_for(20, lambda: next((found for found in [dock_drawn(placed, "dock-setting")]
                                                    if found[3]), None))
                 if not drawn:
