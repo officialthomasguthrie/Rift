@@ -122,6 +122,21 @@ pub(crate) fn properties(
         .call("GetAll", &(interface,))
 }
 
+/// Whether a service said no because polkit did, or asked for a password nothing can give it.
+#[cfg(feature = "bus")]
+pub(crate) fn refused(error: &zbus::Error) -> bool {
+    let name = match error {
+        zbus::Error::MethodError(name, ..) => name.as_str().to_string(),
+        zbus::Error::FDO(error) => error.name().as_str().to_string(),
+        _ => return false,
+    };
+    matches!(
+        name.as_str(),
+        "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired"
+            | "org.freedesktop.DBus.Error.AccessDenied"
+    )
+}
+
 /// Whether a service is running now. Asking this first keeps a call from starting a service that
 /// has nothing to do on this machine, like `BlueZ` with no adapter.
 #[cfg(feature = "bus")]

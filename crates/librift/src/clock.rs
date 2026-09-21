@@ -98,30 +98,13 @@ pub fn set_zone(zone: &str) -> Result<(), String> {
     bus::object(&connection, SERVICE, OBJECT, SERVICE)
         .and_then(|proxy| proxy.call::<_, _, ()>("SetTimezone", &(zone, false)))
         .map_err(|e| {
-            if refused(&e) {
+            if bus::refused(&e) {
                 "This account may not change the time zone without an administrator's password."
                     .to_string()
             } else {
                 bus::sentence_for(NAME, e)
             }
         })
-}
-
-/// Whether timedated said no because polkit did, or asked for a password nothing can give it.
-#[cfg(feature = "bus")]
-fn refused(error: &zbus::Error) -> bool {
-    use zbus::DBusError as _;
-
-    let name = match error {
-        zbus::Error::MethodError(name, ..) => name.as_str().to_string(),
-        zbus::Error::FDO(error) => error.name().as_str().to_string(),
-        _ => return false,
-    };
-    matches!(
-        name.as_str(),
-        "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired"
-            | "org.freedesktop.DBus.Error.AccessDenied"
-    )
 }
 
 /// One time zone, with the words a person finds it by.
