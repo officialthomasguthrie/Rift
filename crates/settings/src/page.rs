@@ -196,6 +196,8 @@ impl Page {
             | Self::Power
             | Self::Appearance
             | Self::Search
+            | Self::Keyboard
+            | Self::Pointer
             | Self::Printers
             | Self::Accessibility
             | Self::DateTime
@@ -216,11 +218,6 @@ impl Page {
                 "Notification settings are not in Settings yet. The clock menu keeps the ones that \
                  have come in."
             }
-            Self::Keyboard => {
-                "Keyboard layouts and shortcuts are not in Settings yet. Mod+Shift+Slash shows \
-                 every shortcut the desktop has."
-            }
-            Self::Pointer => "The mouse and the touchpad are not in Settings yet.",
             Self::Privacy => {
                 "Privacy and security are not in Settings yet. Mod+L locks the screen, and an app \
                  asks before it takes the camera."
@@ -238,7 +235,7 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 16] = [
+    const REAL: [Page; 18] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
@@ -247,6 +244,8 @@ mod tests {
         Page::Power,
         Page::Appearance,
         Page::Search,
+        Page::Keyboard,
+        Page::Pointer,
         Page::Printers,
         Page::Accessibility,
         Page::DateTime,

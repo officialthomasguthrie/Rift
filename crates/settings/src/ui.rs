@@ -17,10 +17,13 @@ use librift::battery::Battery;
 use librift::bluetooth as bluetooth_picture;
 use librift::boot::Style;
 use librift::clock::Zone;
+use librift::keyboard::Layout;
 use librift::models::Tier;
 use librift::network;
 use librift::orbit::Host;
+use librift::pointer::{Device, Pointer};
 use librift::printers::Printers;
+use librift::region::Region;
 use librift::sound::{self as sound_picture, Side};
 
 use crate::control::{self, Command};
@@ -29,8 +32,8 @@ use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
 use crate::{
-    about, accessibility, ai, appearance, backups, bluetooth, datetime, displays, icons, net,
-    power, printers, region, search, sound, updates, watch,
+    about, accessibility, ai, appearance, backups, bluetooth, datetime, displays, icons, keyboard,
+    net, pointer, power, printers, region, search, sound, updates, watch,
 };
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
@@ -100,8 +103,17 @@ pub struct Settings {
     pub clock: Option<datetime::Reading>,
     /// The time zones there are to choose from, out of the database the image carries.
     pub zones: Vec<Zone>,
-    /// What has been typed into the search for a time zone.
+    /// What has been typed into the search for a time zone, or for a keyboard layout.
     pub finding: String,
+    /// The keyboard layouts there are to choose from, out of the list the image carries.
+    pub layouts: Vec<Layout>,
+    /// What localed says about the keyboard, once the Keyboard page has asked.
+    pub keyboard: Option<Result<Region, String>>,
+    /// How the owner wants the mouse and the touchpad to behave.
+    pub pointer: Pointer,
+    /// The mice and the touchpads plugged in, once the Mouse and touchpad page has looked, and again
+    /// every two seconds while it is up.
+    pub devices: Option<Result<Vec<Device>, String>>,
     /// What localed says the system is set to and what that means, once the Region and language
     /// page has asked.
     pub region: Option<Box<region::Picture>>,
@@ -203,6 +215,14 @@ pub enum Message {
     Printer(printers::Asked),
     /// Which of the screen reader and the on-screen keyboard is running now.
     Access(accessibility::Running),
+    /// What localed says about the keyboard now.
+    Layouts(Result<Region, String>),
+    /// A layout was added, taken off or put first, or the shortcuts were asked for.
+    Keyboard(keyboard::Asked),
+    /// The mice and the touchpads plugged in now.
+    Devices(Result<Vec<Device>, String>),
+    /// A setting of the mouse or the touchpad changed, or one of its sliders moved.
+    Pointer(pointer::Changed),
     /// The switch of the screen reader or the on-screen keyboard.
     Turn(Tool, bool),
     /// The Wi-Fi switch.
@@ -312,6 +332,8 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         boot: None,
         choices: appearance::choices(),
         zones: librift::clock::installed(),
+        layouts: librift::keyboard::installed(),
+        pointer: Pointer::read(),
         host: None,
         release: about::release(),
         // Lens's notes are read at once, so a switch is never drawn off while its program runs
@@ -332,6 +354,9 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
     }
     if state.page == Page::Region {
         work.push(region::read());
+    }
+    if state.page == Page::Keyboard {
+        work.push(keyboard::read());
     }
     if start.screenshot.is_some() {
         work.push(shoot());
@@ -385,6 +410,10 @@ impl Settings {
             clock: None,
             zones: Vec::new(),
             finding: String::new(),
+            layouts: Vec::new(),
+            keyboard: None,
+            pointer: Pointer::default(),
+            devices: None,
             region: None,
             printers: None,
             access: None,
@@ -452,6 +481,10 @@ impl Settings {
         .chain(region::state(self))
         .chain(printers::state(self))
         .chain(accessibility::state(self))
+        .chain(keyboard::state(self))
+        .chain(pointer::state(self))
+        // what went wrong last, which the page shows in red under everything else
+        .chain(self.problem.as_ref().map(|why| format!("problem {why}")))
         .collect::<Vec<_>>()
         .join("\n")
             + "\n"
@@ -567,6 +600,8 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Zone(zone) => return datetime::choose(state, zone),
         Message::Printer(asked) => return printers::asked(state, asked),
         Message::Turn(tool, on) => return accessibility::turn(state, tool, on),
+        Message::Keyboard(asked) => return keyboard::asked(state, &asked),
+        Message::Pointer(changed) => pointer::update(state, changed),
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
             state.greeting = on;
@@ -617,6 +652,8 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Region(picture) => state.region = Some(picture),
         Message::Printers(answer) => state.printers = Some(answer),
         Message::Access(running) => state.access = Some(running),
+        Message::Layouts(answer) => state.keyboard = Some(answer),
+        Message::Devices(answer) => state.devices = Some(answer),
         Message::Backups(answer) => state.disk = Some(answer),
         Message::Took(said) => {
             state.making.snapshot = false;
@@ -694,6 +731,8 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         // the clock and the printers are read by subscriptions of their own, which ask again while
         // their page is up
         Page::Region => region::read(),
+        // the layouts are read again after every change the page makes
+        Page::Keyboard => keyboard::read(),
         // Lens's notes are two small files, read at once so a switch is never drawn off while its
         // program runs, and again every second by a subscription while the page is up
         Page::Accessibility => {
@@ -775,6 +814,22 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
         ),
         "screen-reader" => Task::done(Message::Turn(Tool::Reader, on(value))),
         "on-screen-keyboard" => Task::done(Message::Turn(Tool::Keyboard, on(value))),
+        // a layout by its word, `gb` or `us(dvorak)`, which the list of layouts checks
+        "add-layout" => Task::done(Message::Keyboard(keyboard::Asked::Add(
+            value.trim().to_string(),
+        ))),
+        "remove-layout" => Task::done(Message::Keyboard(keyboard::Asked::Remove(
+            value.trim().to_string(),
+        ))),
+        "first-layout" => Task::done(Message::Keyboard(keyboard::Asked::First(
+            value.trim().to_string(),
+        ))),
+        "shortcuts" => Task::done(Message::Keyboard(keyboard::Asked::Shortcuts)),
+        // the mouse and the touchpad, by the names their file has, for a device this machine has
+        name if librift::pointer::NAMES.contains(&name) => pointer::named(state, name, value)
+            .map_or_else(Task::none, |chosen| {
+                Task::done(Message::Pointer(pointer::Changed::Chose(chosen)))
+            }),
         // the value is there to be typed, the way a switch takes on or off: there is one thing to do
         "index" => Task::done(Message::Index),
         "snapshot" => Task::done(Message::Snapshot),
@@ -829,12 +884,13 @@ fn subscription(state: &Settings) -> Subscription<Message> {
         watch::quasar(),
     ];
     // the clock turns with the minute, the printers and the jobs are asked for every two seconds,
-    // and whether the screen reader and the keyboard are running every second, each only while its
-    // page is up
+    // whether the screen reader and the keyboard are running every second, and which mice and
+    // touchpads are plugged in every two seconds, each only while its page is up
     match state.page {
         Page::DateTime => followed.push(datetime::ticking()),
         Page::Printers => followed.push(printers::following()),
         Page::Accessibility => followed.push(accessibility::following()),
+        Page::Pointer => followed.push(pointer::following()),
         _ => {}
     }
     Subscription::batch(followed)
@@ -997,6 +1053,8 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Region => region::view(state, look),
         Page::Printers => printers::view(state, look),
         Page::Accessibility => accessibility::view(state, look),
+        Page::Keyboard => keyboard::view(state, look),
+        Page::Pointer => pointer::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),

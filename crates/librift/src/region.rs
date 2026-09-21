@@ -1,6 +1,7 @@
-//! The language, the formats and the keyboard layout from a client's side: what systemd's localed
-//! says the system is set to, and what a locale means in words, out of the C library's own data
-//! about it. The Region and language page asks all of it here.
+//! The language, the formats and the keyboard from a client's side: what systemd's localed says
+//! the system is set to, and what a locale means in words, out of the C library's own data about
+//! it. The Region and language page and the Keyboard page ask it here; [`crate::keyboard`] names
+//! the layouts and changes them.
 
 use std::process::Command;
 
@@ -27,6 +28,10 @@ pub struct Region {
     pub layout: String,
     /// Its variant, `dvorak`. Usually empty.
     pub variant: String,
+    /// The keyboard model the desktop is told about, `pc105`. Usually empty.
+    pub model: String,
+    /// The XKB options, `ctrl:nocaps`. Usually empty.
+    pub options: String,
 }
 
 impl Region {
@@ -70,6 +75,8 @@ pub fn read() -> Result<Region, String> {
     let keymap = text("VConsoleKeymap");
     let layout = text("X11Layout");
     let variant = text("X11Variant");
+    let model = text("X11Model");
+    let options = text("X11Options");
     let locale = said
         .remove("Locale")
         .and_then(|value| Vec::<String>::try_from(value).ok())
@@ -79,6 +86,8 @@ pub fn read() -> Result<Region, String> {
         keymap,
         layout,
         variant,
+        model,
+        options,
     })
 }
 
@@ -239,21 +248,6 @@ pub fn describe(locale: &str) -> Option<Described> {
     Described::read(&keywords, &example)
 }
 
-/// A keyboard layout the way a person says it. Nothing is the layout every keyboard starts in.
-#[must_use]
-pub fn layout_words(layout: &str, variant: &str) -> String {
-    let named = match layout {
-        "" | "us" => "English (US)",
-        "gb" => "English (UK)",
-        other => other,
-    };
-    if variant.is_empty() {
-        named.to_string()
-    } else {
-        format!("{named}, {variant}")
-    }
-}
-
 /// A keymap of the text console the way a person says it.
 #[must_use]
 pub fn keymap_words(keymap: &str) -> String {
@@ -368,11 +362,8 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_and_a_keymap_read_as_words() {
-        assert_eq!(layout_words("", ""), "English (US)");
-        assert_eq!(layout_words("gb", ""), "English (UK)");
-        assert_eq!(layout_words("us", "dvorak"), "English (US), dvorak");
-        assert_eq!(layout_words("de", ""), "de");
+    fn a_keymap_reads_as_words() {
+        assert_eq!(keymap_words(""), "English (US)");
         assert_eq!(keymap_words("us"), "English (US)");
         assert_eq!(keymap_words("uk"), "English (UK)");
         assert_eq!(keymap_words("fr"), "fr");

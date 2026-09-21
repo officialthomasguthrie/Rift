@@ -1,15 +1,16 @@
 //! The Region and language page: the language the system is in, the way it writes dates, times
-//! and measures, and the keyboard layout, from systemd's localed, with what each means in words
+//! and measures, and the keyboard layouts, from systemd's localed, with what each means in words
 //! out of the C library's own data about the locale.
 //!
-//! All three are part of the image for now, so the page says what they are and has nothing to
-//! press. It asks localed as it comes up.
+//! The language and the formats are part of the image for now, so the page says what they are and
+//! has nothing to press; the Keyboard page chooses the layouts. It asks localed as it comes up.
 
 use std::thread;
 
 use iced::futures::channel::oneshot;
 use iced::widget::{column, text};
 use iced::{Element, Fill, Task};
+use librift::keyboard::{self, Layout};
 use librift::region::{self, Described, Region};
 
 use crate::ai::said;
@@ -124,7 +125,7 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
         }
         Some(picture @ Picture { said: Ok(set), .. }) => {
             page = page.push(the_language(look, picture, set));
-            page = page.push(the_keyboard(look, set));
+            page = page.push(the_keyboard(look, &state.layouts, set));
         }
     }
     page.push(note(look, NOT_YET)).into()
@@ -154,9 +155,9 @@ fn the_language<'a>(look: Colors, picture: &Picture, set: &Region) -> Element<'a
     part.into()
 }
 
-/// The layout the desktop types with, and the console's, which is the one the passphrase is typed
-/// in when the drive starts.
-fn the_keyboard<'a>(look: Colors, set: &Region) -> Element<'a, Message> {
+/// The layouts the desktop types with, and the console's keymap, which is the one the passphrase is
+/// typed in when the drive starts.
+fn the_keyboard<'a>(look: Colors, list: &[Layout], set: &Region) -> Element<'a, Message> {
     column![
         heading(look, "Keyboard"),
         group(
@@ -164,9 +165,12 @@ fn the_keyboard<'a>(look: Colors, set: &Region) -> Element<'a, Message> {
             vec![
                 setting(
                     look,
-                    "Layout",
+                    "Layouts",
                     None,
-                    said(look, &region::layout_words(&set.layout, &set.variant)),
+                    said(
+                        look,
+                        &keyboard::said(&keyboard::chosen(list, &set.layout, &set.variant)),
+                    ),
                 ),
                 setting(
                     look,
@@ -181,9 +185,9 @@ fn the_keyboard<'a>(look: Colors, set: &Region) -> Element<'a, Message> {
     .into()
 }
 
-/// What the page cannot do yet.
-const NOT_YET: &str =
-    "Choosing another language, other formats or another keyboard layout is not in Settings yet.";
+/// What the page cannot do yet, and where the layouts are chosen.
+const NOT_YET: &str = "Choosing another language or other formats is not in Settings yet. The \
+                       Keyboard page chooses the layouts.";
 
 #[cfg(test)]
 mod tests {
@@ -206,7 +210,7 @@ mod tests {
             locale: locale.iter().map(ToString::to_string).collect(),
             keymap: keymap.to_string(),
             layout: layout.to_string(),
-            variant: String::new(),
+            ..Region::default()
         }
     }
 

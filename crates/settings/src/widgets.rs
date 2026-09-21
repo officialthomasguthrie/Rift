@@ -1,5 +1,5 @@
 //! The parts every page is built from: a section heading, a row of a list, a note, a button, a
-//! switch and a slider, all in the app's colours.
+//! switch and the sliders, all in the app's colours.
 
 use iced::widget::{
     button, column, container, row, rule, scrollable, slider, space, text, text_input, toggler,
@@ -274,23 +274,7 @@ pub fn steps<'a, M: Clone + 'a>(
             .step(step)
             .on_release(released)
             .width(Length::Fixed(200.0))
-            .style(move |_: &Theme, _| slider::Style {
-                rail: slider::Rail {
-                    backgrounds: (colors.accent.into(), colors.track.into()),
-                    width: 4.0,
-                    border: Border {
-                        color: Color::TRANSPARENT,
-                        width: 0.0,
-                        radius: 2.0.into(),
-                    },
-                },
-                handle: slider::Handle {
-                    shape: slider::HandleShape::Circle { radius: 8.0 },
-                    background: colors.text.into(),
-                    border_color: Color::TRANSPARENT,
-                    border_width: 0.0,
-                },
-            }),
+            .style(move |_: &Theme, _| rail(colors)),
         text(format!("{value} {unit}"))
             .size(TEXT_SIZE)
             .color(colors.dim)
@@ -299,6 +283,53 @@ pub fn steps<'a, M: Clone + 'a>(
     .align_y(Center)
     .spacing(GAP)
     .into()
+}
+
+/// The slider of a speed, slow at its left end and fast at its right, with no number: a speed has
+/// no unit a person would know.
+pub fn speed<'a, M: Clone + 'a>(
+    colors: Colors,
+    value: i32,
+    moved: impl Fn(i32) -> M + 'a,
+    released: M,
+) -> Element<'a, M> {
+    row![
+        note(colors, "Slow"),
+        slider(
+            librift::pointer::SPEED_LEAST..=librift::pointer::SPEED_MOST,
+            value,
+            moved
+        )
+        .step(1)
+        .on_release(released)
+        .width(Length::Fixed(160.0))
+        .style(move |_: &Theme, _| rail(colors)),
+        note(colors, "Fast"),
+    ]
+    .align_y(Center)
+    .spacing(10)
+    .into()
+}
+
+/// How a slider is drawn: the part up to the handle in the accent, the rest in the track's gray.
+fn rail(colors: Colors) -> slider::Style {
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (colors.accent.into(), colors.track.into()),
+            width: 4.0,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 2.0.into(),
+            },
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 8.0 },
+            background: colors.text.into(),
+            border_color: Color::TRANSPARENT,
+            border_width: 0.0,
+        },
+    }
 }
 
 /// A field text is typed into, in the app's colours, with the accent around it while the cursor is
