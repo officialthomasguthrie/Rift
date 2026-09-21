@@ -60,7 +60,9 @@ test reads it back from /boot, and the vm reboots: the splash of that boot has t
 It sets the style back to text from the page the same way, reboots again, and that splash has to be the
 text one. The two screendumps are saved beside the png --splash names. Before each reboot the Date and
 time page sets a time zone, Pacific/Auckland and then UTC again, and the boot after it has to be in that
-zone, which timedated keeps on persist. The test ends there.
+zone, which timedated keeps on persist. The Keyboard page adds English (UK) before the first reboot and
+takes it off before the second: localed and horizon have it in the boot after the first, and localed
+has English (US) alone after the second, which localed keeps on persist too. The test ends there.
 
 The drive: the vm app writes it from the image into a sparse file with rift-flash, with an exchange
 partition when --exchange gives its size. Persist has to be luks2 with argon2id, the settings a person
@@ -457,13 +459,28 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "slot", "slot-a", "slot-b", "tries-a", "tries-b", "updates", "waiting", "timezone",
                  "ntp", "synchronized", "rtc", "time", "date", "locale", "language", "formats",
                  "paper", "keymap", "layout", "printers", "printer", "default-printer", "jobs", "job",
-                 "screen-reader", "on-screen-keyboard")
+                 "screen-reader", "on-screen-keyboard", "layouts", "console-keymap", "mice", "touchpads",
+                 "primary-button", "mouse-speed", "mouse-acceleration", "mouse-natural-scrolling",
+                 "touchpad-speed", "tap-to-click", "touchpad-natural-scrolling", "disable-while-typing",
+                 "edge-scrolling", "problem")
 # the time zone the Date and time page sets and puts back, with what date calls it at either time of
 # year. a drive where no zone was ever chosen is in UTC
 SETTINGS_ZONE = ("Pacific/Auckland", ("NZST", "NZDT"))
 # where timedated keeps the link to the zone, on persist, and the locale the image is in
 ZONE_LINK = "/var/lib/rift/zone/localtime"
 SETTINGS_LOCALE = "en_GB.UTF-8"
+# the layout the Keyboard page adds and takes off again, with the name horizon has for it, and the
+# file on persist localed keeps the desktop's layouts in
+SETTINGS_LAYOUT = ("gb", "English (UK)")
+KEYBOARD_FILE = "/var/lib/rift/keyboard/vconsole.conf"
+# the border horizon draws around its list of shortcuts: (0.5, 0.8, 1.0), drawn at ninety per cent over
+# the dark grays under it. the accent's green is too far from it to count. the border is four pixels
+# wide around a box of hundreds, so the list brings thousands of them
+SHORTCUTS_BORDER = (122, 188, 234)
+SHORTCUTS_BORDER_PIXELS = 1_000
+# the part of horizon's config the Mouse and touchpad page writes, and the file it keeps its settings in
+POINTER_PART = "~/.local/state/rift/pointer.kdl"
+POINTER_FILE = "~/.config/rift/pointer"
 # CUPS's own test printer, which stands in for a printer on the network on a machine with none: the
 # port of localhost it answers IPP on, the queue the test makes for it and what that queue is
 # called, the job the test holds in it, and the message it is stopped with
@@ -1561,6 +1578,43 @@ def main():
                 fail(f"timedatectl and date say {said!r} after the reboot, and the page chose {zone} before it")
             ok(f"the boot after {zone} was chosen is in {zone}, which date calls {said[-1]}")
 
+        def localed_layout(what):
+            """The layouts localed has, as it keeps them: us,gb."""
+            _, output = run("busctl --system get-property org.freedesktop.locale1 /org/freedesktop/locale1 "
+                            "org.freedesktop.locale1 X11Layout | cat", what)
+            return "".join(re.findall(r'"([^"]*)"', without_console(output)))
+
+        def change_layouts(asked, wanted):
+            """Add or take off a layout on the Keyboard page, and read the layouts back from localed."""
+            run("rift-settings --page keyboard", "the Keyboard page")
+            if not waited(30, lambda: page_state("the Keyboard page").get("page") == "keyboard"):
+                fail("rift-settings --page keyboard did not show that page")
+            if not waited(30, lambda: page_state("the layouts on the page").get("layouts")):
+                fail("the Keyboard page says nothing about the layouts, and localed is there to ask")
+            status, output = run(f"rift-settings --set {asked}", f"the layouts: {asked}")
+            if status != 0:
+                fail(f"rift-settings --set {asked} exited with {status}: {without_console(output).strip()[-300:]!r}")
+            if not waited(60, lambda: localed_layout(f"the layouts after {asked}") == wanted):
+                fail(f"localed has layouts {localed_layout('the layouts again')!r} after the page's {asked}, "
+                     f"expected {wanted}")
+            ok(f"the Keyboard page's {asked} left localed with layouts {wanted}")
+
+        def layouts_kept(wanted, names=None):
+            """Check the boot that follows has the layouts the page chose before it: localed reads them
+            off persist, and horizon, when the session is up, has them by name."""
+            if localed_layout("the layouts after the reboot") != wanted:
+                fail(f"localed has layouts {localed_layout('the layouts after the reboot again')!r} after the "
+                     f"reboot, and the page chose {wanted} before it")
+            if names:
+                def in_horizon():
+                    _, output = run("set -x NIRI_SOCKET (ls -t /run/user/(id -u)/niri.wayland-1.*.sock | head -n1); "
+                                    "horizon msg --json keyboard-layouts", "horizon's layouts after the reboot")
+                    found = re.search(r'"names":\[(.*?)\]', without_console(output).replace("\n", ""))
+                    return found and re.findall(r'"([^"]*)"', found.group(1)) == names
+                if not waited(60, in_horizon):
+                    fail(f"horizon does not have the layouts {names} after the reboot")
+            ok(f"the boot after the layouts were chosen has {wanted}" + (" in localed and horizon" if names else ""))
+
         def next_boot(style):
             """Reboot, and check the splash of the boot that follows is the style that was chosen."""
             png = f"{stem}-{style}{extension}"
@@ -1582,18 +1636,23 @@ def main():
             ok(f"the boot after {style} was chosen draws the {style} splash")
 
         # graphical, which is not the style the image was built with, then text again
+        layout_added, layout_added_name = SETTINGS_LAYOUT
         open_settings()
         set_style("graphical")
         choose_zone(SETTINGS_ZONE[0])
+        change_layouts(f"add-layout {layout_added}", f"us,{layout_added}")
         next_boot("graphical")
         unlock()
         zone_kept(*SETTINGS_ZONE)
         open_settings()
+        layouts_kept(f"us,{layout_added}", ["English (US)", layout_added_name])
         set_style("text")
         choose_zone("UTC")
+        change_layouts(f"remove-layout {layout_added}", "us")
         next_boot("text")
         unlock()
         zone_kept("UTC", ("UTC",))
+        layouts_kept("us")
         reboot_action("shutdown")
         power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
@@ -4526,7 +4585,15 @@ def main():
             zone_said = without_console(output).split()
             if zone_said.count("UTC") < 2 or "/etc/zoneinfo/UTC" not in zone_said:
                 fail(f"after the page set UTC, timedatectl, the link and date say {zone_said!r}")
-            ok("the Date and time page put the zone back to UTC, and timedated's link says so")
+            # the bar reads the clock again when timedated says the zone changed, rather than when the
+            # minute turns, so with the minute some way off it already says the time in UTC
+            _, output = run("date +%S", "the second the zone went back in")
+            zone_second = re.search(r"^\s*(\d+)\s*$", without_console(output), re.M)
+            if (zone_second and int(zone_second.group(1)) < 45
+                    and not wait_for(10, lambda: bar_follows("the bar's clock back in UTC"))):
+                fail(f"the bar's clock says {bar_state('the bar back in UTC').get('clock')!r} after the zone went "
+                     f"back to UTC, and date says {vm_clock('the time back in UTC')!r}: the bar waited for the minute")
+            ok("the Date and time page put the zone back to UTC, timedated's link says so, and the bar followed")
 
             # the Region and language page, over localed. the image is in British English, with the
             # keymap and the layout every keyboard starts in, and the page says what localed says on
@@ -4784,6 +4851,234 @@ def main():
             ok("the Accessibility page turned the screen reader and the on-screen keyboard on and off, its "
                "switch followed the keyboard's key, and lens --state and pgrep agreed each time")
 
+            # the Keyboard page, over localed, which keeps the desktop's layouts in a file on persist
+            # and which horizon follows. at each step the page says what localed and horizon msg
+            # keyboard-layouts say on the same boot: the one layout every keyboard starts in, then gb
+            # added from the page, which Mod+Shift+Space switches to, then gb put first, then taken off
+            # again. the text console keeps the image's keymap whatever the layouts are
+            layout_word, layout_name = SETTINGS_LAYOUT
+
+            def layouts_page(what):
+                """What the Keyboard page says: its layouts in order as (word, name), and the console's
+                keymap. Nothing while localed has not answered on the page."""
+                status, told = run("rift-settings --state", what)
+                if status != 0:
+                    return None
+                listed, keymap = [], None
+                for printed_line in without_console(told).splitlines():
+                    key, _, value = printed_line.strip().partition(" ")
+                    if key == "keyboard-layout":
+                        word, _, name = value.strip().partition(" ")
+                        listed.append((word, name.strip()))
+                    elif key == "console-keymap":
+                        keymap = value.strip()
+                return (listed, keymap) if keymap is not None else None
+
+            def localed_layouts(what):
+                """The layouts localed has, in the words the page prints: us, gb, us(dvorak). None
+                chosen is the layout every keyboard starts in, which is what the page lists then."""
+                codes = "".join(localed_says(f"{what}, the layouts", "X11Layout")).split(",")
+                variants = "".join(localed_says(f"{what}, the variants", "X11Variant")).split(",")
+                variants += [""] * (len(codes) - len(variants))
+                words = [code if not variant else f"{code}({variant})"
+                         for code, variant in zip(codes, variants) if code]
+                return words or ["us"]
+
+            def horizon_layouts(what):
+                """The layouts horizon has by name, and the one in use."""
+                status, told = run("horizon msg --json keyboard-layouts", what)
+                found = re.search(r'"names":\[(.*?)\],"current_idx":(\d+)',
+                                  without_console(told).replace("\n", ""))
+                if status != 0 or not found:
+                    return None
+                return re.findall(r'"([^"]*)"', found.group(1)), int(found.group(2))
+
+            def layouts_agree(words, what):
+                """Whether the page and localed list these layouts in this order, and horizon has them
+                by the names the page gives them."""
+                page_layouts = layouts_page(f"the page for {what}")
+                in_horizon = horizon_layouts(f"horizon for {what}")
+                return (page_layouts is not None and [word for word, _ in page_layouts[0]] == words
+                        and localed_layouts(f"localed for {what}") == words
+                        and in_horizon is not None and in_horizon[0] == [name for _, name in page_layouts[0]])
+
+            def layouts_when(words, what):
+                """Wait for the page, localed and horizon to agree on these layouts, or say what each said."""
+                if wait_for(30, lambda: layouts_agree(words, what)):
+                    return
+                _, printed = run("journalctl -b -u systemd-localed --no-pager -n 20 -o cat | cat", "localed's journal")
+                fail(f"{what}: the Keyboard page says {layouts_page(f'the page for {what} again')}, localed says "
+                     f"{localed_layouts(f'localed for {what} again')} and horizon says "
+                     f"{horizon_layouts(f'horizon for {what} again')}, where the layouts should be {words}; "
+                     f"localed's journal: {without_console(printed).strip()[-400:]!r}")
+
+            def layout_in_use(what):
+                """Which of horizon's layouts is in use, by its place in the list."""
+                return (horizon_layouts(what) or ([], None))[1]
+
+            run("rift-settings --page keyboard", "the Keyboard page")
+            if not wait_for(30, lambda: settings_state("the Keyboard page").get("page") == "keyboard"):
+                fail("rift-settings --page keyboard did not show that page")
+            layouts_when(["us"], "the page as it comes up")
+            page_keymap = layouts_page("the console's keymap on the page")[1]
+            localed_keymap = "".join(localed_says("the console's keymap", "VConsoleKeymap")) or "none"
+            if page_keymap != localed_keymap:
+                fail(f"the Keyboard page says the console's keymap is {page_keymap!r}, and localed says "
+                     f"{localed_keymap!r}")
+            run(f"rift-settings --set add-layout {layout_word}", f"{layout_name} added on the Keyboard page")
+            layouts_when(["us", layout_word], f"{layout_name} added from the page")
+            # localed wrote the layouts into its own file on persist, in the subvolume /var is. the
+            # folder is asked about, since findmnt follows the path it is given
+            _, output = run(f"cat {KEYBOARD_FILE}; findmnt -n -o SOURCE -T {os.path.dirname(KEYBOARD_FILE)}",
+                            "where the layouts are kept")
+            kept = without_console(output)
+            if (not re.search(rf'^XKBLAYOUT="?us,{layout_word}"?\s*$', kept, re.M)
+                    or not any("persist" in word and "@var" in word for word in kept.split())):
+                fail(f"after the page added {layout_word}, {KEYBOARD_FILE} and findmnt say {kept.strip()[-300:]!r}")
+            # the key switches to the next layout and back to the first, and the page's list is the
+            # order horizon keeps them in
+            press(["meta_l", "shift", "spc"], what="the key that switches the layout")
+            if not wait_for(20, lambda: layout_in_use("the layout in use after the key") == 1):
+                fail(f"after Mod+Shift+Space horizon has layout {layout_in_use('the layout in use again')} in use, "
+                     f"expected {layout_name}, the second")
+            press(["meta_l", "shift", "spc"], what="the key again")
+            if not wait_for(20, lambda: layout_in_use("the layout in use after the key again") == 0):
+                fail(f"after Mod+Shift+Space again horizon has layout {layout_in_use('the layout in use')} in use, "
+                     "expected the first")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Keyboard page", f"{stem}-settings-layouts{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            run(f"rift-settings --set first-layout {layout_word}", f"{layout_name} put first on the page")
+            layouts_when([layout_word, "us"], f"{layout_name} put first from the page")
+            if layout_in_use(f"the layout in use with {layout_word} first") != 0:
+                fail(f"horizon does not start in {layout_name} with it first")
+            run(f"rift-settings --set remove-layout {layout_word}", f"{layout_name} taken off on the page")
+            layouts_when(["us"], f"{layout_name} taken off from the page")
+            _, output = run(f"cat {KEYBOARD_FILE}", "the layouts kept after the page took one off")
+            if not re.search(r'^XKBLAYOUT="?us"?\s*$', without_console(output), re.M):
+                fail(f"after the page took {layout_word} off, {KEYBOARD_FILE} says "
+                     f"{without_console(output).strip()[-200:]!r}")
+            # the Show button brings up the list Mod+Shift+Slash shows, in the middle of the screen with
+            # a light blue border nothing else on it is drawn in, and any key takes it away
+            def shortcuts_border(name):
+                """A screendump, and how many of its pixels are the border of horizon's list of shortcuts."""
+                wide, tall, rgb = screendump(args.qmp, work, name)
+                return wide, tall, rgb, sum(1 for at in range(0, wide * tall * 3, 3)
+                                            if near(rgb[at:at + 3], SHORTCUTS_BORDER, 10))
+
+            border_before = shortcuts_border("before-shortcuts")[3]
+            status, output = run("rift-settings --set shortcuts show", "the Show button of the shortcuts")
+            time.sleep(2)
+            shown_wide, shown_tall, shown, border_shown = shortcuts_border("shortcuts")
+            write_png(f"{stem}-settings-shortcuts{extension}", shown_wide, shown_tall, shown)
+            said_problem = settings_state("the page after the Show button").get("problem")
+            press(["esc"], what="a key that takes the shortcuts away")
+            if status != 0 or said_problem or border_shown - border_before < SHORTCUTS_BORDER_PIXELS:
+                fail(f"after the Show button the screen has {border_shown} pixels of the shortcuts' border where "
+                     f"it had {border_before}, and the page says {said_problem!r}, see "
+                     f"{stem}-settings-shortcuts{extension}")
+            ok(f"the Keyboard page added {layout_name}, put it first and took it off, and localed, horizon and "
+               f"the file on persist agreed each time; Mod+Shift+Space switched to it and back; the console keeps "
+               f"keymap {page_keymap}; the Show button brought up the shortcuts")
+
+            # the Mouse and touchpad page. the page says what the machine has, which is what udev tags
+            # each input device as on the same boot: the vm has qemu's ps/2 mouse and its virtio tablet,
+            # which udev tags a mouse and libinput takes as one, and no touchpad. a setting the page
+            # changes is written into the part of horizon's config it keeps, horizon reads its config
+            # again with no error, and a touchpad's setting on a machine with none writes nothing
+            def pointer_page(what):
+                """What the Mouse and touchpad page says: the mice and the touchpads by name, and every
+                setting. Nothing until the page has looked."""
+                status, told = run("rift-settings --state", what)
+                if status != 0:
+                    return None
+                found_devices, found_settings = [], {}
+                for printed_line in without_console(told).splitlines():
+                    key, _, value = printed_line.strip().partition(" ")
+                    if key in ("mouse", "touchpad"):
+                        found_devices.append((key, value.strip()))
+                    elif key in SETTINGS_KEYS:
+                        found_settings[key] = value.strip()
+                if "mice" not in found_settings:
+                    return None
+                return sorted(found_devices), found_settings
+
+            def udev_pointers(what):
+                """The mice and the touchpads udev tags, by name."""
+                _, told = run("for e in /sys/class/input/event*; set -l tags (udevadm info -q property -p $e); "
+                              "set -l named (cat $e/device/name); if contains ID_INPUT_TOUCHPAD=1 $tags; "
+                              "echo \"tagged touchpad $named\"; else if contains ID_INPUT_MOUSE=1 $tags; "
+                              "or contains ID_INPUT_POINTINGSTICK=1 $tags; echo \"tagged mouse $named\"; end; end",
+                              what)
+                tagged = []
+                for printed_line in without_console(told).splitlines():
+                    kind_and_name = re.match(r"^tagged (mouse|touchpad) (.+?)\s*$", printed_line.strip())
+                    if kind_and_name:
+                        tagged.append((kind_and_name.group(1), kind_and_name.group(2)))
+                return sorted(tagged)
+
+            def config_loads(what):
+                """How many times horizon has read its config this boot, and how many of them failed."""
+                _, told = run("journalctl -b -t horizon -o cat --no-pager | grep -c -e 'loaded config from' "
+                              "-e 'error loading config'; journalctl -b -t horizon -o cat --no-pager | "
+                              "grep -c 'error loading config'", what)
+                counts = [int(number) for number in re.findall(r"^\s*(\d+)\s*$", without_console(told), re.M)]
+                return tuple(counts) if len(counts) == 2 else (0, 0)
+
+            def pointer_written(wanted, what):
+                """Whether the part horizon includes and the page's own file both say what was set."""
+                _, told = run(f"cat {POINTER_PART} {POINTER_FILE}", what)
+                return all(re.search(pattern, without_console(told), re.S) for pattern in wanted)
+
+            run("rift-settings --page pointer", "the Mouse and touchpad page")
+            if not wait_for(30, lambda: settings_state("the Mouse and touchpad page").get("page") == "pointer"):
+                fail("rift-settings --page pointer did not show that page")
+            pointer_said = wait_for(30, lambda: pointer_page("the Mouse and touchpad page"))
+            if not pointer_said:
+                fail("the Mouse and touchpad page says nothing about the mice and the touchpads")
+            tagged_said = udev_pointers("the mice and touchpads udev tags")
+            if pointer_said[0] != tagged_said:
+                fail(f"the Mouse and touchpad page lists {pointer_said[0]}, and udev tags {tagged_said}")
+            if pointer_said[1].get("touchpads") != "0" or pointer_said[1].get("mice") in (None, "0"):
+                fail(f"the Mouse and touchpad page says mice {pointer_said[1].get('mice')!r} and touchpads "
+                     f"{pointer_said[1].get('touchpads')!r}, and the vm has mice and no touchpad")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Mouse and touchpad page", f"{stem}-settings-pointer{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            loads_before = config_loads("horizon's config before the page wrote its part")
+            run("rift-settings --set mouse-natural-scrolling on", "natural scrolling for the mouse")
+            run("rift-settings --set mouse-speed 5", "the mouse's speed")
+            if not wait_for(20, lambda: pointer_written(
+                    [r"mouse \{[^}]*accel-speed 0\.5[^}]*natural-scroll",
+                     r"mouse-natural-scrolling on", r"mouse-speed 5"], "the part the page wrote")):
+                _, told = run(f"cat {POINTER_PART} {POINTER_FILE}", "the part the page wrote again")
+                fail(f"the page set natural scrolling and a speed for the mouse, and the part and its file say "
+                     f"{without_console(told).strip()[-500:]!r}")
+            if not wait_for(20, lambda: config_loads("horizon's config after the page wrote")[0] > loads_before[0]):
+                fail(f"horizon did not read its config again after the page wrote its part: {loads_before}")
+            loads_after = config_loads("horizon's config errors after the page wrote")
+            if loads_after[1] != loads_before[1]:
+                _, told = run("journalctl -b -t horizon -o cat --no-pager -n 30 | cat", "horizon's log")
+                fail(f"horizon could not read its config with the part the page wrote: "
+                     f"{without_console(told).strip()[-800:]!r}")
+            pointer_after = pointer_page("the Mouse and touchpad page after the change")
+            if not pointer_after or (pointer_after[1].get("mouse-natural-scrolling"),
+                                     pointer_after[1].get("mouse-speed")) != ("on", "5"):
+                fail(f"the Mouse and touchpad page says {pointer_after and pointer_after[1]} after it set natural "
+                     "scrolling and speed 5")
+            # the vm has no touchpad, so the page has no row for tapping and writes nothing for it
+            run("rift-settings --set tap-to-click off", "tap to click on a machine with no touchpad")
+            if not pointer_written([r"touchpad \{[^}]*\btap\b", r"tap-to-click on"], "the part after tap to click"):
+                fail("the page wrote tap to click off on a machine with no touchpad")
+            run("rift-settings --set mouse-natural-scrolling off", "natural scrolling off again")
+            run("rift-settings --set mouse-speed 0", "the mouse's speed again")
+            if not wait_for(20, lambda: pointer_written([r"mouse \{\s*accel-speed 0\.0\s*\}"],
+                                                        "the part put back")):
+                fail("the part does not say the mouse's own speed and scrolling after the page put them back")
+            ok(f"the Mouse and touchpad page lists {', '.join(name for _, name in pointer_said[0])} as udev "
+               f"does, wrote natural scrolling and a speed for the mouse into horizon's part and horizon read "
+               f"it with no error, and wrote nothing for a touchpad the vm has not got")
+
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
             if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
@@ -4792,7 +5087,7 @@ def main():
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            for page in ("dock", "keyboard", "privacy"):
+            for page in ("dock", "privacy"):
                 run(f"rift-settings --page {page}", f"the {page} page")
                 if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
                     fail(f"rift-settings --page {page} did not show that page")
