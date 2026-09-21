@@ -372,12 +372,13 @@ pub fn parse_devices(text: &str) -> Vec<Device> {
     found
 }
 
-/// A device's bitmaps: which kinds of event it sends, and which keys, absolute axes and
-/// properties it has.
+/// A device's bitmaps: which kinds of event it sends, and which keys, relative axes, absolute axes
+/// and properties it has.
 #[derive(Debug, Default)]
 struct Bits {
     events: Vec<u64>,
     keys: Vec<u64>,
+    relative: Vec<u64>,
     absolute: Vec<u64>,
     properties: Vec<u64>,
 }
@@ -412,6 +413,7 @@ fn described(block: &str) -> (Option<String>, Bits) {
             match what {
                 "EV" => bits.events = words,
                 "KEY" => bits.keys = words,
+                "REL" => bits.relative = words,
                 "ABS" => bits.absolute = words,
                 "PROP" => bits.properties = words,
                 _ => {}
@@ -421,29 +423,45 @@ fn described(block: &str) -> (Option<String>, Bits) {
     (name, bits)
 }
 
-/// Whether a device is a mouse, a touchpad or neither, by the rules udev tags them with and libinput
-/// then reads: a pen is a drawing tablet, fingers on a surface that is not a screen a touchpad, a
-/// trackpoint a mouse, a screen that is touched neither, and anything else with a mouse button a
-/// mouse, which is what a virtual machine's tablet is too.
+/// Whether a device is a mouse, a touchpad or neither, by the rules udev's `input_id` tags them with,
+/// in its order, which libinput and Horizon then read: a pen makes a drawing tablet, a finger on a
+/// surface that is not a screen a touchpad, a trackpoint a mouse, a mouse button on absolute axes a
+/// mouse, which is what a virtual machine's tablet is, and a mouse button a mouse on anything that
+/// is not a joystick or a tablet's pad.
 fn kind(bits: &Bits) -> Option<Kind> {
     const EV_KEY: usize = 1;
+    const EV_REL: usize = 2;
+    const REL_X: usize = 0;
+    const REL_Y: usize = 1;
+    const REL_HWHEEL: usize = 6;
+    const REL_WHEEL: usize = 8;
     const ABS_X: usize = 0;
     const ABS_Y: usize = 1;
     const ABS_Z: usize = 2;
+    const ABS_RX: usize = 3;
+    const ABS_PRESSURE: usize = 0x18;
     const ABS_MT_SLOT: usize = 0x2f;
     const ABS_MT_POSITION_X: usize = 0x35;
     const ABS_MT_POSITION_Y: usize = 0x36;
+    const BTN_0: usize = 0x100;
+    const BTN_1: usize = 0x101;
     const BTN_MOUSE: usize = 0x110;
     const BTN_JOYSTICK: usize = 0x120;
+    const BTN_DIGI: usize = 0x140;
     const BTN_TOOL_PEN: usize = 0x140;
     const BTN_TOOL_FINGER: usize = 0x145;
     const BTN_STYLUS: usize = 0x14b;
+    const BTN_DPAD_UP: usize = 0x220;
+    const BTN_DPAD_RIGHT: usize = 0x223;
+    const BTN_TRIGGER_HAPPY1: usize = 0x2c0;
+    const BTN_TRIGGER_HAPPY40: usize = 0x2e7;
     const PROP_DIRECT: usize = 1;
     const PROP_POINTING_STICK: usize = 5;
     const PROP_ACCELEROMETER: usize = 6;
 
     let key = |bit| has(&bits.keys, bit);
     let abs = |bit| has(&bits.absolute, bit);
+    let rel = |bit| has(&bits.events, EV_REL) && has(&bits.relative, bit);
     let prop = |bit| has(&bits.properties, bit);
     let positioned = abs(ABS_X) && abs(ABS_Y);
     // a device that reports every axis there is claims the touch axes along with the rest
@@ -455,20 +473,31 @@ fn kind(bits: &Bits) -> Option<Kind> {
     }
     let pen = key(BTN_TOOL_PEN) || key(BTN_STYLUS);
     let finger = key(BTN_TOOL_FINGER) && !key(BTN_TOOL_PEN);
-    let screen = prop(PROP_DIRECT);
     if (positioned || touches) && pen {
         return None;
     }
-    if (positioned || touches) && finger && !screen {
+    if (positioned || touches) && finger && !prop(PROP_DIRECT) {
         return Some(Kind::Touchpad);
     }
     if prop(PROP_POINTING_STICK) {
         return Some(Kind::Mouse);
     }
-    if screen {
-        return None;
+    let buttons = (BTN_MOUSE..BTN_JOYSTICK).any(key);
+    if positioned {
+        return buttons.then_some(Kind::Mouse);
     }
-    (BTN_MOUSE..BTN_JOYSTICK).any(key).then_some(Kind::Mouse)
+    // a mouse with more than sixteen buttons runs into the joystick's, which udev allows for
+    let joystick = (!key(BTN_JOYSTICK - 1)
+        && ((BTN_JOYSTICK..BTN_DIGI).any(key)
+            || (BTN_TRIGGER_HAPPY1..=BTN_TRIGGER_HAPPY40).any(key)
+            || (BTN_DPAD_UP..=BTN_DPAD_RIGHT).any(key)))
+        || (ABS_RX..ABS_PRESSURE).any(abs);
+    let pad = key(BTN_0)
+        && key(BTN_1)
+        && !key(BTN_TOOL_PEN)
+        && (rel(REL_WHEEL) || rel(REL_HWHEEL))
+        && !(rel(REL_X) && rel(REL_Y));
+    (buttons && !joystick && !pad).then_some(Kind::Mouse)
 }
 
 #[cfg(test)]
@@ -476,7 +505,8 @@ mod tests {
     use super::*;
 
     /// A laptop with a trackpoint, a USB mouse, a touch screen and a pen tablet plugged in, the way
-    /// the kernel lists it, and the two pointers of a qemu machine.
+    /// the kernel lists it, a gamepad and a tablet's pad that each have a mouse button, a pointer
+    /// on a screen, and the two pointers of a qemu machine.
     const DEVICES_LISTED: &str = "\
 I: Bus=0011 Vendor=0001 Product=0001 Version=ab41
 N: Name=\"AT Translated Set 2 keyboard\"
@@ -568,6 +598,40 @@ B: EV=7
 B: KEY=1f0000 0 0 0 0
 B: REL=143
 
+I: Bus=0003 Vendor=045e Product=028e Version=0114
+N: Name=\"Gamepad with a mouse button\"
+P: Phys=usb-0000:00:14.0-4/input0
+S: Sysfs=/devices/pci0000:00/0000:00:14.0/usb1/1-4/1-4:1.0/input/input14
+U: Uniq=
+H: Handlers=event11 js0
+B: PROP=0
+B: EV=1b
+B: KEY=7cdb000000010000 0 0 0 0
+B: ABS=30018
+
+I: Bus=0003 Vendor=056a Product=0374 Version=0110
+N: Name=\"Wacom Intuos S Pad\"
+P: Phys=usb-0000:00:14.0-3/input0
+S: Sysfs=/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3:1.0/0003:056A:0374.0004/input/input15
+U: Uniq=
+H: Handlers=event12
+B: PROP=0
+B: EV=f
+B: KEY=10003 0 0 0 0
+B: REL=100
+B: MSC=1
+
+I: Bus=0006 Vendor=0627 Product=0003 Version=0001
+N: Name=\"Pointer on a screen\"
+P: Phys=virtio4/input0
+S: Sysfs=/devices/pci0000:00/0000:00:05.0/virtio4/input/input16
+U: Uniq=
+H: Handlers=event13
+B: PROP=2
+B: EV=b
+B: KEY=1f0000 0 0 0 0
+B: ABS=3
+
 I: Bus=0006 Vendor=0627 Product=0003 Version=0001
 N: Name=\"QEMU Virtio Tablet\"
 P: Phys=virtio3/input0
@@ -594,6 +658,7 @@ B: ABS=3
                 ("TPPS/2 IBM TrackPoint", Kind::Mouse),
                 ("Logitech USB Receiver", Kind::Mouse),
                 ("ImExPS/2 Generic Explorer Mouse", Kind::Mouse),
+                ("Pointer on a screen", Kind::Mouse),
                 ("QEMU Virtio Tablet", Kind::Mouse),
                 ("SynPS/2 Synaptics TouchPad", Kind::Touchpad),
             ]
