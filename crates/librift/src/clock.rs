@@ -227,6 +227,9 @@ pub fn installed() -> Vec<Zone> {
 #[must_use]
 pub fn find<'a>(zones: &'a [Zone], typed: &str) -> Vec<&'a Zone> {
     let typed = typed.trim().to_lowercase();
+    if typed.is_empty() {
+        return Vec::new();
+    }
     let mut found: Vec<&Zone> = zones.iter().filter(|zone| zone.matches(&typed)).collect();
     // the sort is stable, so each half keeps the order of the words
     found.sort_by_key(|zone| !zone.city.to_lowercase().starts_with(&typed));
