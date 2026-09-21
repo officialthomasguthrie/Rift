@@ -456,13 +456,21 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "snapshot", "backups", "backup", "backup-folder", "taking", "backing", "version",
                  "slot", "slot-a", "slot-b", "tries-a", "tries-b", "updates", "waiting", "timezone",
                  "ntp", "synchronized", "rtc", "time", "date", "locale", "language", "formats",
-                 "paper", "keymap", "layout")
+                 "paper", "keymap", "layout", "printers", "printer", "default-printer", "jobs", "job",
+                 "screen-reader", "on-screen-keyboard")
 # the time zone the Date and time page sets and puts back, with what date calls it at either time of
 # year. a drive where no zone was ever chosen is in UTC
 SETTINGS_ZONE = ("Pacific/Auckland", ("NZST", "NZDT"))
 # where timedated keeps the link to the zone, on persist, and the locale the image is in
 ZONE_LINK = "/var/lib/rift/zone/localtime"
 SETTINGS_LOCALE = "en_GB.UTF-8"
+# CUPS's own test printer, which stands in for a printer on the network on a machine with none: the
+# port of localhost it answers IPP on, the queue the test makes for it and what that queue is
+# called, the job the test holds in it, and the message it is stopped with
+TEST_PRINTER_PORT = 8631
+TEST_PRINTER = ("Rift_test", "Rift test printer")
+TEST_JOB = "Rift boot test page"
+TEST_STOPPED = "Paused by the boot test"
 # the interface text size the Appearance page is set to and put back to, in per cent, with the
 # factor dconf holds for the first of them. the shell asks for its surfaces at that much of their
 # size, so the bar and the dock on screen are their own heights times it
@@ -4493,15 +4501,18 @@ def main():
             if not wait_for(80, lambda: bar_follows("the bar's clock in the new zone")):
                 fail(f"the bar's clock says {bar_state('the bar in the new zone').get('clock')!r}, and date "
                      f"says {vm_clock('the time in the new zone')!r} in {chosen_zone}")
+            # the picture is taken while timedated is up: stopping it cancels a start the page's
+            # minute tick may just have asked for, and the page then says timedated is not answering
+            # until its next tick
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Date and time page", f"{stem}-settings-datetime{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # and a timedated started afresh reads the zone off the drive, not out of its memory
             run("sudo systemctl stop systemd-timedated", "timedated stopped")
             _, output = run("timedatectl show -p Timezone --value", "the zone a new timedated reads")
             if chosen_zone not in without_console(output).split():
                 fail(f"a timedated started again says {without_console(output).strip()!r}, and the page set "
                      f"{chosen_zone}")
-            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
-            look(f"{SETTINGS_APP} on the Date and time page", f"{stem}-settings-datetime{extension}", 60,
-                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             ok(f"the Date and time page set the zone to {chosen_zone}: timedated keeps it in {ZONE_LINK} on "
                f"persist, date calls it {next((name for name in zone_said if name in zone_names), zone_said)}, "
                "and the page and the bar say the time in it")
@@ -4565,6 +4576,214 @@ def main():
                f"{region_page.get('locale')}, keymap {region_page.get('keymap')} and layout "
                f"{region_page.get('layout')}, which is what localed says on the same boot")
 
+            # the Printers page, over CUPS. the vm has no printer, so CUPS's own test printer stands
+            # in for one: ippeveprinter answers IPP Everywhere on a port of localhost, and the queue
+            # the owner makes for it is the one cups-browsed makes for a driverless printer it hears
+            # on the network. at every step the page says what lpstat says on the same boot: the
+            # queue, the default the page sets in the owner's lpoptions, a job held in the queue, the
+            # queue stopped with a message and resumed from the page, and the job cancelled from it
+            queue_name, queue_title = TEST_PRINTER
+
+            def printers_page(what):
+                """What the page says about the printers: the counts and the default, and every
+                printer and every job line in order."""
+                status, told = run("rift-settings --state", what)
+                said = {"printer": [], "job": []}
+                if status != 0:
+                    return said
+                for printed_line in without_console(told).splitlines():
+                    printed_key, _, printed_value = printed_line.strip().partition(" ")
+                    if printed_key in ("printer", "job"):
+                        said[printed_key].append(printed_value.strip())
+                    elif printed_key in ("printers", "default-printer", "jobs"):
+                        said[printed_key] = printed_value.strip()
+                return said
+
+            def lpstat_says(what):
+                """What lpstat says on the same boot, in the page's words: a line per printer with what
+                it is doing and the message it has, the default, and the numbers of the test queue's
+                jobs. lpstat writes a printer's message on the line after it, indented."""
+                _, told = run("lpstat -p -d -o | cat", what)
+                printed_lines = without_console(told).splitlines()
+                lpstat_printers = []
+                for at, printed_line in enumerate(printed_lines):
+                    found = re.match(r"printer (\S+) (is idle|now printing|disabled)", printed_line.strip())
+                    if not found:
+                        continue
+                    doing = {"is idle": "idle", "now printing": "printing", "disabled": "stopped"}[found.group(2)]
+                    after = printed_lines[at + 1] if at + 1 < len(printed_lines) else ""
+                    message = after.strip() if re.match(r"\s+\S", after) else ""
+                    lpstat_printers.append(f"{found.group(1)} {doing} {message}".strip())
+                default = re.search(r"system default destination: (\S+)", "\n".join(printed_lines))
+                return {"printers": lpstat_printers, "default": default.group(1) if default else "none",
+                        "jobs": re.findall(rf"^{re.escape(queue_name)}-(\d+)\s", "\n".join(printed_lines), re.M)}
+
+            def printers_agree(page, told):
+                """Whether the page and lpstat name the same printers doing the same, the same default
+                and the same jobs of the test queue."""
+                page_jobs = [job_line.split()[0] for job_line in page["job"] if job_line.split()[1:2] == [queue_name]]
+                return (page["printer"] == told["printers"] and page.get("default-printer") == told["default"]
+                        and page_jobs == told["jobs"])
+
+            def printers_when(what, wanted):
+                """The page's printers once they are what wanted asks and lpstat agrees, or None."""
+                return wait_for(30, lambda: next(
+                    (found for found in [printers_page(what)]
+                     if wanted(found) and printers_agree(found, lpstat_says(f"lpstat for {what}"))), None))
+
+            def printers_differ(what):
+                """Say what the page and lpstat said, when they did not say what they should have."""
+                fail(f"{what}: the Printers page says {printers_page('the printers on the page again')}, and "
+                     f"lpstat says {lpstat_says('what lpstat says again')}")
+
+            run(f"systemd-run --user --quiet --collect --unit=rift-test-printer ippeveprinter "
+                f"-p {TEST_PRINTER_PORT} -r off -n localhost '{queue_title}'", "CUPS's test printer")
+            # lpadmin asks the printer what it takes before it makes the queue, so it is tried until the
+            # printer answers. the owner is in wheel, which cupsd.conf's SystemGroup names, so the owner
+            # makes the queue over CUPS's own socket with no password
+            queue_said = []
+
+            def queue_made():
+                status, told = run(f"lpadmin -p {queue_name} -D '{queue_title}' -E "
+                                   f"-v ipp://localhost:{TEST_PRINTER_PORT}/ipp/print -m everywhere",
+                                   "a queue for the test printer")
+                queue_said[:] = [without_console(told).strip()[-300:]]
+                return status == 0
+
+            if not wait_for(60, queue_made):
+                _, journal = run("journalctl --user -b -u rift-test-printer -o cat -n 20 | cat",
+                                 "the test printer's log")
+                fail(f"lpadmin made no queue for the test printer: {queue_said!r}, "
+                     f"{without_console(journal).strip()[-400:]!r}")
+            run("rift-settings --page printers", "the Printers page")
+            if not wait_for(30, lambda: settings_state("the Printers page").get("page") == "printers"):
+                fail("rift-settings --page printers did not show that page")
+            printers_found = printers_when("the printers on the page", lambda found: found.get("printers") == "1")
+            if not printers_found:
+                printers_differ("the queue the owner made")
+            if not printers_found["printer"][0].startswith(f"{queue_name} idle") or \
+                    printers_found.get("default-printer") != "none":
+                fail(f"the Printers page says {printers_found} for a new idle queue on a drive with no default")
+            ok(f"the Printers page lists {queue_name} idle with no default printer, which is what lpstat says")
+
+            # the default is the owner's own: the page writes it into ~/.cups/lpoptions, which the CUPS
+            # library reads before it asks the scheduler, and lpstat -d then names it
+            run(f"rift-settings --set printer {queue_name}", "the printer made the default on the page")
+            if not printers_when("the default on the page", lambda found: found.get("default-printer") == queue_name):
+                printers_differ(f"the page made {queue_name} the default")
+            _, told = run("cat ~/.cups/lpoptions", "the owner's lpoptions")
+            if f"Default {queue_name}" not in without_console(told):
+                fail(f"the owner's lpoptions says {without_console(told).strip()[-200:]!r} after the page "
+                     f"made {queue_name} the default")
+            # a job held in the queue waits there until it is released or cancelled
+            status, told = run(f"lp -d {queue_name} -H hold -o raw -t '{TEST_JOB}' /etc/os-release",
+                               "a job held in the test queue")
+            held_job = re.search(rf"request id is {re.escape(queue_name)}-(\d+)", without_console(told))
+            if status != 0 or not held_job:
+                fail(f"lp exited with {status} and printed {without_console(told).strip()[-300:]!r}")
+            job_number = held_job.group(1)
+            if not printers_when("the held job on the page",
+                                 lambda found: found["job"] == [f"{job_number} {queue_name} held {TEST_JOB}"]):
+                printers_differ(f"job {job_number} held in {queue_name}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Printers page", f"{stem}-settings-printers{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            ok(f"the Printers page made {queue_name} the default in the owner's lpoptions and lists job "
+               f"{job_number} held in it, which is what lpstat says")
+
+            # stopped, with the message CUPS keeps for it, then resumed from the page. cupsenable is
+            # CUPS's administrator's to run, and the owner is one through wheel
+            status, told = run(f"cupsdisable -r '{TEST_STOPPED}' {queue_name}", "the test queue stopped")
+            if status != 0:
+                fail(f"cupsdisable exited with {status}: {without_console(told).strip()[-300:]!r}")
+            if not printers_when("the stopped queue on the page",
+                                 lambda found: found["printer"] == [f"{queue_name} stopped {TEST_STOPPED}"]):
+                printers_differ(f"{queue_name} stopped")
+            run(f"rift-settings --set resume {queue_name}", "Resume on the Printers page")
+            if not printers_when("the queue resumed on the page",
+                                 lambda found: found["printer"][:1] == [f"{queue_name} idle"]):
+                _, told = run(f"cupsenable {queue_name}", "cupsenable from the terminal, to read what it says")
+                printers_differ(f"Resume on the page, where cupsenable in a terminal says "
+                                f"{without_console(told).strip()[-200:]!r}")
+            run(f"rift-settings --set cancel {job_number}", "Cancel on the Printers page")
+            if not printers_when("the jobs after the cancel", lambda found: found.get("jobs") == "0"):
+                _, told = run(f"cancel {job_number}", "cancel from the terminal, to read what it says")
+                printers_differ(f"Cancel on job {job_number}, where cancel in a terminal says "
+                                f"{without_console(told).strip()[-200:]!r}")
+            ok(f"the Printers page showed {queue_name} stopped with its message, resumed it, and cancelled job "
+               f"{job_number}, and lpstat agreed each time")
+
+            # the test printer goes, and so does the default it had, since home goes into the backups
+            run(f"lpadmin -x {queue_name}; systemctl --user stop rift-test-printer; rm -f ~/.cups/lpoptions",
+                "the test printer taken away")
+            if not printers_when("the printers after the queue went",
+                                 lambda found: found.get("printers") == "0" and found.get("default-printer") == "none"):
+                printers_differ("the test queue taken away")
+
+            # the Accessibility page. each switch runs what its key runs and says whether its program is
+            # running now, which is what `lens --state` and pgrep say on the same boot: on and off from
+            # the page, and a key pressed while the page is up moves the switch with it
+            def access_page(what):
+                """What the page says about the screen reader and the on-screen keyboard."""
+                found = settings_state(what)
+                return found.get("screen-reader"), found.get("on-screen-keyboard")
+
+            def running_now(pattern, what):
+                """The processes whose command line has the pattern in it."""
+                _, told = run(f"pgrep -af {pattern} | cat", what)
+                return [found for found in without_console(told).splitlines() if found.strip()]
+
+            def access_agrees(reader, keyboard, what):
+                """Whether the page, the shell and pgrep all say the screen reader and the keyboard
+                are what is wanted."""
+                shell = bar_state(f"the shell for {what}")
+                return (access_page(f"the page for {what}") == (reader, keyboard)
+                        and (shell.get("screen-reader"), shell.get("keyboard")) == (reader, keyboard)
+                        and bool(running_now("orca", f"orca for {what}")) == (reader == "on")
+                        and bool(running_now("wvkbd", f"wvkbd for {what}")) == (keyboard == "on"))
+
+            def access_when(reader, keyboard, what):
+                """Wait for the page, the shell and pgrep to agree, or say what each said."""
+                if wait_for(60, lambda: access_agrees(reader, keyboard, what)):
+                    return
+                shell = bar_state(f"the shell for {what} again")
+                fail(f"{what}: the Accessibility page says {access_page(f'the page for {what} again')}, lens "
+                     f"--state says {(shell.get('screen-reader'), shell.get('keyboard'))}, and pgrep finds "
+                     f"{running_now('orca', 'orca again')} and {running_now('wvkbd', 'wvkbd again')}, where "
+                     f"the screen reader should be {reader} and the keyboard {keyboard}")
+
+            run("rift-settings --page accessibility", "the Accessibility page")
+            if not wait_for(30, lambda: settings_state("the Accessibility page").get("page") == "accessibility"):
+                fail("rift-settings --page accessibility did not show that page")
+            access_when("off", "off", "the page as it comes up")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Accessibility page", f"{stem}-settings-accessibility{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            run("rift-settings --set screen-reader on", "the screen reader's switch on")
+            access_when("on", "off", "the screen reader turned on from the page")
+            # the screen reader the page started is the whole of it, and takes its name on the bus
+            if not wait_for(180, lambda: orca_on_the_bus("the screen reader the page started")):
+                fail("the screen reader the page started did not take org.gnome.Orca.Service on the session bus")
+            run("rift-settings --set screen-reader off", "the screen reader's switch off")
+            access_when("off", "off", "the screen reader turned off from the page")
+            run("rift-settings --set on-screen-keyboard on", "the keyboard's switch on")
+            access_when("off", "on", "the keyboard turned on from the page")
+            if not wait_for(30, keyboard_band):
+                shot(f"{stem}-settings-keyboard{extension}", "keyboard")
+                fail("the on-screen keyboard the page started drew nothing along the bottom of the screen")
+            shot(f"{stem}-settings-keyboard{extension}", "keyboard")
+            # the key while the page is up: the switch follows what the key did
+            press(["meta_l", "alt", "k"], what="the on-screen keyboard key with the page up")
+            access_when("off", "off", "the keyboard hidden by its key with the page up")
+            press(["meta_l", "alt", "k"], what="the on-screen keyboard key again")
+            access_when("off", "on", "the keyboard shown by its key with the page up")
+            run("rift-settings --set on-screen-keyboard off", "the keyboard's switch off")
+            access_when("off", "off", "the keyboard turned off from the page")
+            if not wait_for(30, lambda: keyboard_band() is None):
+                fail("the on-screen keyboard is still drawn after the page turned it off")
+            ok("the Accessibility page turned the screen reader and the on-screen keyboard on and off, its "
+               "switch followed the keyboard's key, and lens --state and pgrep agreed each time")
+
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
             if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
@@ -4573,7 +4792,7 @@ def main():
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            for page in ("dock", "printers", "keyboard"):
+            for page in ("dock", "keyboard", "privacy"):
                 run(f"rift-settings --page {page}", f"the {page} page")
                 if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
                     fail(f"rift-settings --page {page} did not show that page")
