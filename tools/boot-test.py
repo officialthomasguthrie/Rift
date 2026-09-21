@@ -125,7 +125,8 @@ notification's button makes notify-send print the action's key, and one that is 
 after five seconds and stays in the list. A click on the clock opens the clock menu, which lists it,
 its Do not disturb switch keeps the next one off the screen, and a second click closes the menu. The
 volume key sent over qmp turns the sink up and shows the key popup over the dock. Killing the shell
-brings it back, since it is a user unit that restarts. Then Firefox and Ghostty, started from the dock,
+brings it back, since it is a user unit that restarts, and the apps it started keep their windows
+through a restart, since each runs in a scope of its own. Then Firefox and Ghostty, started from the dock,
 stand side by side between the bar and the dock, each with the title bar it draws itself and a close
 button at its right. KeePassXC, the first Qt app, started from the Applications menu, stands there with
 the Adwaita title bar Qt draws for it in dark. The everyday apps follow, one at a time from the same menu:
@@ -325,8 +326,20 @@ DOCK_GAP = 4
 DOCK_MENU_WIDTH = 240
 DOCK_MENU_PAD = 8
 DOCK_MENU_ROW = 28
-# the apps the dock keeps when the owner has said nothing, in their order, from the same file
+# the apps the dock keeps when the owner has said nothing, in their order, from crates/librift/src/dock.rs
 DOCK_KEPT = ["firefox", "com.mitchellh.ghostty", "dev.zed.Zed", "dev.rift.Settings"]
+# how far a dock that does not reach the sides stands off its edge, and how tall the dock is with its
+# large icons, from crates/lens/src/dock.rs and crates/librift/src/dock.rs
+DOCK_OFF_EDGE = 8
+DOCK_LARGE = 60
+# the files the dock keeps its apps and its settings in, and the ones Do not disturb, the apps that
+# have sent a notification and the ones whose banners stay off live in, from crates/librift/src
+DOCK_FILE = "~/.config/rift/dock"
+DOCK_OPTIONS = "~/.config/rift/dock-options"
+QUIET_FILE = "~/.config/rift/do-not-disturb"
+QUIET_APPS = "~/.config/rift/quiet-apps"
+# the name notify-send gives itself, which the Notifications page lists it by
+NOTIFY_APP = "notify-send"
 # lens's system menu, from crates/lens/src/{bar,system}.rs: the bar's padding at each end and the
 # status button's inside it, a status icon, and the menu's width, its margin from the right edge of
 # the screen, its padding, a row, the gap in a row and the space at the end of one, in logical pixels
@@ -376,7 +389,8 @@ WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(
 STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
-              "recording", "screen-reader", "keyboard")
+              "recording", "screen-reader", "keyboard", "layout", "dock-position", "dock-extend",
+              "dock-icons")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -462,7 +476,8 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "screen-reader", "on-screen-keyboard", "layouts", "console-keymap", "mice", "touchpads",
                  "primary-button", "mouse-speed", "mouse-acceleration", "mouse-natural-scrolling",
                  "touchpad-speed", "tap-to-click", "touchpad-natural-scrolling", "disable-while-typing",
-                 "edge-scrolling", "problem")
+                 "edge-scrolling", "pinned", "dock-position", "dock-extend", "dock-icons",
+                 "do-not-disturb", "notifiers", "problem")
 # the time zone the Date and time page sets and puts back, with what date calls it at either time of
 # year. a drive where no zone was ever chosen is in UTC
 SETTINGS_ZONE = ("Pacific/Auckland", ("NZST", "NZDT"))
@@ -2893,18 +2908,47 @@ def main():
                 fail(f"Pin to dock did not write {key} into ~/.config/rift/dock")
             ok(f"Pin to dock kept {key} in the list")
 
-            # with both windows closed and the shell started again, the app it pinned is still
-            # there, with no window marks under it
-            for window in (ghostty, other):
-                run(f"horizon msg action close-window --id {window}", f"closing window {window}")
-            run("systemctl --user restart lens.service", "the shell started again")
+            # the shell starts every app in a scope of its own, so starting the shell again, which
+            # stops whatever is left in its unit, leaves both apps running with their windows
+            def window_scope(window, what):
+                """The scope the program that owns this window runs in, from its pid in horizon's
+                list, or what its cgroup says when that is no scope of the shell's."""
+                _, printed = run("horizon msg --json windows", what)
+                owner = re.search(r'\{"id":' + str(window) + r',"title":(?:null|"(?:[^"\\]|\\.)*"),'
+                                  r'"app_id":(?:null|"[^"]*"),"pid":(\d+)',
+                                  without_console(printed).replace("\n", ""))
+                if not owner:
+                    return None
+                _, printed = run(f"cat /proc/{owner.group(1)}/cgroup", f"{what}, its cgroup")
+                scoped = re.search(r"app-rift-[^/\s]+\.scope", without_console(printed))
+                return scoped.group(0) if scoped else without_console(printed).strip()[-200:]
+
+            scopes = {window: window_scope(window, f"the scope of window {window}") for window in (ghostty, other)}
+            if not all(scope and scope.startswith("app-rift-") for scope in scopes.values()):
+                fail(f"the apps the shell started are not in scopes of their own: {scopes}")
+            run("systemctl --user restart lens.service", "the shell started again with both apps open")
             if not wait_for(30, lambda: run("lens --state", "the state after the restart")[0] == 0):
                 fail("lens --state does not answer after the shell was started again")
-            items = dock_when("the dock after the restart", 20, lambda items: key in items)
+            kept_windows = [win[0] for win in open_windows("horizon's windows after the restart")]
+            if ghostty not in kept_windows or other not in kept_windows:
+                fail(f"after the shell started again horizon has windows {kept_windows}, where {ghostty} and "
+                     f"{other} were open before it")
+            items = dock_when("the dock after the restart", 20,
+                              lambda items: items.get(key, (0, False))[0] == 1
+                              and items.get(MENU_APP_ID, (0, False))[0] == 1)
+            if items.get(key, (0, False))[0] != 1 or items.get(MENU_APP_ID, (0, False))[0] != 1:
+                fail(f"the dock lists {items} after the restart, expected a window each for {MENU_APP_ID} and {key}")
+            ok(f"the shell started again and both apps kept their windows, each in a scope of its own: "
+               f"{', '.join(scopes.values())}")
+
+            # with both windows closed, the app it pinned is still there, with no window marks under it
+            for window in (ghostty, other):
+                run(f"horizon msg action close-window --id {window}", f"closing window {window}")
+            items = dock_when("the dock with both windows closed", 20, lambda items: items.get(key) == (0, False))
             if items.get(key) != (0, False):
-                fail(f"the dock lists {items} after the restart, expected {key} in it with no window")
+                fail(f"the dock lists {items} with both windows closed, expected {key} in it with no window")
             look("the desktop with the dock", f"{stem}-dock-desktop{extension}", 30, journals=("lens",))
-            ok(f"{key} is still in the dock after the shell started again: {' '.join(items)}")
+            ok(f"{key} is still in the dock with its window closed: {' '.join(items)}")
 
             # 5d. the console. Mod+Grave runs toggle-console with the arguments in
             # nix/modules/horizon.nix, and horizon msg runs the same action without the key. the first
@@ -4916,6 +4960,12 @@ def main():
                 """Which of horizon's layouts is in use, by its place in the list."""
                 return (horizon_layouts(what) or ([], None))[1]
 
+            def bar_layout_when(wanted, what):
+                """Wait for the bar to name this layout, or none, or say what it names."""
+                if wait_for(20, lambda: bar_state(what).get("layout") == wanted):
+                    return
+                fail(f"{what}: the bar names layout {bar_state(f'{what} again').get('layout')!r}, expected {wanted}")
+
             run("rift-settings --page keyboard", "the Keyboard page")
             if not wait_for(30, lambda: settings_state("the Keyboard page").get("page") == "keyboard"):
                 fail("rift-settings --page keyboard did not show that page")
@@ -4935,16 +4985,21 @@ def main():
             if (not re.search(rf'^XKBLAYOUT="?us,{layout_word}"?\s*$', kept, re.M)
                     or not any("persist" in word and "@var" in word for word in kept.split())):
                 fail(f"after the page added {layout_word}, {KEYBOARD_FILE} and findmnt say {kept.strip()[-300:]!r}")
+            # with two layouts the bar names the one in use, the way GNOME shows its input source
+            bar_layout_when("US", "the bar with two layouts")
             # the key switches to the next layout and back to the first, and the page's list is the
             # order horizon keeps them in
             press(["meta_l", "shift", "spc"], what="the key that switches the layout")
             if not wait_for(20, lambda: layout_in_use("the layout in use after the key") == 1):
                 fail(f"after Mod+Shift+Space horizon has layout {layout_in_use('the layout in use again')} in use, "
                      f"expected {layout_name}, the second")
+            bar_layout_when(layout_word.upper(), "the bar after the key")
+            shot(f"{stem}-bar-layout{extension}", "bar-layout")
             press(["meta_l", "shift", "spc"], what="the key again")
             if not wait_for(20, lambda: layout_in_use("the layout in use after the key again") == 0):
                 fail(f"after Mod+Shift+Space again horizon has layout {layout_in_use('the layout in use')} in use, "
                      "expected the first")
+            bar_layout_when("US", "the bar after the key again")
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             look(f"{SETTINGS_APP} on the Keyboard page", f"{stem}-settings-layouts{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
@@ -4952,8 +5007,10 @@ def main():
             layouts_when([layout_word, "us"], f"{layout_name} put first from the page")
             if layout_in_use(f"the layout in use with {layout_word} first") != 0:
                 fail(f"horizon does not start in {layout_name} with it first")
+            bar_layout_when(layout_word.upper(), f"the bar with {layout_word} first")
             run(f"rift-settings --set remove-layout {layout_word}", f"{layout_name} taken off on the page")
             layouts_when(["us"], f"{layout_name} taken off from the page")
+            bar_layout_when("none", "the bar with one layout")
             _, output = run(f"cat {KEYBOARD_FILE}", "the layouts kept after the page took one off")
             if not re.search(r'^XKBLAYOUT="?us"?\s*$', without_console(output), re.M):
                 fail(f"after the page took {layout_word} off, {KEYBOARD_FILE} says "
@@ -4978,8 +5035,9 @@ def main():
                      f"it had {border_before}, and the page says {said_problem!r}, see "
                      f"{stem}-settings-shortcuts{extension}")
             ok(f"the Keyboard page added {layout_name}, put it first and took it off, and localed, horizon and "
-               f"the file on persist agreed each time; Mod+Shift+Space switched to it and back; the console keeps "
-               f"keymap {page_keymap}; the Show button brought up the shortcuts")
+               f"the file on persist agreed each time; Mod+Shift+Space switched to it and back, with the bar "
+               f"naming the layout in use until only one was left; the console keeps keymap {page_keymap}; the "
+               f"Show button brought up the shortcuts")
 
             # the Mouse and touchpad page. the page says what the machine has, which is what udev tags
             # each input device as on the same boot: the vm has qemu's ps/2 mouse and its virtio tablet,
@@ -5079,6 +5137,252 @@ def main():
                f"does, wrote natural scrolling and a speed for the mouse into horizon's part and horizon read "
                f"it with no error, and wrote nothing for a touchpad the vm has not got")
 
+            # the Dock page, over the file the shell keeps the dock's apps in and the file of its
+            # settings. the page lists what the dock keeps in the order the file and the dock have it,
+            # moves one and takes one off with the file and the dock following, and each of its
+            # settings moves the dock's surface where horizon msg layers says and the screendump has
+            # it, then goes back
+            def dock_page(what):
+                """What the Dock page says: the apps the dock keeps in order as (id, name), and its
+                settings. Nothing until the page has read its files."""
+                status, told = run("rift-settings --state", what)
+                if status != 0:
+                    return None
+                kept_apps, dock_settings = [], {}
+                for printed_line in without_console(told).splitlines():
+                    key, _, value = printed_line.strip().partition(" ")
+                    if key == "pinned-app":
+                        word, _, name = value.strip().partition(" ")
+                        kept_apps.append((word, name.strip()))
+                    elif key in ("pinned", "dock-position", "dock-extend", "dock-icons"):
+                        dock_settings[key] = value.strip()
+                return (kept_apps, dock_settings) if "pinned" in dock_settings else None
+
+            def dock_file(what):
+                """The apps the shell's file lists, in its order."""
+                return without_console(run(f"cat {DOCK_FILE}", what)[1]).split()
+
+            def dock_agrees(wanted, what):
+                """Whether the page, the file and the dock all have these apps first, in this order."""
+                said = dock_page(f"the page for {what}")
+                return (said is not None and [word for word, _ in said[0]] == wanted
+                        and dock_file(f"the file for {what}") == wanted
+                        and list(dock_items(f"the dock for {what}"))[:len(wanted)] == wanted)
+
+            def kept_when(wanted, what):
+                """Wait for the page, the file and the dock to agree on these apps, or say what each said."""
+                if wait_for(30, lambda: dock_agrees(wanted, what)):
+                    return
+                fail(f"{what}: the Dock page says {dock_page(f'the page for {what} again')}, the file "
+                     f"{dock_file(f'the file for {what} again')} and the dock "
+                     f"{list(dock_items(f'the dock for {what} again'))}, where the apps should be {wanted}")
+
+            def dock_layer(what):
+                """Where horizon put the dock, as x, y, width, height and what it keeps of the screen."""
+                _, told = run("horizon msg --json layers", what)
+                placed = re.search(r'"namespace":"lens-dock"[^}]*?"geometry":\{"x":(-?\d+),"y":(-?\d+),'
+                                   r'"width":(\d+),"height":(\d+)\},"exclusive_zone":(-?\d+)',
+                                   without_console(told).replace("\n", ""))
+                return tuple(int(number) for number in placed.groups()) if placed else None
+
+            def dock_drawn(placed, name):
+                """A screendump, and whether the dock is drawn where horizon says it put it: the bar's
+                gray over most of that rectangle, and next to none in the two rows past the edge of it
+                that faces the windows, which is the desktop's gray in the gap before them."""
+                wide, tall, pixels = screendump(args.qmp, work, name)
+                left, top, across, down = placed[:4]
+
+                def gray_share(rows):
+                    counted = total = 0
+                    for y in rows:
+                        if not 0 <= y < tall:
+                            continue
+                        for x in range(max(left, 0), min(left + across, wide)):
+                            total += 1
+                            counted += near(pixels[(y * wide + x) * 3:(y * wide + x) * 3 + 3], BAR, 3)
+                    return counted / total if total else 0.0
+
+                facing = range(top + down + 1, top + down + 3) if top < tall / 2 else range(top - 3, top - 1)
+                shares = (round(gray_share(range(top, top + down)), 2), round(gray_share(facing), 2))
+                return wide, tall, pixels, shares[0] > 0.4 and shares[1] < 0.2, shares
+
+            def dock_set(setting, value, fits, png):
+                """Set one of the dock's settings from the page, wait for horizon to have the dock where
+                fits says and for the shell and the page to say the setting, and check the screendump
+                has the dock there. What horizon says, for the next setting to compare with."""
+                what = f"{setting} {value} from the Dock page"
+                run(f"rift-settings --set {setting} {value}", what)
+                placed = wait_for(30, lambda: next((found for found in [dock_layer(what)]
+                                                    if found and fits(found)), None))
+                if not placed:
+                    fail(f"after {what} horizon has the dock at {dock_layer(f'{what} again')}")
+                if bar_state(f"the shell after {what}").get(setting) != value:
+                    fail(f"after {what} lens --state says {setting} "
+                         f"{bar_state(f'the shell after {what} again').get(setting)!r}")
+                page_said = (dock_page(f"the page after {what}") or ([], {}))[1]
+                if page_said.get(setting) != value:
+                    fail(f"after {what} the Dock page says {page_said}")
+                drawn = wait_for(20, lambda: next((found for found in [dock_drawn(placed, "dock-setting")]
+                                                   if found[3]), None))
+                if not drawn:
+                    shown = dock_drawn(placed, "dock-setting")
+                    write_png(png, *shown[:3])
+                    fail(f"after {what} the screendump does not have the dock at {placed}: its gray covers "
+                         f"{shown[4][0]} of it and {shown[4][1]} of the rows past it, see {png}")
+                write_png(png, *drawn[:3])
+                return placed
+
+            run("rift-settings --page dock", "the Dock page")
+            if not wait_for(30, lambda: settings_state("the Dock page").get("page") == "dock"):
+                fail("rift-settings --page dock did not show that page")
+            kept_before = dock_file("the apps the dock keeps")
+            if len(kept_before) < 3:
+                fail(f"the dock keeps {kept_before}, expected the apps the image pins and {DOCK_APP}")
+            kept_when(kept_before, "the page as it comes up")
+            kept_names = dict((dock_page("the names on the Dock page") or ([], {}))[0])
+            if kept_names.get(MENU_APP_ID) != MENU_APP:
+                fail(f"the Dock page names the apps {kept_names}, expected {MENU_APP} for {MENU_APP_ID}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Dock page", f"{stem}-settings-dock{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            second_kept, last_kept = kept_before[1], kept_before[-1]
+            run(f"rift-settings --set move-up {second_kept}", f"{second_kept} moved up on the Dock page")
+            kept_when([second_kept, kept_before[0]] + kept_before[2:], f"{second_kept} moved up")
+            run(f"rift-settings --set move-down {second_kept}", f"{second_kept} moved down again")
+            kept_when(kept_before, f"{second_kept} moved down again")
+            run(f"rift-settings --set unpin {last_kept}", f"{last_kept} taken off the dock on the page")
+            kept_when(kept_before[:-1], f"{last_kept} taken off")
+            if last_kept in dock_items(f"the dock without {last_kept}"):
+                fail(f"the dock still lists {last_kept}, which is not running, after the page took it off")
+            run(f"rift-settings --set pin {last_kept}", f"{last_kept} pinned again on the page")
+            kept_when(kept_before, f"{last_kept} pinned again")
+
+            full_dock = dock_layer("the dock before its settings changed")
+            if not full_dock or full_dock[0] != 0 or full_dock[3] != DOCK_HEIGHT or full_dock[4] != DOCK_HEIGHT:
+                fail(f"horizon has the dock at {full_dock}, expected it from side to side along the bottom, "
+                     f"{DOCK_HEIGHT} tall and keeping as much")
+            screen_across, screen_down = full_dock[2], full_dock[1] + full_dock[3]
+            placed_top = dock_set("dock-position", "top",
+                                  lambda found: found[:4] == (0, BAR_HEIGHT, screen_across, DOCK_HEIGHT)
+                                  and found[4] == DOCK_HEIGHT, f"{stem}-dock-top{extension}")
+            dock_set("dock-position", "bottom", lambda found: found == full_dock, f"{stem}-dock-bottom{extension}")
+            placed_middle = dock_set("dock-extend", "off",
+                                     lambda found: found[2] < screen_across / 2 and found[0] > 0
+                                     and abs(2 * found[0] + found[2] - screen_across) <= 2
+                                     and found[1] == screen_down - DOCK_OFF_EDGE - DOCK_HEIGHT
+                                     and found[3] == DOCK_HEIGHT and found[4] == DOCK_HEIGHT,
+                                     f"{stem}-dock-middle{extension}")
+            dock_set("dock-extend", "on", lambda found: found == full_dock, f"{stem}-dock-extended{extension}")
+            placed_large = dock_set("dock-icons", "large",
+                                    lambda found: found[:4] == (0, screen_down - DOCK_LARGE, screen_across, DOCK_LARGE)
+                                    and found[4] == DOCK_LARGE, f"{stem}-dock-large{extension}")
+            dock_set("dock-icons", "small", lambda found: found == full_dock, f"{stem}-dock-small{extension}")
+            ok(f"the Dock page lists {', '.join(kept_before)} as the file and the dock do, moved one up and "
+               f"down and took one off and on with both following, and horizon put the dock at {placed_top} "
+               f"along the top, {placed_middle} in the middle off the edge and {placed_large} with large "
+               f"icons, each where the screendump has it, then back at {full_dock}")
+
+            # the Notifications page. Do not disturb is one line of the owner's that the page and the
+            # clock menu's switch both write: from the page it keeps a notification off the screen and
+            # in the clock menu's list, and the menu's switch moves the page's. the app that sent them
+            # is listed, and with its banners off from the page the next one it sends stays off the
+            # screen too
+            def notices_page(what):
+                """What the Notifications page says: Do not disturb, and each app with whether its
+                banners show. Nothing until the page has read its files."""
+                status, told = run("rift-settings --state", what)
+                if status != 0:
+                    return None
+                quiet_said, apps_said = None, {}
+                for printed_line in without_console(told).splitlines():
+                    key, _, value = printed_line.strip().partition(" ")
+                    if key == "do-not-disturb":
+                        quiet_said = value.strip()
+                    elif key == "app-banners":
+                        shown, _, app_name = value.strip().partition(" ")
+                        apps_said[app_name.strip()] = shown
+                return (quiet_said, apps_said) if quiet_said is not None else None
+
+            def quiet_agrees(wanted, what):
+                """Whether the page, the shell and the file all say Do not disturb is this."""
+                said = notices_page(f"the page for {what}")
+                kept_word = without_console(run(f"cat {QUIET_FILE}", f"the file for {what}")[1]).strip()
+                return (said is not None and said[0] == wanted and kept_word == wanted
+                        and bar_state(f"the shell for {what}").get("do-not-disturb") == wanted)
+
+            def quiet_when(wanted, what):
+                """Wait for the page, the shell and the file to agree on Do not disturb, or say what each said."""
+                if wait_for(30, lambda: quiet_agrees(wanted, what)):
+                    return
+                fail(f"{what}: the Notifications page says {notices_page(f'the page for {what} again')}, the shell "
+                     f"says {bar_state(f'the shell for {what} again').get('do-not-disturb')!r} and the file "
+                     f"{without_console(run(f'cat {QUIET_FILE}', 'the file again')[1]).strip()!r}, expected {wanted}")
+
+            def banners_when(wanted, what):
+                """Wait for the page to say this about notify-send's banners and for the file of apps
+                kept quiet to have it in it only when they are off."""
+                def agreed():
+                    shown = (notices_page(f"the page for {what}") or (None, {}))[1].get(NOTIFY_APP)
+                    listed = [line.strip() for line in without_console(
+                        run(f"cat {QUIET_APPS}", f"the apps kept quiet for {what}")[1]).splitlines()]
+                    return shown == wanted and (NOTIFY_APP in listed) == (wanted == "off")
+                if not wait_for(20, agreed):
+                    fail(f"{what}: the Notifications page says {notices_page(f'the page for {what} again')}, "
+                         f"expected {NOTIFY_APP}'s banners {wanted}")
+
+            run("rift-settings --page notifications", "the Notifications page")
+            if not wait_for(30, lambda: settings_state("the Notifications page").get("page") == "notifications"):
+                fail("rift-settings --page notifications did not show that page")
+            quiet_when("off", "the page as it comes up")
+            banners_when("on", "the page as it comes up")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Notifications page", f"{stem}-settings-notifications{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            run("rift-settings --set do-not-disturb on", "Do not disturb on from the page")
+            quiet_when("on", "Do not disturb on from the page")
+            counted_before = notices("the notifications before one with Do not disturb from the page")
+            run(f'notify-send "{NOTIFY_SUMMARY}" "Do not disturb from the page keeps this one quiet."',
+                "a notification with Do not disturb on from the page")
+            if wait_for(20, lambda: notices("the state with Do not disturb from the page")
+                        == (0, counted_before[1] + 1)) is not True:
+                fail(f"lens shows {notices('the notifications')} (on screen, kept) with Do not disturb on from "
+                     f"the page, where it kept {counted_before[1]} before")
+            if bar_state("the banners with Do not disturb from the page").get("banners") != "none":
+                fail("a notification is on screen with Do not disturb on from the page")
+            # the clock menu's switch turns it off again, and the page follows
+            click(args.qmp, size, clock_point)
+            quiet_menu = wait_for(20, lambda: clock_open("the clock menu over the Notifications page"))
+            if not quiet_menu:
+                fail("a click on the clock opened no clock menu over the Notifications page")
+            click(args.qmp, size, switch_point(quiet_menu))
+            quiet_when("off", "the clock menu's switch")
+            run("lens --escape", "the clock menu closed")
+            if wait_for(20, lambda: bar_state("the clock menu after escape").get("clock-menu") == "closed") is not True:
+                fail("escape left the clock menu open")
+            point(args.qmp, size, away)
+            # notify-send's banners off from the page keep its next one off the screen, and on again
+            # let the one after that show
+            run(f"rift-settings --set app-banners {NOTIFY_APP} off", f"{NOTIFY_APP}'s banners off from the page")
+            banners_when("off", f"{NOTIFY_APP}'s banners off")
+            counted_before = notices("the notifications before one with its banners off")
+            run(f'notify-send "{NOTIFY_SUMMARY}" "With its banners off this one goes into the list."',
+                f"a notification from {NOTIFY_APP} with its banners off")
+            if wait_for(20, lambda: notices("the state with its banners off")
+                        == (0, counted_before[1] + 1)) is not True:
+                fail(f"lens shows {notices('the notifications')} (on screen, kept) with {NOTIFY_APP}'s banners off, "
+                     f"where it kept {counted_before[1]} before")
+            run(f"rift-settings --set app-banners {NOTIFY_APP} on", f"{NOTIFY_APP}'s banners on again")
+            banners_when("on", f"{NOTIFY_APP}'s banners on again")
+            run(f'notify-send "{NOTIFY_SUMMARY}" "With its banners on again this one shows."',
+                f"a notification from {NOTIFY_APP} with its banners on")
+            if wait_for(20, lambda: (notices("the state with its banners on") or (0, 0))[0] == 1) is not True:
+                fail(f"lens shows {notices('the notifications')} (on screen, kept) with {NOTIFY_APP}'s banners on again")
+            if wait_for(20, lambda: (notices("the banner going") or (1, 0))[0] == 0) is not True:
+                fail("the notification from the page's last check is still on screen after its five seconds")
+            ok(f"the Notifications page's Do not disturb kept a notification off the screen and in the clock menu's "
+               f"list, the clock menu's switch turned the page's off, and {NOTIFY_APP}'s banners off from the page "
+               f"kept its next one off the screen too")
+
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
             if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
@@ -5087,7 +5391,7 @@ def main():
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            for page in ("dock", "privacy"):
+            for page in ("apps", "privacy", "owner"):
                 run(f"rift-settings --page {page}", f"the {page} page")
                 if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
                     fail(f"rift-settings --page {page} did not show that page")
