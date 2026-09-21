@@ -383,9 +383,10 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
     }
 }
 
-/// How a menu of the bar stands under it: on no one's working area but the screen's, and the bar's
-/// height down from the top, so a dock along the top edge does not push the menu down from the
-/// button that opened it. It stands over the dock instead, the way a menu does.
+/// What a menu of the bar keeps of the screen: -1, which places it on the whole screen rather than
+/// in what the bar and the dock leave of it, with the bar's height as its margin from the top. A dock
+/// along the top edge then does not push the menu down from the button that opened it; the menu
+/// stands over the dock instead, the way a menu does.
 const UNDER_THE_BAR: i32 = -1;
 
 /// The menu's surface: on the overlay layer, hanging under the bar, its left edge under the
