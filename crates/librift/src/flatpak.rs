@@ -169,10 +169,12 @@ pub fn parse_sizes(printed: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// A size as flatpak writes it, `< 1.4 MB` or `999 bytes`, in bytes. It writes SI units.
+/// A size as flatpak writes it, `< 1.4 MB` or `999 bytes`, in bytes. It writes SI units, and in a
+/// UTF-8 locale a no-break space between the number and the unit.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn bytes(written: &str) -> Option<u64> {
+    let written = written.replace('\u{a0}', " ");
     let written = written.trim().trim_start_matches('<').trim();
     let written = written.split(" (").next().unwrap_or(written);
     let (number, unit) = written.split_once(' ')?;
@@ -304,14 +306,15 @@ mod tests {
     use super::*;
 
     /// What flatpak 1.18 prints into a pipe for an app and the runtime it needs from one remote,
-    /// with `--assumeyes`: the runtime found, the permissions, the table, then the two steps.
+    /// with `--assumeyes`: the runtime found, the permissions, the table, then the two steps. The
+    /// sizes have the no-break space flatpak writes in a UTF-8 locale.
     const INSTALL: &str = "Required runtime for dev.rift.TestApp/x86_64/test (runtime/dev.rift.TestPlatform/x86_64/test) found in remote rift-test
 
 dev.rift.TestApp permissions:
     network
 
- 1.\t   \tdev.rift.TestPlatform\ttest\ti\trift-test\t< 3.0 MB
- 2.\t   \tdev.rift.TestApp\ttest\ti\trift-test\t< 1.0 MB
+ 1.\t   \tdev.rift.TestPlatform\ttest\ti\trift-test\t< 3.0\u{a0}MB
+ 2.\t   \tdev.rift.TestApp\ttest\ti\trift-test\t< 1.0\u{a0}MB
 
 
 
@@ -386,6 +389,9 @@ Installation complete.
 
     #[test]
     fn sizes_read_as_flatpak_writes_them() {
+        assert_eq!(bytes("< 3.0\u{a0}MB"), Some(3_000_000));
+        assert_eq!(bytes("663.3\u{a0}MB"), Some(663_300_000));
+        assert_eq!(bytes("< 566 bytes"), Some(566));
         assert_eq!(bytes("< 3.0 MB"), Some(3_000_000));
         assert_eq!(bytes("284.6 MB"), Some(284_600_000));
         assert_eq!(bytes("1.1 GB"), Some(1_100_000_000));
@@ -401,11 +407,11 @@ Installation complete.
     #[test]
     fn remote_ls_gives_an_id_and_a_size_a_line() {
         let printed =
-            "org.videolan.VLC\t139.4 MB\nnet.mullvad.MullvadBrowser\t284.6 MB\n\nbroken\n";
+            "org.videolan.VLC\t139.4\u{a0}MB\nnet.mullvad.MullvadBrowser\t284.6 MB\n\nbroken\n";
         assert_eq!(
             parse_sizes(printed),
             vec![
-                ("org.videolan.VLC".to_string(), "139.4 MB".to_string()),
+                ("org.videolan.VLC".to_string(), "139.4\u{a0}MB".to_string()),
                 (
                     "net.mullvad.MullvadBrowser".to_string(),
                     "284.6 MB".to_string()
