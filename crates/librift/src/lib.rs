@@ -7,7 +7,7 @@
 //! not disturb and the apps whose banners stay off, which of the programs the shell's keys start is
 //! running, the index for search by meaning, what the system calls itself, dark or light and the
 //! wallpaper, the mouse and the touchpad, the sound `PipeWire` plays and hears, how the boot looks,
-//! and how a drive is written.
+//! the owner's account, and how a drive is written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
 //! which the asking side of the bus turns on, brings in zbus, only the `disk` feature serde and
@@ -39,6 +39,9 @@ pub mod network;
 pub mod notifications;
 pub mod orbit;
 pub mod os;
+// the owner's account is a unix one, and so are its password files
+#[cfg(unix)]
+pub mod owner;
 pub mod pointer;
 #[cfg(unix)]
 pub mod printers;

@@ -4,12 +4,14 @@
 //! disk that backups go to, `vault backup` makes one and `vault backups` lists them. `vault clone`
 //! writes a second drive onto a removable disk. The two boot style methods on the bus read and
 //! write the word on the esp that says how the next boot looks, and `Slots` says what the drive's
-//! two slots hold.
+//! two slots hold. The owner's name and password are kept on persist through the bus, and `vault
+//! owner` puts what is kept there into the password files, at every boot and after a change.
 
 mod backup;
 mod boot;
 mod bus;
 mod clone;
+mod owner;
 mod restore;
 mod slots;
 mod timeline;
@@ -58,6 +60,8 @@ enum Command {
         disk: PathBuf,
         serial: Option<String>,
     },
+    /// Put the owner's name and password persist keeps into the password files.
+    Owner,
     /// The copy a restore runs as the account that asked for it. `serve` starts it.
     RestoreFile {
         from: PathBuf,
@@ -147,6 +151,14 @@ fn main() -> ExitCode {
             }
         }),
         Command::Clone { disk, serial } => clone_drive(&cloner, &disk, serial.as_deref()),
+        Command::Owner => owner::Owner::system().apply().map(|said| {
+            if said.is_empty() {
+                println!("The password files have what persist keeps for the owner.");
+            }
+            for line in said {
+                println!("{line}");
+            }
+        }),
         Command::RestoreFile { from, to, source } => {
             return match restore::copy_back(&from, &to, replace, source) {
                 Ok(outcome) => {
@@ -331,6 +343,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
         },
         ["backup"] => Command::Backup,
         ["backups"] => Command::Backups,
+        ["owner"] => Command::Owner,
         ["clone", disk] => Command::Clone {
             disk: PathBuf::from(disk),
             serial: serial.take(),
@@ -405,7 +418,10 @@ fn usage() {
     println!("  target <folder>  Back up home into this folder on another disk from now on");
     println!("  backup           Back up home now");
     println!("  backups          Print the backups, oldest first");
-    println!("  clone <disk>     Erase this removable disk and write a second drive onto it\n");
+    println!("  clone <disk>     Erase this removable disk and write a second drive onto it");
+    println!(
+        "  owner            Put the owner's name and password persist keeps into the password files\n"
+    );
     println!("Options:");
     println!("  --subvolume <dir>  What is snapshotted (default {SUBVOLUME})");
     println!("  --snapshots <dir>  Where the snapshots go (default {SNAPSHOTS})");

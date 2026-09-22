@@ -30,6 +30,10 @@ rustix = { version = "1.1", default-features = false, features = ["fs", "process
 serde.workspace = true
 serde_json.workspace = true
 toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse", "display"] }
+# the owner's password: yescrypt for a new one, the hash NixOS's own tools make, and sha-crypt to
+# check the one every drive starts with, which NixOS hashes that way
+yescrypt = "0.1"
+sha-crypt = "0.6"
 
 [lints]
 workspace = true

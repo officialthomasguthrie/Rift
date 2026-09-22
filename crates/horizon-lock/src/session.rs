@@ -42,6 +42,8 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| format!("Could not read /etc/passwd: {e}"))?;
     let owner =
         owner::find(&passwd, uid).ok_or_else(|| format!("User {uid} is not in /etc/passwd."))?;
+    // the name comes from the password file each time the screen locks, so a new one shows at once
+    eprintln!("horizon-lock: locking the screen for {}", owner.name);
 
     let connection = Connection::connect_to_env()
         .map_err(|e| format!("Could not connect to the Wayland session: {e}"))?;

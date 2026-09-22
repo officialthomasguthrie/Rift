@@ -1,7 +1,7 @@
-# vault: timeline snapshots of home, rustic backups, drive cloning. vault serve answers on the
-# system bus as dev.rift.Vault and a timer takes a snapshot every hour. backups go to a folder on
-# another disk that sudo vault target chooses. sudo rift clone writes a second drive onto a
-# removable disk, as root in the terminal, not through the service
+# vault: timeline snapshots of home, rustic backups, drive cloning, and the owner's name and
+# password. vault serve answers on the system bus as dev.rift.Vault and a timer takes a snapshot
+# every hour. backups go to a folder on another disk that sudo vault target chooses. sudo rift clone
+# writes a second drive onto a removable disk, as root in the terminal, not through the service
 {
   config,
   lib,
@@ -110,8 +110,12 @@ in
           "/persist"
           "/home"
         ];
-        # the backup target and its password, only root reads them
-        StateDirectory = "rift/vault";
+        # the backup target and its password, and the owner's own name and the hash of their
+        # password. only root reads them
+        StateDirectory = [
+          "rift/vault"
+          "rift/owner"
+        ];
         StateDirectoryMode = "0700";
         # a restore from a backup lands here before the copy into home
         CacheDirectory = "vault";
@@ -120,6 +124,28 @@ in
         RuntimeDirectory = "vault";
         PrivateTmp = true;
         # the bus is a unix socket, so it is still there without a network
+        PrivateNetwork = true;
+        NoNewPrivileges = true;
+      };
+    };
+
+    # the owner's name and password, which the Owner page keeps on persist through vault. root is
+    # a tmpfs, so nixos makes the account again at every boot with the image's name; this puts the
+    # owner's own name and password into the password files before anyone logs in, and vault starts
+    # it again after a change, so the change is there at once. it is the one part of vault that
+    # writes to /etc
+    systemd.services.vault-owner = {
+      description = "Vault, the owner's name and password";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "systemd-user-sessions.service" ];
+      unitConfig.RequiresMountsFor = [ "/var/lib/rift" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/vault owner";
+        ProtectSystem = "strict";
+        ReadWritePaths = [ "/etc" ];
+        ProtectHome = true;
+        PrivateTmp = true;
         PrivateNetwork = true;
         NoNewPrivileges = true;
       };

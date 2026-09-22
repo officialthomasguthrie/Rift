@@ -86,7 +86,10 @@ in
   programs.fish.enable = true;
   documentation.man.enable = true; # quasar indexes man pages offline
 
-  # dev account until first boot setup replaces it with the real owner
+  # the owner's account. root is a tmpfs, so nixos makes it again at every boot with the name and
+  # the password every drive starts with, and what passwd or chfn change lasts until the next boot.
+  # the owner chooses their own on the Owner page in Settings: vault keeps them on persist, and
+  # vault-owner.service puts them into the password files before anyone logs in
   users.mutableUsers = false;
   users.users.rift = {
     isNormalUser = true;

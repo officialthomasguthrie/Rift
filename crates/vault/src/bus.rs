@@ -6,7 +6,8 @@
 //! to replace it. `Backups`, `Backup` and `RestoreBackup` do the same with the backups on the
 //! backup disk, and `Target` says which folder on which disk they go to. `BootStyle` and
 //! `SetBootStyle` read and write the word on the esp that says how the next boot looks, which only
-//! root can reach.
+//! root can reach. `Owner`, `SetOwnerName` and `SetOwnerPassword` read and change the owner's name
+//! and password, and answer the owner and root alone.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use zbus::message::Header;
 
 use crate::backup::Backups;
 use crate::boot::Esp;
+use crate::owner::{self, Owner, Refusal};
 use crate::restore::{self, Account, Outcome, Problem};
 use crate::slots::Drive;
 use crate::timeline::{self, Timeline};
@@ -29,6 +31,7 @@ pub struct Vault {
     home: Arc<PathBuf>,
     esp: Arc<Esp>,
     drive: Arc<Drive>,
+    owner: Arc<Owner>,
 }
 
 #[zbus::interface(name = "dev.rift.Vault")]
@@ -162,6 +165,72 @@ impl Vault {
         Ok(())
     }
 
+    /// The owner: the account they log in to, the name the lock screen greets them by, and
+    /// whether the password is still the one every drive starts with.
+    #[zbus(out_args("user", "name", "image_password"))]
+    async fn owner(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<(String, String, bool)> {
+        owner_or_root(&header, connection, &self.owner).await?;
+        let owner = Arc::clone(&self.owner);
+        blocking::unblock(move || {
+            let account = owner.account()?;
+            Ok((account.user, account.name, owner.image_password()?))
+        })
+        .await
+        .map_err(fdo::Error::Failed)
+    }
+
+    /// Gives the owner a new name, now and at every boot after.
+    async fn set_owner_name(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        name: String,
+    ) -> fdo::Result<()> {
+        let uid = owner_or_root(&header, connection, &self.owner).await?;
+        let owner = Arc::clone(&self.owner);
+        let chosen = name.trim().to_string();
+        blocking::unblock(move || owner.keep_name(&name).map(|()| owner::apply_now()))
+            .await
+            .map_err(refused)?
+            .map_err(fdo::Error::Failed)?;
+        println!("vault: the owner is called {chosen}, set by uid {uid}");
+        Ok(())
+    }
+
+    /// Gives the owner a new password, now and at every boot after, once `current` has been
+    /// checked against the one they have.
+    async fn set_owner_password(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        current: String,
+        new: String,
+    ) -> fdo::Result<()> {
+        let uid = owner_or_root(&header, connection, &self.owner).await?;
+        let owner = Arc::clone(&self.owner);
+        let done = blocking::unblock(move || {
+            owner
+                .keep_password(&current, &new)
+                .map(|()| owner::apply_now())
+        })
+        .await;
+        match done {
+            Err(Refusal::Wrong(why)) => {
+                println!("vault: a wrong current password from uid {uid}");
+                Err(fdo::Error::AccessDenied(why))
+            }
+            other => {
+                other.map_err(refused)?.map_err(fdo::Error::Failed)?;
+                println!("vault: the owner has a new password, set by uid {uid}");
+                Ok(())
+            }
+        }
+    }
+
     /// What the drive's two slots hold: the version running, the slot, the version and the name
     /// of the uki on the esp for each slot, where updates come from, and the versions waiting
     /// there. A uki's name carries the boots systemd-boot has left to try of it.
@@ -192,6 +261,38 @@ async fn caller(header: &Header<'_>, connection: &zbus::Connection) -> fdo::Resu
         fdo::Error::AccessDenied(format!("Vault does not know the account with uid {uid}."))
     })?;
     Ok(Account { uid, gid })
+}
+
+/// The owner and root may read and change the owner's name and password, and no one else: not
+/// Rift's own services, which run as accounts of their own. The uid of the sender, when it may.
+async fn owner_or_root(
+    header: &Header<'_>,
+    connection: &zbus::Connection,
+    owner: &Owner,
+) -> fdo::Result<u32> {
+    let sender = header
+        .sender()
+        .ok_or_else(|| fdo::Error::Failed("The request came without a sender.".into()))?
+        .to_owned();
+    let uid = fdo::DBusProxy::new(connection)
+        .await?
+        .get_connection_unix_user(sender.into())
+        .await?;
+    if uid == 0 || owner.account().is_ok_and(|account| account.uid == uid) {
+        return Ok(uid);
+    }
+    Err(fdo::Error::AccessDenied(
+        "Only the owner and root may see or change the owner's name and password.".into(),
+    ))
+}
+
+/// The error a change to the owner was refused with, of the kind that says why.
+fn refused(refusal: Refusal) -> fdo::Error {
+    match refusal {
+        Refusal::Wrong(why) => fdo::Error::AccessDenied(why),
+        Refusal::Invalid(why) => fdo::Error::InvalidArgs(why),
+        Refusal::Failed(why) => fdo::Error::Failed(why),
+    }
 }
 
 /// The reply to a restore, with a problem as the error that says what kind it is.
@@ -234,6 +335,7 @@ pub fn serve(
         home: Arc::new(home),
         esp: Arc::new(esp),
         drive: Arc::new(drive),
+        owner: Arc::new(Owner::system()),
     };
     let _connection = zbus::blocking::connection::Builder::system()?
         .name(component.dbus_name())?
