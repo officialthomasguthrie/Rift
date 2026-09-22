@@ -531,6 +531,19 @@ DEFAULT_APPS = [
     ("audio/flac", "org.gnome.Decibels.desktop"),
     ("application/zip", "org.gnome.FileRoller.desktop"),
 ]
+# the kind of file the image has more than one app for, as the Apps page words it: the app the image
+# opens it with, the one the page chooses instead, which runs in a terminal, and a second type of the
+# kind, which follows the first. then the file handed to that app, and the unit it is started in
+SETTINGS_KIND = ("text", "dev.zed.Zed.desktop", "Helix.desktop", "text/x-csrc")
+HANDED_FILE = "/home/rift/rift-apps-test.txt"
+HANDED_UNIT = "rift-apps-test"
+# the permission store on the session bus, where the camera portal keeps each app's answer, and the
+# dconf key GTK reads for recent files, as the Privacy and security page reads both
+PERMISSION_STORE = ("org.freedesktop.impl.portal.PermissionStore /org/freedesktop/impl/portal/PermissionStore "
+                    "org.freedesktop.impl.portal.PermissionStore")
+RECENT_FILES_KEY = "/org/gnome/desktop/privacy/remember-recent-files"
+# the app rift net turns off in a terminal, for the page to give the network back to
+PRIVACY_APP = "rift-privacy-test"
 # the apps, tools and languages of the image's first tier, each with the command that prints its
 # version and what that has to print. the commands run in fish, as the owner
 TOOLS = [
@@ -5402,6 +5415,237 @@ def main():
                f"list, the clock menu's switch turned the page's off, and {NOTIFY_APP}'s banners off from the page "
                f"kept its next one off the screen too")
 
+            # the Apps page. each kind of file opens with the app xdg-mime names on the same boot. the
+            # one kind the image has more than one app for, text, is given another from the page, and
+            # xdg-mime follows for two of its types while the owner's own list holds them all; a file
+            # handed to that app the way glib hands a file to an app with Terminal=true opens in a
+            # terminal window with the app in it. then the kind goes back to the app the image has
+            def defaults_page(what):
+                """What the Apps page says: for each kind, the type it opens with and the desktop id
+                of its app or none, and the ids of the apps that open it. Nothing until the page has
+                read the lists."""
+                status, told = run("rift-settings --state", what)
+                if status != 0:
+                    return None
+                said_kinds, said_apps = {}, {}
+                for printed_line in without_console(told).splitlines():
+                    key, _, value = printed_line.strip().partition(" ")
+                    words = value.split()
+                    if key == "default-app" and len(words) == 3:
+                        said_kinds[words[0]] = (words[1], words[2])
+                    elif key == "can-open" and words:
+                        said_apps[words[0]] = words[1:]
+                return (said_kinds, said_apps) if said_kinds else None
+
+            def xdg_default(mime, what):
+                """The desktop id xdg-mime says opens a type, or none when it names nothing."""
+                _, told = run(f"xdg-mime query default {mime}", what)
+                named = [said.strip() for said in without_console(told).splitlines() if said.strip()]
+                return named[-1] if named else "none"
+
+            def defaults_differ(what):
+                """The first kind the page and xdg-mime disagree about, in a sentence, or None."""
+                said = defaults_page(f"the Apps page for {what}")
+                if said is None:
+                    return "the page says nothing"
+                for kind, (mime, desktop) in said[0].items():
+                    named = xdg_default(mime, f"what opens {mime} for {what}")
+                    if named != desktop:
+                        return f"the page opens {kind} ({mime}) with {desktop} and xdg-mime with {named}"
+                return None
+
+            def kind_opens(wanted, what):
+                """Whether the page, xdg-mime for two types of the kind and the owner's own list all
+                say this app opens it."""
+                said = defaults_page(f"the Apps page for {what}")
+                if said is None or said[0].get(apps_kind, ("", ""))[1] != wanted:
+                    return False
+                for mime in (apps_mime, SETTINGS_KIND[3]):
+                    if xdg_default(mime, f"what opens {mime} for {what}") != wanted:
+                        return False
+                listed = without_console(run("cat ~/.config/mimeapps.list", f"the owner's list for {what}")[1])
+                return all(f"{mime}={wanted}" in listed.splitlines() for mime in (apps_mime, SETTINGS_KIND[3]))
+
+            def handed(what):
+                """The names of the processes whose command line has the handed file in it."""
+                _, told = run(f"for p in (pgrep -f {HANDED_FILE}); cat /proc/$p/comm 2>/dev/null; end", what)
+                return [name.strip() for name in without_console(told).splitlines() if name.strip()]
+
+            run("rift-settings --page apps", "the Apps page")
+            if not wait_for(30, lambda: settings_state("the Apps page").get("page") == "apps"):
+                fail("rift-settings --page apps did not show that page")
+            apps_before = wait_for(30, lambda: defaults_page("the Apps page as it comes up"))
+            if not apps_before:
+                fail("the Apps page says nothing about which app opens each kind of file")
+            apps_differ = defaults_differ("the page as it comes up")
+            if apps_differ:
+                fail(f"as the Apps page comes up {apps_differ}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Apps page", f"{stem}-settings-apps{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            apps_several = [kind for kind, ids in apps_before[1].items() if len(ids) > 1]
+            if apps_several != [SETTINGS_KIND[0]]:
+                fail(f"the Apps page has more than one app for {apps_several}, expected {SETTINGS_KIND[0]} alone: "
+                     f"{apps_before[1]}")
+            apps_kind = apps_several[0]
+            apps_mime, apps_first = apps_before[0][apps_kind]
+            apps_other = next(app_id for app_id in apps_before[1][apps_kind] if f"{app_id}.desktop" != apps_first)
+            if (apps_first, f"{apps_other}.desktop") != SETTINGS_KIND[1:3]:
+                fail(f"the image opens {apps_kind} with {apps_first} and the page offers {apps_other} next, expected "
+                     f"{SETTINGS_KIND[1]} and {SETTINGS_KIND[2]}")
+            run(f"rift-settings --set default-app {apps_kind} {apps_other}", f"{apps_other} for {apps_kind} on the Apps page")
+            if not wait_for(20, lambda: kind_opens(f"{apps_other}.desktop", f"{apps_other} chosen")):
+                fail(f"after the Apps page chose {apps_other} for {apps_kind}, the page, xdg-mime and the owner's list say "
+                     f"{defaults_page('the page again')}, {xdg_default(apps_mime, 'xdg-mime again')} and "
+                     f"{without_console(run('cat ~/.config/mimeapps.list', 'the list again')[1]).strip()[-300:]!r}")
+            # glib hands a file to an app with Terminal=true by running xdg-terminal-exec with the app's
+            # command, and xdg-terminal-exec starts the terminal xdg-terminals.list names with it
+            run(f"echo 'Rift boot test' > {HANDED_FILE}", "a text file to hand on")
+            run(f"systemd-run --user --quiet --collect --unit={HANDED_UNIT} -- xdg-terminal-exec hx {HANDED_FILE}",
+                f"the text file handed to {apps_other}")
+            apps_running = wait_for(30, lambda: next(
+                (names for names in [handed(f"the terminal with {apps_other} in it")]
+                 if any("ghostty" in name for name in names) and any("hx" in name for name in names)), None))
+            if not apps_running:
+                _, output = run(f"journalctl --user -b -o cat -u {HANDED_UNIT} -n 20 | cat", "the handed file's unit")
+                fail(f"the text file handed to {apps_other} is open in {handed('the processes again')}, expected a "
+                     f"terminal with hx in it: {without_console(output).strip()[-500:]!r}")
+            run(f"systemctl --user stop {HANDED_UNIT}", "the terminal with the handed file closed")
+            if not wait_for(30, lambda: not handed("the handed file closed")):
+                fail(f"stopping {HANDED_UNIT} left {handed('the processes left')} with the handed file open")
+            run(f"rift-settings --set default-app {apps_kind} {apps_first}", f"{apps_first} for {apps_kind} again")
+            if not wait_for(20, lambda: kind_opens(apps_first, f"{apps_first} put back")):
+                fail(f"after the Apps page put {apps_first} back for {apps_kind}, the page says {defaults_page('the page')} "
+                     f"and xdg-mime {xdg_default(apps_mime, 'xdg-mime once more')}")
+            ok(f"the Apps page opens every kind with the app xdg-mime names ({', '.join(f'{kind} {app}' for kind, (_, app) in apps_before[0].items())}), "
+               f"chose {apps_other} for {apps_kind} with xdg-mime following for {apps_mime} and {SETTINGS_KIND[3]}, which "
+               f"opened a handed file in a terminal ({', '.join(apps_running)}), and put {apps_first} back")
+
+            # the Privacy and security page. it says what the permission store says about the camera
+            # after step 5's Camera app asked, and turns that answer round and back with the store
+            # following; recent files follow dconf; the firewall is the unit that loads it; an app rift
+            # net turned off in a terminal is on the page, which gives it the network back; and the
+            # security level is the id fwupd gives on the bus
+            def store_answers(what):
+                """The camera's answers in the permission store as {app: [words]}, or None when it
+                has no entry for the camera, which the portal makes the first time an app asks."""
+                status, told = run(f"busctl --user --json=short --no-pager call {PERMISSION_STORE} Lookup ss devices camera",
+                                   what)
+                printed = without_console(told)
+                found = re.search(r"\{.*\}", printed, re.S)
+                if status != 0 or not found:
+                    return None
+                try:
+                    return json.loads(found.group(0))["data"][0]
+                except (ValueError, KeyError, IndexError, TypeError):
+                    fail(f"busctl's answer about the camera is not the json it prints: {printed.strip()[-300:]!r}")
+                return None
+
+            def privacy_page(what):
+                """What the Privacy page says: its lines of one value, the camera's answers as
+                {app: word} and the sandboxes as {app: word}. Nothing until the page has read."""
+                status, told = run("rift-settings --state", what)
+                if status != 0:
+                    return None
+                said_lines, said_camera, said_sandboxes = {}, {}, {}
+                for printed_line in without_console(told).splitlines():
+                    key, _, value = printed_line.strip().partition(" ")
+                    word, _, named = value.strip().partition(" ")
+                    if key == "camera-app":
+                        said_camera["" if named.strip() == "-" else named.strip()] = word
+                    elif key == "app-network":
+                        said_sandboxes[named.strip()] = word
+                    elif key in ("camera-apps", "recent-files", "firewall", "sandboxed", "device-security"):
+                        said_lines[key] = value.strip()
+                return (said_lines, said_camera, said_sandboxes) if "camera-apps" in said_lines else None
+
+            def camera_says(wanted, what):
+                """Whether the page and the permission store both give the camera app this answer."""
+                said = privacy_page(f"the page for {what}")
+                kept = store_answers(f"the store for {what}") or {}
+                return said is not None and said[1].get(camera_app) == wanted and kept.get(camera_app) == [wanted]
+
+            def recent_says(wanted, key_wanted, what):
+                """Whether the page says this about recent files and dconf holds one of these for the key."""
+                said = privacy_page(f"the page for {what}")
+                key_now = without_console(run(f"dconf read {RECENT_FILES_KEY}", f"the key for {what}")[1]).strip()
+                return said is not None and said[0].get("recent-files") == wanted and key_now in key_wanted
+
+            def every_app_online(what):
+                """Whether rift net and the page both say no app is off and none runs in a sandbox."""
+                _, told = run("rift net", what)
+                said = privacy_page(f"the page for {what}")
+                return ("Every app has the network" in " ".join(without_console(told).split())
+                        and said is not None and said[0].get("sandboxed") == "0")
+
+            run("rift-settings --page privacy", "the Privacy and security page")
+            if not wait_for(30, lambda: settings_state("the Privacy page").get("page") == "privacy"):
+                fail("rift-settings --page privacy did not show that page")
+            privacy_before = wait_for(30, lambda: privacy_page("the Privacy page as it comes up"))
+            if not privacy_before:
+                fail("the Privacy and security page says nothing")
+            # fwupd starts for the page's question and looks at the machine before it answers
+            privacy_id = wait_for(90, lambda: (privacy_page("fwupd's answer on the page") or ({},))[0].get("device-security"))
+            _, output = run("busctl --system get-property org.freedesktop.fwupd / org.freedesktop.fwupd HostSecurityId | cat",
+                            "the security id fwupd gives")
+            fwupd_id = re.search(r's\s+"(.*)"', without_console(output))
+            if not privacy_id or not fwupd_id or fwupd_id.group(1) != privacy_id:
+                fail(f"the Privacy page gives the security level as {privacy_id!r}, and fwupd on the bus says "
+                     f"{without_console(output).strip()[-200:]!r}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Privacy and security page", f"{stem}-settings-privacy{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            store_before = store_answers("the camera's answers in the permission store")
+            store_words = {app: (words[0] if len(words) == 1 and words[0] in ("yes", "no") else "ask")
+                           for app, words in (store_before or {}).items()}
+            privacy_now = privacy_page("the camera's answers on the page")
+            if privacy_now is None or privacy_now[1] != store_words:
+                fail(f"the Privacy page says the camera's answers are {privacy_now and privacy_now[1]}, and the "
+                     f"permission store says {store_before}")
+            camera_turned = "none, since no app has asked for it yet"
+            camera_app = next((app for app in sorted(store_words) if store_words[app] in ("yes", "no")), None)
+            if camera_app is None:
+                print("\nboot-test: the permission store has no answer about the camera, so the Privacy page has none "
+                      "to change", flush=True)
+            else:
+                camera_was = store_words[camera_app]
+                camera_flip, camera_back = ("off", "on") if camera_was == "yes" else ("on", "off")
+                camera_named = camera_app or "-"
+                run(f"rift-settings --set camera-app {camera_named} {camera_flip}", f"the camera {camera_flip} for {camera_named}")
+                if not wait_for(20, lambda: camera_says("no" if camera_flip == "off" else "yes", "the answer turned round")):
+                    fail(f"after the page turned the camera {camera_flip} for {camera_named}, it says "
+                         f"{privacy_page('the page again')} and the store {store_answers('the store again')}")
+                run(f"rift-settings --set camera-app {camera_named} {camera_back}", f"the camera {camera_back} again")
+                if not wait_for(20, lambda: camera_says(camera_was, "the answer turned back")):
+                    fail(f"after the page turned the camera {camera_back} again for {camera_named}, the store says "
+                         f"{store_answers('the store once more')}")
+                camera_turned = f"{camera_named}'s {camera_was} turned {camera_flip} and back with the store following"
+            if not recent_says("on", ("", "true"), "recent files as the page comes up"):
+                fail(f"the Privacy page says recent files are {privacy_before[0].get('recent-files')!r} with the key unset")
+            run("rift-settings --set recent-files off", "recent files off on the page")
+            if not wait_for(20, lambda: recent_says("off", ("false",), "recent files off")):
+                fail("after the page turned recent files off, the page and dconf do not both say so")
+            run("rift-settings --set recent-files on", "recent files on again")
+            if not wait_for(20, lambda: recent_says("on", ("true",), "recent files on again")):
+                fail("after the page turned recent files on again, the page and dconf do not both say so")
+            _, output = run("systemctl is-active nftables.service | cat", "the unit that loads the firewall")
+            firewall_state = (without_console(output).strip().splitlines() or [""])[-1].strip()
+            if firewall_state != "active" or privacy_before[0].get("firewall") != "on":
+                fail(f"nftables.service is {firewall_state!r} and the Privacy page says the firewall is "
+                     f"{privacy_before[0].get('firewall')!r}")
+            status, output = run(f"rift net off {PRIVACY_APP}", "an app's network off in a terminal")
+            if status != 0:
+                fail(f"rift net off {PRIVACY_APP} exited with {status}: {without_console(output).strip()[-200:]!r}")
+            if not wait_for(20, lambda: (privacy_page("the page after rift net off") or ({}, {}, {}))[2].get(PRIVACY_APP) == "off"):
+                fail(f"the Privacy page does not list {PRIVACY_APP} with its network off after rift net off: "
+                     f"{privacy_page('the page once more')}")
+            run(f"rift-settings --set app-network {PRIVACY_APP} on", f"{PRIVACY_APP}'s network on from the page")
+            if not wait_for(20, lambda: every_app_online(f"{PRIVACY_APP}'s network given back")):
+                fail(f"after the page gave {PRIVACY_APP} the network back, rift net and the page do not say every app has it")
+            ok(f"the Privacy page names the camera's answers the permission store holds ({store_words}), {camera_turned}; "
+               f"turned recent files off and on with dconf following, says the firewall is on as nftables.service is "
+               f"active, gave {PRIVACY_APP} back the network rift net took, and gives fwupd's {privacy_id}")
+
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
             if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
@@ -5410,10 +5654,9 @@ def main():
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
             # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            for page in ("apps", "privacy", "owner"):
-                run(f"rift-settings --page {page}", f"the {page} page")
-                if not wait_for(20, lambda page=page: settings_state(f"the {page} page").get("page") == page):
-                    fail(f"rift-settings --page {page} did not show that page")
+            run("rift-settings --page owner", "the owner page")
+            if not wait_for(20, lambda: settings_state("the owner page").get("page") == "owner"):
+                fail("rift-settings --page owner did not show that page")
             run("rift-settings --page appearance", "the Appearance page again")
             status, output = run("rift-settings --page nowhere", "a page that is not one")
             if status == 0 or "there is no page called nowhere" not in without_console(output):
