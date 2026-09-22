@@ -6147,8 +6147,17 @@ def main():
                          f"{without_console(output).strip()[-300:]!r}")
 
             def files_select(name):
-                files_set("select", name, f"{name} selected")
-                files_until(20, lambda lines: f"selected {name}" in lines, f"{name} selected")
+                """Select one row by its name, pressing again while the folder has not been read with it
+                in yet: a press on a row that is not there does nothing."""
+                deadline = time.monotonic() + 30
+                while True:
+                    files_set("select", name, f"{name} selected")
+                    time.sleep(1)
+                    lines = files_state(f"{name} selected")
+                    if lines and f"selected {name}" in lines:
+                        return
+                    if time.monotonic() > deadline:
+                        fail(f"Files did not select {name}, its state is {lines!r}"[:2000])
 
             files_home = f"/home/{OWNER_USER}"
             files_documents = f"{files_home}/Documents"
