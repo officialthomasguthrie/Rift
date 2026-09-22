@@ -7344,17 +7344,20 @@ def main():
             key_hash = one_line("sudo sha256sum /var/lib/rift/vault/backup.key", "the hash of the backup password",
                                 r"^([0-9a-f]{64})\s")
 
-        # the disks by serial. the one removable disk is the clone's
+        # the disks by serial. the clone's is the removable one qemu gave that serial: with --stick
+        # the memory stick Files mounted is removable too, and nothing of this drive goes onto it
         _, output = run("lsblk --nodeps --bytes --pairs --output PATH,NAME,SERIAL,RM,TRAN,SIZE", "the disks of the vm")
         printed = without_console(output)
         print(f"\nboot-test: lsblk printed:\n{printed}", flush=True)
         disks = [fields for fields in (dict(re.findall(r'(\w+)="([^"]*)"', line)) for line in printed.splitlines())
                  if "PATH" in fields]
         removable = [disk for disk in disks if disk.get("RM") == "1"]
-        if len(removable) != 1:
-            fail(f"the vm has {len(removable)} removable disks, expected the one for the clone")
-        target = removable[0]["PATH"]
-        serial = removable[0].get("SERIAL") or removable[0]["NAME"]
+        wanted = [disk for disk in removable if disk.get("SERIAL") == "clone"]
+        if len(wanted) != 1:
+            fail(f"the vm has {len(removable)} removable disks and {len(wanted)} with the serial clone, "
+                 "expected the one for the clone")
+        target = wanted[0]["PATH"]
+        serial = wanted[0].get("SERIAL") or wanted[0]["NAME"]
         by_id = one_line(f"for link in /dev/disk/by-id/*; if test (realpath $link) = {target}; echo link=$link; end; end",
                          "the clone's disk in /dev/disk/by-id", r"^link=(\S+)\s*$")
 
