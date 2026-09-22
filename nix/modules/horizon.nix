@@ -143,6 +143,11 @@ let
         match app-id=r#"^dev\.rift\.Settings$"#
         default-column-width { proportion 0.75; }
     }
+    // files opens wide enough for its places and a list with its columns beside them
+    window-rule {
+        match app-id=r#"^dev\.rift\.Files$"#
+        default-column-width { proportion 0.75; }
+    }
     // welcome opens over the desktop in the middle of the screen, at the size it asks for, and
     // nothing else moves for it
     window-rule {
