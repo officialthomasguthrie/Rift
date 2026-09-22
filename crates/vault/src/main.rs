@@ -11,6 +11,7 @@ mod backup;
 mod boot;
 mod bus;
 mod clone;
+mod exchange;
 mod owner;
 mod restore;
 mod slots;
@@ -23,6 +24,7 @@ use std::process::ExitCode;
 use backup::Backups;
 use boot::Esp;
 use clone::Cloner;
+use exchange::Exchange;
 use restore::Source;
 use slots::Drive;
 use timeline::{Keep, Timeline};
@@ -62,6 +64,8 @@ enum Command {
     },
     /// Put the owner's name and password persist keeps into the password files.
     Owner,
+    /// Mount the drive's own exchange partition, when it has one.
+    Exchange,
     /// The copy a restore runs as the account that asked for it. `serve` starts it.
     RestoreFile {
         from: PathBuf,
@@ -104,28 +108,9 @@ fn main() -> ExitCode {
     let result = match command {
         Command::Serve => bus::serve(timeline, backups, home, esp, drive)
             .map_err(|e| format!("vault: could not answer on the system bus: {e}")),
-        Command::Take => timeline.take().map(|(name, dropped)| {
-            println!("Took snapshot {name}.");
-            for old in dropped {
-                println!("Dropped snapshot {old}.");
-            }
-        }),
-        Command::Prune => timeline.prune().map(|dropped| {
-            if dropped.is_empty() {
-                println!("The rules keep every snapshot.");
-            }
-            for old in dropped {
-                println!("Dropped snapshot {old}.");
-            }
-        }),
-        Command::List => timeline
-            .list()
-            .map(|names| {
-                for name in names {
-                    println!("{name}");
-                }
-            })
-            .map_err(|e| format!("Could not read {}: {e}", timeline.snapshots.display())),
+        Command::Take => took(&timeline),
+        Command::Prune => pruned(&timeline),
+        Command::List => listed(&timeline),
         Command::Target { folder } => {
             backups
                 .choose(&folder, || ask_password(&folder))
@@ -159,6 +144,12 @@ fn main() -> ExitCode {
                 println!("{line}");
             }
         }),
+        Command::Exchange => Exchange::default().mount().map(|said| {
+            println!(
+                "{}",
+                said.unwrap_or_else(|| "This drive has no exchange partition.".to_string())
+            );
+        }),
         Command::RestoreFile { from, to, source } => {
             return match restore::copy_back(&from, &to, replace, source) {
                 Ok(outcome) => {
@@ -179,6 +170,78 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The command the words name, with the options that belong to one.
+fn command_of(
+    words: &[String],
+    serial: &mut Option<String>,
+    from_backup: bool,
+) -> Result<Command, String> {
+    Ok(
+        match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+            ["serve"] => Command::Serve,
+            ["take"] => Command::Take,
+            ["prune"] => Command::Prune,
+            ["list"] => Command::List,
+            ["target", folder] => Command::Target {
+                folder: PathBuf::from(folder),
+            },
+            ["backup"] => Command::Backup,
+            ["backups"] => Command::Backups,
+            ["owner"] => Command::Owner,
+            ["exchange"] => Command::Exchange,
+            ["clone", disk] => Command::Clone {
+                disk: PathBuf::from(disk),
+                serial: serial.take(),
+            },
+            ["restore-file", from, to] => Command::RestoreFile {
+                from: PathBuf::from(from),
+                to: PathBuf::from(to),
+                source: if from_backup {
+                    Source::Backup
+                } else {
+                    Source::Snapshot
+                },
+            },
+            [] => return Err("a command is needed".into()),
+            _ => return Err(format!("unknown command `{}`", words.join(" "))),
+        },
+    )
+}
+
+/// What `vault take` prints: the snapshot it took, and the ones the retention rules dropped.
+fn took(timeline: &Timeline) -> Result<(), String> {
+    timeline.take().map(|(name, dropped)| {
+        println!("Took snapshot {name}.");
+        for old in dropped {
+            println!("Dropped snapshot {old}.");
+        }
+    })
+}
+
+/// What `vault prune` prints: the snapshots the retention rules dropped.
+fn pruned(timeline: &Timeline) -> Result<(), String> {
+    timeline.prune().map(|dropped| {
+        if dropped.is_empty() {
+            println!("The rules keep every snapshot.");
+        }
+        for old in dropped {
+            println!("Dropped snapshot {old}.");
+        }
+    })
+}
+
+/// What `vault list` prints: the snapshots, oldest first.
+fn listed(timeline: &Timeline) -> Result<(), String> {
+    timeline
+        .list()
+        .map(|names| {
+            for name in names {
+                println!("{name}");
+            }
+        })
+        .map_err(|e| format!("Could not read {}: {e}", timeline.snapshots.display()))
 }
 
 /// One line typed after `prompt` on a terminal, without echo when `hidden`, or one line of stdin
@@ -333,33 +396,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
             _ => words.push(arg),
         }
     }
-    let command = match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["serve"] => Command::Serve,
-        ["take"] => Command::Take,
-        ["prune"] => Command::Prune,
-        ["list"] => Command::List,
-        ["target", folder] => Command::Target {
-            folder: PathBuf::from(folder),
-        },
-        ["backup"] => Command::Backup,
-        ["backups"] => Command::Backups,
-        ["owner"] => Command::Owner,
-        ["clone", disk] => Command::Clone {
-            disk: PathBuf::from(disk),
-            serial: serial.take(),
-        },
-        ["restore-file", from, to] => Command::RestoreFile {
-            from: PathBuf::from(from),
-            to: PathBuf::from(to),
-            source: if from_backup {
-                Source::Backup
-            } else {
-                Source::Snapshot
-            },
-        },
-        [] => return Err("a command is needed".into()),
-        _ => return Err(format!("unknown command `{}`", words.join(" "))),
-    };
+    let command = command_of(&words, &mut serial, from_backup)?;
     if serial.is_some() {
         return Err("--serial goes with clone".into());
     }
@@ -420,8 +457,9 @@ fn usage() {
     println!("  backups          Print the backups, oldest first");
     println!("  clone <disk>     Erase this removable disk and write a second drive onto it");
     println!(
-        "  owner            Put the owner's name and password persist keeps into the password files\n"
+        "  owner            Put the owner's name and password persist keeps into the password files"
     );
+    println!("  exchange         Mount the drive's own exchange partition, when it has one\n");
     println!("Options:");
     println!("  --subvolume <dir>  What is snapshotted (default {SUBVOLUME})");
     println!("  --snapshots <dir>  Where the snapshots go (default {SNAPSHOTS})");

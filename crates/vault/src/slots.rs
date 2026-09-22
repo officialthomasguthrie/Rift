@@ -161,7 +161,7 @@ fn waiting(source: &str, id: &str) -> Vec<String> {
 
 /// The disk a partition is on: `/sys/class/block/<partition>` is a link into the device tree, and
 /// the folder above it there is the disk the partition belongs to.
-fn disk_of(partition: &Path) -> Result<PathBuf, String> {
+pub fn disk_of(partition: &Path) -> Result<PathBuf, String> {
     let name = partition
         .file_name()
         .ok_or_else(|| format!("{} is not a partition.", partition.display()))?;

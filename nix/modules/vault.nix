@@ -151,6 +151,26 @@ in
       };
     };
 
+    # the drive's own exchange partition, the plain one another computer can read. udisks does
+    # not mount it: on a real stick it would let the owner mount every partition of the drive,
+    # and in a virtual machine, where the drive is an internal disk, it refuses the mount
+    # outright. it is the drive's own, so the system mounts it, before anyone logs in. nothing
+    # here is sandboxed: a mount made inside a mount namespace of its own would be invisible to
+    # the rest of the system, which is the whole point of making it
+    systemd.services.vault-exchange = {
+      description = "Vault, the drive's exchange partition";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" ];
+      before = [ "systemd-user-sessions.service" ];
+      path = [ pkgs.util-linux ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${cfg.package}/bin/vault exchange";
+        ExecStop = "-${pkgs.util-linux}/bin/umount /exchange";
+      };
+    };
+
     # the hourly snapshot. systemd catches up once at boot when the drive was off at the hour
     systemd.services.vault-timeline = {
       description = "Vault, the hourly snapshot of home";
