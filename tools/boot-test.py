@@ -4011,16 +4011,19 @@ def main():
                          f"{'a refusal with nothing to authenticate' if refused else 'no refusal'}")
             ok("polkit refuses every udisks action on a disk the machine boots from, and refuses none on "
                "a removable one")
-            # and the whole way through: mounting a partition of the drive the vm boots from is refused
-            if args.exchange:
+            # and the whole way through: mounting a disk that belongs to the machine is refused. the
+            # backup disk is one of the machine's own, with a file system on it and nothing mounted
+            # from it, which is what a host's disk is. the drive's own exchange partition is no longer
+            # the example here: the system mounts that one itself, at /exchange, and 5o checks it
+            if args.backup:
                 status, output = run("udisksctl mount --no-user-interaction "
-                                     "-b (realpath /dev/disk/by-partlabel/exchange)",
-                                     "mounting a partition of the disk the machine boots from")
+                                     "-b (realpath /dev/disk/by-label/backup)",
+                                     "mounting a disk that belongs to the machine")
                 refusal = without_console(output)
                 if status == 0 or "Not authorized" not in refusal:
                     fail(f"udisks did not refuse the mount: it exited with {status} and said "
                          f"{refusal.strip()[-300:]!r}")
-                ok("udisks refuses to mount a partition of the disk the machine boots from")
+                ok("udisks refuses to mount a disk that belongs to the machine")
 
             # a file opens with the app that owns its kind, and the image viewer draws a real photograph:
             # it reads the file in a sandbox of its own, one loader per format, so a picture on screen says
