@@ -4,7 +4,6 @@
 //! already has the name gets a name of its own beside it, and when the owner asks to replace what
 //! is there, what is there goes to the trash first, so it can still be brought back.
 
-use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -485,12 +484,12 @@ fn crossing(from: &[PathBuf], into: &Path) -> bool {
 /// own beside it when it is not. When the owner asked to replace what is there, what is there goes
 /// to the trash first, so the name is free again and nothing a person had is written over; if that
 /// disk has no trash, it keeps both after all.
-fn free_target(into: &Path, name: &OsStr, copy: bool, how: How) -> PathBuf {
-    if how.replace {
-        let taken = into.join(name);
-        if fs::symlink_metadata(&taken).is_ok()
-            && let Some(trash) = Trash::for_path(&taken, files::uid())
-        {
+fn free_target(source: &Path, into: &Path, copy: bool, how: How) -> PathBuf {
+    let name = source.file_name().unwrap_or(source.as_os_str());
+    let taken = into.join(name);
+    // nothing is put in the way of itself: a copy into the folder it is in already keeps both
+    if how.replace && taken != source && fs::symlink_metadata(&taken).is_ok() {
+        if let Some(trash) = Trash::for_path(&taken, files::uid()) {
             let _ = trash.put(&taken, librift::time::now(), how.offset);
         }
     }
@@ -535,7 +534,7 @@ fn copy_into(
             name.to_string_lossy()
         )));
     }
-    let target = free_target(into, name, true, how);
+    let target = free_target(source, into, true, how);
     copy_whole(source, &target, stop, said)?;
     Ok(target)
 }
@@ -576,7 +575,7 @@ fn move_into(
             name.to_string_lossy()
         )));
     }
-    let target = free_target(into, name, false, how);
+    let target = free_target(source, into, false, how);
     match rename_new(source, &target) {
         Ok(()) => Ok(target),
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {

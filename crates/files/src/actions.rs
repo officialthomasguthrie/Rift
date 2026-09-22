@@ -517,11 +517,13 @@ pub fn pasted(state: &mut Files, id: window::Id, text: Option<&str>) -> Task<Mes
     else {
         return Task::none();
     };
-    // what is already there under the same name. nothing is written over without being asked
+    // what is already there under the same name. nothing is written over without being asked.
+    // something pasted into the folder it is in already is only ever a second copy of itself, so
+    // it keeps both without a question, the way it did before there was one
     let taken: Vec<String> = clip
         .paths
         .iter()
-        .filter(|path| !(clip.cut && path.parent() == Some(into.as_path())))
+        .filter(|path| path.parent() != Some(into.as_path()))
         .filter_map(|path| path.file_name())
         .filter(|name| fs::symlink_metadata(into.join(name)).is_ok())
         .map(|name| name.to_string_lossy().into_owned())
