@@ -6161,7 +6161,8 @@ def main():
 
             files_home = f"/home/{OWNER_USER}"
             files_documents = f"{files_home}/Documents"
-            _, files_listed = run(" ".join(["ls", "-d"] + [f"~/{name}" for name in FILES_FOLDERS])
+            # one a line: on the serial console ls writes a terminal, and lays a list out in columns
+            _, files_listed = run(" ".join(["ls", "-1d"] + [f"~/{name}" for name in FILES_FOLDERS])
                                   + "; cat ~/.config/user-dirs.dirs", "the folders of home")
             files_listed = without_console(files_listed)
             files_lines = [printed.strip() for printed in files_listed.splitlines()]
