@@ -5181,10 +5181,11 @@ def main():
                      f"{dock_file(f'the file for {what} again')} and the dock "
                      f"{list(dock_items(f'the dock for {what} again'))}, where the apps should be {wanted}")
 
-            def dock_layer(what):
-                """Where horizon put the dock, as x, y, width, height and what it keeps of the screen."""
+            def dock_layer(what, namespace="lens-dock"):
+                """Where horizon put the dock, or another of the shell's surfaces, as x, y, width,
+                height and what it keeps of the screen."""
                 _, told = run("horizon msg --json layers", what)
-                placed = re.search(r'"namespace":"lens-dock"[^}]*?"geometry":\{"x":(-?\d+),"y":(-?\d+),'
+                placed = re.search(r'"namespace":"' + namespace + r'"[^}]*?"geometry":\{"x":(-?\d+),"y":(-?\d+),'
                                    r'"width":(\d+),"height":(\d+)\},"exclusive_zone":(-?\d+)',
                                    without_console(told).replace("\n", ""))
                 return tuple(int(number) for number in placed.groups()) if placed else None
@@ -5272,6 +5273,16 @@ def main():
             placed_top = dock_set("dock-position", "top",
                                   lambda found: found[:4] == (0, BAR_HEIGHT, screen_across, DOCK_HEIGHT)
                                   and found[4] == DOCK_HEIGHT, f"{stem}-dock-top{extension}")
+            # a menu of the bar still hangs from the bar with the dock along the top, over the dock:
+            # it stays in the working area, which starts under the dock, and goes up by the dock's height
+            run("lens --menu", "the Applications menu with the dock along the top")
+            menu_placed = wait_for(20, lambda: dock_layer("the menu with the dock along the top", "lens-menu"))
+            run("lens --escape", "escape, which closes the menu over the dock")
+            if not menu_placed or menu_placed[1] != BAR_HEIGHT:
+                fail(f"with the dock along the top horizon has the Applications menu at {menu_placed}, expected "
+                     f"it at y {BAR_HEIGHT}, under the bar")
+            if not wait_for(20, lambda: bar_state("the menu closed over the dock").get("menu") == "closed"):
+                fail("escape did not close the Applications menu with the dock along the top")
             dock_set("dock-position", "bottom", lambda found: found == full_dock, f"{stem}-dock-bottom{extension}")
             placed_middle = dock_set("dock-extend", "off",
                                      lambda found: found[2] < screen_across / 2 and found[0] > 0
@@ -5286,8 +5297,9 @@ def main():
             dock_set("dock-icons", "small", lambda found: found == full_dock, f"{stem}-dock-small{extension}")
             ok(f"the Dock page lists {', '.join(kept_before)} as the file and the dock do, moved one up and "
                f"down and took one off and on with both following, and horizon put the dock at {placed_top} "
-               f"along the top, {placed_middle} in the middle off the edge and {placed_large} with large "
-               f"icons, each where the screendump has it, then back at {full_dock}")
+               f"along the top with the Applications menu at {menu_placed[:4]} over it, {placed_middle} in the "
+               f"middle off the edge and {placed_large} with large icons, each where the screendump has it, "
+               f"then back at {full_dock}")
 
             # the Notifications page. Do not disturb is one line of the owner's that the page and the
             # clock menu's switch both write: from the page it keeps a notification off the screen and
