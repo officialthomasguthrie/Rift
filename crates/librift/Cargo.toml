@@ -17,6 +17,8 @@ bus = ["dep:zbus"]
 disk = ["dep:serde", "dep:serde_json", "dep:getrandom"]
 # the model manifest, for quasard and the AI page
 models = ["dep:serde", "dep:toml"]
+# the apps Rift suggests, for Welcome
+suggested = ["dep:serde", "dep:toml"]
 
 [dependencies]
 zbus = { version = "5.18", default-features = false, features = ["async-io", "blocking-api"], optional = true }

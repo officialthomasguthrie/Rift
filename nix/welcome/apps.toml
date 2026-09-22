@@ -1,0 +1,143 @@
+# the apps rift suggests and never installs by itself. welcome lists them on its apps page, nothing
+# ticked, and installs the ones the owner ticks from flathub into the system installation. each
+# app is on flathub unless it names another remote, and an app from another remote is only listed
+# on a machine that has that remote. account says the app is of no use without an account with
+# the company that makes it
+
+[[app]]
+id = "net.mullvad.MullvadBrowser"
+name = "Mullvad Browser"
+about = "A private browser from Mullvad and the Tor Project, without Tor"
+group = "Internet and privacy"
+
+[[app]]
+id = "org.torproject.torbrowser-launcher"
+name = "Tor Browser"
+about = "Browse over the Tor network"
+group = "Internet and privacy"
+
+[[app]]
+id = "org.signal.Signal"
+name = "Signal"
+about = "Messages and calls, encrypted end to end"
+group = "Chat"
+account = true
+
+[[app]]
+id = "org.telegram.desktop"
+name = "Telegram"
+about = "Messages, groups and channels"
+group = "Chat"
+account = true
+
+[[app]]
+id = "com.discordapp.Discord"
+name = "Discord"
+about = "Voice, video and text chat"
+group = "Chat"
+account = true
+
+[[app]]
+id = "org.libreoffice.LibreOffice"
+name = "LibreOffice"
+about = "Documents, spreadsheets and presentations"
+group = "Office and notes"
+
+[[app]]
+id = "md.obsidian.Obsidian"
+name = "Obsidian"
+about = "Notes kept as Markdown files"
+group = "Office and notes"
+
+[[app]]
+id = "org.kde.okular"
+name = "Okular"
+about = "Read and annotate PDFs and other documents"
+group = "Office and notes"
+
+[[app]]
+id = "io.github.Qalculate"
+name = "Qalculate"
+about = "A calculator for units, currencies and equations"
+group = "Office and notes"
+
+[[app]]
+id = "org.videolan.VLC"
+name = "VLC"
+about = "Plays video and sound in nearly any format"
+group = "Media and downloads"
+
+[[app]]
+id = "org.qbittorrent.qBittorrent"
+name = "qBittorrent"
+about = "Downloads over BitTorrent"
+group = "Media and downloads"
+
+[[app]]
+id = "org.wireshark.Wireshark"
+name = "Wireshark"
+about = "Reads network captures, packet by packet"
+group = "Network"
+
+[[app]]
+id = "io.missioncenter.MissionCenter"
+name = "Mission Center"
+about = "What the processor, memory, disks and network are doing"
+group = "System"
+
+[[app]]
+id = "com.vscodium.codium"
+name = "VSCodium"
+about = "Visual Studio Code without Microsoft's telemetry"
+group = "Editors"
+
+[[app]]
+id = "org.blender.Blender"
+name = "Blender"
+about = "3D modelling, animation and rendering"
+group = "Creative"
+
+[[app]]
+id = "org.gimp.GIMP"
+name = "GIMP"
+about = "Edit photos and images"
+group = "Creative"
+
+[[app]]
+id = "org.kde.krita"
+name = "Krita"
+about = "Digital painting"
+group = "Creative"
+
+[[app]]
+id = "org.inkscape.Inkscape"
+name = "Inkscape"
+about = "Vector drawing"
+group = "Creative"
+
+[[app]]
+id = "org.freecad.FreeCAD"
+name = "FreeCAD"
+about = "Parametric 3D design"
+group = "Creative"
+
+[[app]]
+id = "org.kicad.KiCad"
+name = "KiCad"
+about = "Circuit schematics and board layout"
+group = "Creative"
+
+[[app]]
+id = "org.godotengine.Godot"
+name = "Godot"
+about = "A game engine for 2D and 3D"
+group = "Creative"
+
+# the boot test's own app, from a signed repository the test serves and adds as a remote. no
+# other machine has that remote, so no other machine lists it
+[[app]]
+id = "dev.rift.TestApp"
+name = "Rift test app"
+about = "The boot test's own app"
+group = "Testing"
+remote = "rift-test"

@@ -7,11 +7,12 @@
 //! not disturb and the apps whose banners stay off, which of the programs the shell's keys start is
 //! running, the index for search by meaning, what the system calls itself, dark or light and the
 //! wallpaper, the mouse and the touchpad, the sound `PipeWire` plays and hears, how the boot looks,
-//! the owner's account, and how a drive is written.
+//! the owner's account, the apps Flatpak installs and the ones Rift suggests, and how a drive is
+//! written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
 //! which the asking side of the bus turns on, brings in zbus, only the `disk` feature serde and
-//! getrandom, and only the `models` feature toml.
+//! getrandom, and only the `models` and `suggested` features toml.
 
 pub mod access;
 pub mod airlock;
@@ -30,6 +31,9 @@ pub mod defaults;
 #[cfg(feature = "disk")]
 pub mod disk;
 pub mod dock;
+// flatpak is how a freedesktop session installs apps, which rift-flash has no use for either
+#[cfg(unix)]
+pub mod flatpak;
 #[cfg(unix)]
 pub mod icons;
 pub mod keyboard;
@@ -54,6 +58,8 @@ pub mod release;
 pub mod search;
 pub mod session;
 pub mod sound;
+#[cfg(feature = "suggested")]
+pub mod suggested;
 pub mod time;
 pub mod update;
 pub mod vault;
@@ -158,8 +164,11 @@ pub mod paths {
     pub const LOGO: &str = "/etc/rift/logo.txt";
     /// The same logo with its colours as terminal escape sequences.
     pub const LOGO_ANSI: &str = "/etc/rift/logo.ansi";
-    /// The mark, the line drawing of the black hole, as a picture. The About page draws it.
+    /// The mark, the line drawing of the black hole, as a picture. The About page and Welcome
+    /// draw it.
     pub const LOGO_MARK: &str = "/etc/rift/logo.png";
+    /// The apps Rift suggests, installed by the image.
+    pub const SUGGESTED_APPS: &str = "/etc/rift/apps.toml";
 }
 
 #[cfg(test)]
