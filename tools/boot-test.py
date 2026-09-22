@@ -2941,14 +2941,18 @@ def main():
             ok(f"the shell started again and both apps kept their windows, each in a scope of its own: "
                f"{', '.join(scopes.values())}")
 
-            # with both windows closed, the app it pinned is still there, with no window marks under it
-            for window in (ghostty, other):
-                run(f"horizon msg action close-window --id {window}", f"closing window {window}")
-            items = dock_when("the dock with both windows closed", 20, lambda items: items.get(key) == (0, False))
-            if items.get(key) != (0, False):
-                fail(f"the dock lists {items} with both windows closed, expected {key} in it with no window")
+            # with both apps ended, the app it pinned is still there, with no window marks under it.
+            # each app is its scope now, so stopping the scope ends it; closing the window would have
+            # Ghostty ask first, since Helix is still running in it
+            run("systemctl --user stop " + " ".join(f"'{scope}'" for scope in scopes.values()),
+                "both apps stopped with their scopes")
+            items = dock_when("the dock with both apps ended", 30, lambda items: items.get(key) == (0, False)
+                              and items.get(MENU_APP_ID) == (0, False))
+            if items.get(key) != (0, False) or items.get(MENU_APP_ID) != (0, False):
+                fail(f"the dock lists {items} with both apps ended, expected {MENU_APP_ID} and {key} in it with "
+                     f"no window")
             look("the desktop with the dock", f"{stem}-dock-desktop{extension}", 30, journals=("lens",))
-            ok(f"{key} is still in the dock with its window closed: {' '.join(items)}")
+            ok(f"stopping their scopes ended both apps, and {key} is still in the dock: {' '.join(items)}")
 
             # 5d. the console. Mod+Grave runs toggle-console with the arguments in
             # nix/modules/horizon.nix, and horizon msg runs the same action without the key. the first
