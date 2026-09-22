@@ -1,0 +1,890 @@
+//! The app: a window for each folder the owner opens, each with a header bar, the places down the
+//! left and a list of what is in the folder, the way GNOME's Files is laid out. Drawn with iced in
+//! software, in the colours the owner has chosen, and following them when they change.
+//!
+//! The app is a daemon: it runs while a window is open or a job is still copying, and
+//! `rift-files` asks the one that is running for another window.
+
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use iced::futures::channel::{mpsc, oneshot};
+use iced::keyboard::{self, Modifiers};
+use iced::widget::scrollable::Viewport;
+use iced::{Point, Size, Subscription, Task, Theme, event, mouse, theme, window};
+use librift::appearance::Look;
+use librift::files::places::{self, Place};
+use librift::files::trash::{Trash, Trashed};
+use librift::files::{self, Entry, Options, Sort, mime};
+
+use crate::browser::{Browser, Location};
+use crate::control::{self, Command};
+use crate::jobs::{self, Job, Step};
+use crate::theme::{Colors, colors};
+use crate::widgets::{FONT, TEXT_SIZE};
+use crate::{actions, list, view};
+
+/// What the windows call themselves: the name of the desktop entry, which the dock, the compositor
+/// and the boot test all know them by.
+pub const APP_ID: &str = "dev.rift.Files";
+
+/// How big a window opens.
+const WIDTH: f32 = 960.0;
+const HEIGHT: f32 = 640.0;
+
+/// How often the folders on screen are looked at for a change.
+const LOOK: Duration = Duration::from_secs(1);
+
+/// What the app is started with.
+#[derive(Debug, Default)]
+pub struct Start {
+    /// The folders to open a window on, or files to show in theirs. Home when there are none.
+    pub open: Vec<PathBuf>,
+    /// Where to save a picture of the first window once it has drawn, and then quit.
+    pub screenshot: Option<PathBuf>,
+}
+
+/// What Cut and Copy put on the app's clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clip {
+    /// What was cut or copied.
+    pub paths: Vec<PathBuf>,
+    /// Whether it was cut, so a paste moves it.
+    pub cut: bool,
+    /// The paths as the text the session's clipboard got, one a line, to tell whether the
+    /// clipboard still holds them when they are pasted.
+    pub text: String,
+}
+
+/// The app's state.
+pub struct Files {
+    /// The windows, each with its own folder.
+    pub windows: BTreeMap<window::Id, Browser>,
+    /// The window in front, which `--set` and `--state` are about.
+    pub front: Option<window::Id>,
+    /// How many windows have opened, to number the next.
+    opened: usize,
+    /// Dark or light and the accent, which the windows follow.
+    pub look: Look,
+    /// Whether hidden files show and the order of a list, for every window.
+    pub options: Options,
+    /// The kinds of file.
+    pub types: Arc<mime::Database>,
+    /// Home and the folders the sidebar lists.
+    pub places: Vec<Place>,
+    /// What was cut or copied last.
+    pub clipboard: Option<Clip>,
+    /// The jobs that are running, and the ones that ended, for Undo.
+    pub jobs: Vec<Job>,
+    /// The local zone's distance from UTC, in seconds.
+    pub offset: i32,
+    /// Whether anything is in the trash.
+    pub trash_full: bool,
+    /// The modifier keys held down, for a click with Ctrl or Shift.
+    pub modifiers: Modifiers,
+    /// Where `--screenshot` saves a picture of the window.
+    screenshot: Option<PathBuf>,
+    /// Where `--set picture` saves the next picture of the window in front.
+    picture: Option<PathBuf>,
+    /// Whether the picture `--screenshot` asked for is on its way.
+    shooting: bool,
+}
+
+/// What can be done to the selection or in a folder, from a menu, a key or the socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Act {
+    /// Open the selection: go into a folder, or open files with the apps that open them.
+    Open,
+    /// Open the selection with this app.
+    OpenWith(String),
+    /// Open the selected folder in a window of its own.
+    OpenWindow,
+    /// Make a folder here.
+    NewFolder,
+    /// Rename the one thing selected.
+    Rename,
+    /// Put the selection on the clipboard to copy.
+    Copy,
+    /// Put the selection on the clipboard to move.
+    Cut,
+    /// Copy or move what is on the clipboard here.
+    Paste,
+    /// Move the selection to the trash.
+    Trash,
+    /// Delete the selection for good, after asking.
+    Delete,
+    /// Put the selection in the trash back.
+    Restore,
+    /// Delete the selection in the trash for good, after asking.
+    Forget,
+    /// Empty the trash, after asking.
+    Empty,
+    /// Select everything.
+    SelectAll,
+    /// Show hidden files, or stop.
+    Hidden,
+    /// Put the list in this order, or the other way round when it is already.
+    Sort(Sort),
+    /// Open a terminal in this folder.
+    Terminal,
+    /// Open another window.
+    NewWindow,
+    /// Close this window.
+    Close,
+    /// Read the folder again.
+    Reload,
+    /// Type where to go in the path bar.
+    Location,
+    /// Take back what this job did.
+    Undo(u64),
+    /// Stop this job.
+    Stop(u64),
+}
+
+/// What a press, a key, a line on the socket or a job asks for.
+#[derive(Debug, Clone)]
+pub enum Message {
+    /// A row of the list was pressed.
+    Press(window::Id, usize),
+    /// A row was pressed twice.
+    Twice(window::Id, usize),
+    /// A row was pressed with the right button.
+    RowMenu(window::Id, usize),
+    /// The pointer came onto a row.
+    Hover(window::Id, usize),
+    /// The pointer left a row.
+    Unhover(window::Id, usize),
+    /// The empty part of the list was pressed.
+    Blank(window::Id),
+    /// The empty part of the list was pressed with the right button.
+    BlankMenu(window::Id),
+    /// Where a press landed, before what it was on.
+    At(window::Id, Point),
+    /// The list was scrolled.
+    Scrolled(window::Id, Viewport),
+    /// Go to a folder or the trash.
+    Go(window::Id, Location),
+    /// Back through the history.
+    Back(window::Id),
+    /// Forward through it.
+    Forward(window::Id),
+    /// Up to the folder this one is in.
+    Up(window::Id),
+    /// What reading a folder found.
+    Read(window::Id, Location, Box<Result<Vec<Entry>, String>>),
+    /// What reading the trash found.
+    TrashRead(window::Id, Vec<Trashed>),
+    /// Open the header bar's menu.
+    MainMenu(window::Id),
+    /// Close the menu.
+    CloseMenu(window::Id),
+    /// Do something to the selection or in the folder.
+    Do(window::Id, Act),
+    /// What is typed in a dialog's field.
+    Typed(window::Id, String),
+    /// The dialog's default button.
+    Confirm(window::Id),
+    /// The dialog's Cancel.
+    Cancel(window::Id),
+    /// What is typed in the path bar.
+    PathTyped(window::Id, String),
+    /// Enter in the path bar.
+    PathEntered(window::Id),
+    /// A key the window did not use.
+    Key(window::Id, keyboard::Key, Modifiers),
+    /// Escape, which closes whatever is open even from a field.
+    Escape(window::Id),
+    /// The modifier keys changed.
+    Modifiers(Modifiers),
+    /// A window changed size.
+    Resized(window::Id, Size),
+    /// A window came to the front.
+    Focused(window::Id),
+    /// The compositor asked a window to close.
+    CloseRequested(window::Id),
+    /// A window has closed.
+    Closed(window::Id),
+    /// Time to look at the folders on screen again.
+    Tick,
+    /// How a job is going.
+    Job(u64, Step),
+    /// A toast's time is up.
+    ToastGone(window::Id, u64),
+    /// What the session's clipboard held when Paste was pressed.
+    Pasted(window::Id, Option<String>),
+    /// A line from the socket.
+    Said(Command),
+    /// A picture of a window.
+    Shot(window::Screenshot),
+    /// A window has opened.
+    Opened(window::Id),
+}
+
+/// Run until the last window is closed and no job is running.
+///
+/// # Errors
+///
+/// When a window cannot be opened.
+pub fn run(start: Start) -> iced::Result {
+    let ran = iced::daemon(move || boot(&start), update, view::window)
+        .title(|state: &Files, id| {
+            state
+                .windows
+                .get(&id)
+                .map_or_else(|| "Files".to_string(), |browser| browser.location.label())
+        })
+        .theme(|state: &Files, _| {
+            let look = state.colors();
+            Theme::custom(
+                "Rift",
+                theme::Palette {
+                    background: look.page,
+                    text: look.text,
+                    primary: look.accent,
+                    success: look.accent,
+                    warning: look.accent,
+                    danger: look.error,
+                },
+            )
+        })
+        .subscription(subscription)
+        // the window follows the interface text size the way a GTK app does, since it is not one
+        .scale_factor(|state: &Files, _| {
+            f32::from(u16::try_from(state.look.text).unwrap_or(100)) / 100.0
+        })
+        .default_font(FONT)
+        .settings(iced::Settings {
+            id: Some(APP_ID.to_string()),
+            default_font: FONT,
+            default_text_size: TEXT_SIZE.into(),
+            ..iced::Settings::default()
+        })
+        .run();
+    control::close();
+    ran
+}
+
+/// A window's settings. On Wayland the app id comes from the platform settings and nowhere else,
+/// and it is the name of the desktop entry, which is how the dock and the compositor know the
+/// window.
+fn settings(screenshot: bool) -> window::Settings {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut settings = window::Settings {
+        size: Size::new(WIDTH, if screenshot { 720.0 } else { HEIGHT }),
+        min_size: Some(Size::new(560.0, 360.0)),
+        exit_on_close_request: false,
+        // the app draws its own title bar, the way the GTK apps of the session do
+        decorations: false,
+        ..window::Settings::default()
+    };
+    #[cfg(target_os = "linux")]
+    {
+        settings.platform_specific.application_id = APP_ID.to_string();
+    }
+    settings
+}
+
+fn boot(start: &Start) -> (Files, Task<Message>) {
+    let mut state = Files {
+        windows: BTreeMap::new(),
+        front: None,
+        opened: 0,
+        look: Look::read(),
+        options: Options::read(),
+        types: Arc::new(mime::Database::load()),
+        places: places::places(),
+        clipboard: None,
+        jobs: Vec::new(),
+        offset: files::utc_offset(),
+        trash_full: Trash::home().is_some_and(|trash| trash.count() > 0),
+        modifiers: Modifiers::empty(),
+        screenshot: start.screenshot.clone(),
+        picture: None,
+        shooting: false,
+    };
+    let work: Vec<Task<Message>> = if start.open.is_empty() {
+        vec![open_window(&mut state, home_location(), None)]
+    } else {
+        start
+            .open
+            .iter()
+            .map(|path| open_path(&mut state, path))
+            .collect()
+    };
+    keep(&state);
+    (state, Task::batch(work))
+}
+
+/// Home, or the root of the file system on a machine with no home.
+fn home_location() -> Location {
+    Location::Folder(
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map_or_else(|| PathBuf::from("/"), PathBuf::from),
+    )
+}
+
+/// A window on a folder, or on the folder a file is in with the file selected. The trash's own
+/// address opens the trash.
+pub fn open_path(state: &mut Files, path: &Path) -> Task<Message> {
+    if path.as_os_str() == "trash:" || path.as_os_str() == "trash:///" {
+        return open_window(state, Location::Trash, None);
+    }
+    if path.as_os_str().is_empty() {
+        return open_window(state, home_location(), None);
+    }
+    match (path.is_dir(), path.parent(), path.file_name()) {
+        (true, _, _) => open_window(state, Location::Folder(path.to_path_buf()), None),
+        (false, Some(folder), Some(name)) if folder.is_dir() => open_window(
+            state,
+            Location::Folder(folder.to_path_buf()),
+            Some(name.to_owned()),
+        ),
+        _ => open_window(state, home_location(), None),
+    }
+}
+
+/// Open a window on a place, with one name selected in it when it is given.
+pub fn open_window(
+    state: &mut Files,
+    location: Location,
+    select: Option<OsString>,
+) -> Task<Message> {
+    let (id, opened) = window::open(settings(state.screenshot.is_some()));
+    state.opened += 1;
+    let mut browser = Browser::new(state.opened, location, Size::new(WIDTH, HEIGHT));
+    browser.stamp = stamp(&browser.location);
+    if let Some(name) = select {
+        browser.select_after = vec![name];
+    }
+    state.windows.insert(id, browser);
+    state.front = Some(id);
+    Task::batch([opened.map(Message::Opened), read(state, id)])
+}
+
+/// For `--screenshot`, once the first window has read its folder: wait a moment for it to draw
+/// itself, then take the picture.
+fn shoot(state: &mut Files) -> Task<Message> {
+    if state.screenshot.is_none() || state.shooting {
+        return Task::none();
+    }
+    state.shooting = true;
+    Task::perform(async { thread::sleep(Duration::from_millis(900)) }, |()| ())
+        .then(|()| window::oldest())
+        .and_then(window::screenshot)
+        .map(Message::Shot)
+}
+
+/// Write a picture of a window as a png.
+fn save(path: &Path, shot: &window::Screenshot) -> Result<(), String> {
+    let (wide, tall) = (shot.size.width, shot.size.height);
+    image::RgbaImage::from_raw(wide, tall, shot.rgba.to_vec())
+        .ok_or_else(|| format!("the picture is not {wide} by {tall}"))?
+        .save(path)
+        .map_err(|e| format!("Could not write {}: {e}", path.display()))
+}
+
+/// Read what a window shows, on a thread of its own.
+pub fn read(state: &Files, id: window::Id) -> Task<Message> {
+    let Some(browser) = state.windows.get(&id) else {
+        return Task::none();
+    };
+    let location = browser.location.clone();
+    let types = Arc::clone(&state.types);
+    let offset = state.offset;
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let message = match &location {
+            Location::Folder(path) => {
+                let found = files::read(path, &types);
+                Message::Read(id, location, Box::new(found))
+            }
+            Location::Trash => Message::TrashRead(
+                id,
+                Trash::home()
+                    .map(|trash| trash.list(offset))
+                    .unwrap_or_default(),
+            ),
+        };
+        let _ = sender.send(message);
+    });
+    Task::perform(receiver, move |said| said.unwrap_or(Message::CloseMenu(id)))
+}
+
+/// What a place's own entry says when it was last changed, to tell when something in it changes:
+/// the folder's time and size, or the trash's notes folder's.
+#[must_use]
+pub fn stamp(location: &Location) -> Option<(i64, i64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let path = match location {
+        Location::Folder(path) => path.clone(),
+        Location::Trash => Trash::home()?.root().join("info"),
+    };
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.mtime(), meta.mtime_nsec(), meta.len()))
+}
+
+impl Files {
+    /// The colours the windows are drawn in.
+    #[must_use]
+    pub fn colors(&self) -> Colors {
+        colors(self.look.theme, self.look.accent)
+    }
+
+    /// Whether a job is still running.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.jobs.iter().any(Job::running)
+    }
+
+    /// The window in front, or any window when none has come to the front yet.
+    #[must_use]
+    pub fn front_id(&self) -> Option<window::Id> {
+        self.front
+            .filter(|id| self.windows.contains_key(id))
+            .or_else(|| self.windows.keys().next().copied())
+    }
+
+    /// The lines `rift-files --state` prints: the app's, then the window in front's.
+    fn state(&self) -> String {
+        let mut lines = vec![
+            format!("windows {}", self.windows.len()),
+            format!("trash {}", if self.trash_full { "full" } else { "empty" }),
+            format!("hidden {}", if self.options.hidden { "on" } else { "off" }),
+            format!(
+                "sort {}{}",
+                self.options.sort.word(),
+                if self.options.reversed {
+                    " reversed"
+                } else {
+                    ""
+                }
+            ),
+            match &self.clipboard {
+                Some(clip) => format!(
+                    "clipboard {} {}",
+                    if clip.cut { "cut" } else { "copy" },
+                    clip.paths.len()
+                ),
+                None => "clipboard none".to_string(),
+            },
+        ];
+        for job in self.jobs.iter().filter(|job| job.running()) {
+            lines.push(format!("job {} {}", job.number, job.percent()));
+        }
+        if let Some(browser) = self.front_id().and_then(|id| self.windows.get(&id)) {
+            lines.extend(list::state(browser));
+        }
+        lines.join("\n") + "\n"
+    }
+}
+
+/// Handle a message, and keep what `--state` prints up to date: the socket answers from it on a
+/// thread of its own, and there may be no window to draw it.
+fn update(state: &mut Files, message: Message) -> Task<Message> {
+    let task = handle(state, message);
+    keep(state);
+    task
+}
+
+fn handle(state: &mut Files, message: Message) -> Task<Message> {
+    match message {
+        Message::Press(id, at) => actions::press(state, id, at),
+        Message::Twice(id, at) => actions::twice(state, id, at),
+        Message::RowMenu(id, at) => actions::row_menu(state, id, at),
+        Message::Hover(..)
+        | Message::Unhover(..)
+        | Message::Blank(_)
+        | Message::At(..)
+        | Message::Scrolled(..)
+        | Message::Resized(..)
+        | Message::Modifiers(_)
+        | Message::Focused(_)
+        | Message::Opened(_) => {
+            pointer(state, &message);
+            Task::none()
+        }
+        Message::BlankMenu(id) => actions::blank_menu(state, id),
+        Message::Go(id, location) => go(state, id, location),
+        Message::Back(id) => travel(state, id, Browser::go_back),
+        Message::Forward(id) => travel(state, id, Browser::go_forward),
+        Message::Up(id) => up(state, id),
+        Message::Read(id, location, found) => arrived(state, id, &location, *found),
+        Message::TrashRead(id, trashed) => trash_read(state, id, trashed),
+        Message::MainMenu(id) => actions::main_menu(state, id),
+        Message::CloseMenu(id) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.menu = None;
+            }
+            Task::none()
+        }
+        Message::Do(id, act) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.menu = None;
+            }
+            actions::act(state, id, act)
+        }
+        Message::Typed(id, typed) => {
+            if let Some(dialog) = state.windows.get_mut(&id).and_then(|b| b.dialog.as_mut()) {
+                dialog.type_in(typed);
+            }
+            Task::none()
+        }
+        Message::Confirm(id) => actions::confirm(state, id),
+        Message::Cancel(id) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.dialog = None;
+            }
+            Task::none()
+        }
+        Message::PathTyped(id, typed) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.typing = Some(typed);
+            }
+            Task::none()
+        }
+        Message::PathEntered(id) => actions::path_entered(state, id),
+        Message::Key(id, key, modifiers) => actions::key(state, id, &key, modifiers),
+        Message::Escape(id) => actions::escape(state, id),
+        Message::CloseRequested(id) => window::close(id),
+        Message::Closed(id) => {
+            state.windows.remove(&id);
+            if state.front == Some(id) {
+                state.front = None;
+            }
+            if state.windows.is_empty() && !state.busy() {
+                return iced::exit();
+            }
+            Task::none()
+        }
+        Message::Tick => tick(state),
+        Message::Job(number, step) => actions::job_step(state, number, step),
+        Message::ToastGone(id, number) => {
+            if let Some(browser) = state.windows.get_mut(&id)
+                && browser
+                    .toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.number == number)
+            {
+                browser.toast = None;
+            }
+            Task::none()
+        }
+        Message::Pasted(id, text) => actions::pasted(state, id, text.as_deref()),
+        Message::Said(command) => said(state, command),
+        Message::Shot(shot) => {
+            let path = state.picture.take().or_else(|| state.screenshot.clone());
+            if let Some(path) = &path
+                && let Err(why) = save(path, &shot)
+            {
+                eprintln!("rift-files: {why}");
+            }
+            if state.screenshot.is_some() {
+                return iced::exit();
+            }
+            Task::none()
+        }
+    }
+}
+
+/// What the pointer, the keys held down and the compositor say about a window, which changes what
+/// is drawn and nothing else.
+fn pointer(state: &mut Files, message: &Message) {
+    match *message {
+        Message::Modifiers(modifiers) => state.modifiers = modifiers,
+        Message::Focused(id) | Message::Opened(id) => state.front = Some(id),
+        Message::At(id, point) => {
+            state.front = Some(id);
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.pointer = point;
+            }
+        }
+        Message::Hover(id, at) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.hover = Some(at);
+            }
+        }
+        Message::Unhover(id, at) => {
+            if let Some(browser) = state.windows.get_mut(&id)
+                && browser.hover == Some(at)
+            {
+                browser.hover = None;
+            }
+        }
+        Message::Blank(id) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.select_none();
+                browser.menu = None;
+            }
+        }
+        Message::Scrolled(id, ref viewport) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.scroll = viewport.absolute_offset().y;
+                browser.viewport = viewport.bounds().height;
+            }
+        }
+        Message::Resized(id, size) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.size = size;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The trash has been read, for a window that still shows it.
+fn trash_read(state: &mut Files, id: window::Id, trashed: Vec<Trashed>) -> Task<Message> {
+    let options = state.options;
+    let types = Arc::clone(&state.types);
+    state.trash_full = !trashed.is_empty();
+    let shown = match state.windows.get_mut(&id) {
+        Some(browser) if browser.location == Location::Trash => {
+            browser.show_trash(trashed, &types, options);
+            actions::select_waiting(browser)
+        }
+        _ => Task::none(),
+    };
+    Task::batch([shown, shoot(state)])
+}
+
+/// Go somewhere in a window, and read it.
+pub fn go(state: &mut Files, id: window::Id, location: Location) -> Task<Message> {
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    browser.go(location);
+    browser.stamp = stamp(&browser.location);
+    read(state, id)
+}
+
+/// Back or forward, when there is somewhere to go.
+pub fn travel(state: &mut Files, id: window::Id, way: fn(&mut Browser) -> bool) -> Task<Message> {
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    if !way(browser) {
+        return Task::none();
+    }
+    browser.stamp = stamp(&browser.location);
+    read(state, id)
+}
+
+/// Up to the folder this one is in, with this one selected there.
+pub fn up(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    let Some(folder) = browser.location.folder().map(Path::to_path_buf) else {
+        return Task::none();
+    };
+    let (Some(parent), Some(name)) = (folder.parent(), folder.file_name()) else {
+        return Task::none();
+    };
+    let parent = parent.to_path_buf();
+    let name = name.to_owned();
+    browser.go(Location::Folder(parent));
+    browser.select_after = vec![name];
+    browser.stamp = stamp(&browser.location);
+    read(state, id)
+}
+
+/// A folder has been read. Only the place the window is still at counts.
+fn arrived(
+    state: &mut Files,
+    id: window::Id,
+    location: &Location,
+    found: Result<Vec<Entry>, String>,
+) -> Task<Message> {
+    let options = state.options;
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    if &browser.location != location {
+        return Task::none();
+    }
+    let shown = match found {
+        Ok(entries) => {
+            browser.show(entries, options);
+            actions::select_waiting(browser)
+        }
+        Err(why) => {
+            browser.read.clear();
+            browser.rows.clear();
+            browser.ready = true;
+            browser.problem = Some(why);
+            Task::none()
+        }
+    };
+    Task::batch([shown, shoot(state)])
+}
+
+/// Look at every window's place for a change, and at the trash and the colours.
+fn tick(state: &mut Files) -> Task<Message> {
+    let look = Look::read();
+    if look != state.look {
+        state.look = look;
+    }
+    state.trash_full = Trash::home().is_some_and(|trash| trash.count() > 0);
+    let changed: Vec<window::Id> = state
+        .windows
+        .iter_mut()
+        .filter_map(|(id, browser)| {
+            let now = stamp(&browser.location);
+            (now != browser.stamp).then(|| {
+                browser.stamp = now;
+                *id
+            })
+        })
+        .collect();
+    Task::batch(changed.into_iter().map(|id| read(state, id)))
+}
+
+/// A line from the socket. Setting something over it does what pressing it would in the window in
+/// front.
+fn said(state: &mut Files, command: Command) -> Task<Message> {
+    match command {
+        Command::Open(path) => {
+            let path = files::path_of(&path);
+            if path.as_os_str().is_empty() {
+                open_window(state, home_location(), None)
+            } else {
+                open_path(state, &path)
+            }
+        }
+        Command::Set(name, value) => actions::set(state, &name, &value),
+        // answered on the socket's own thread
+        Command::State => Task::none(),
+    }
+}
+
+/// Take a picture of the window in front for `--set picture`.
+pub fn picture(state: &mut Files, path: PathBuf) -> Task<Message> {
+    let Some(id) = state.front_id() else {
+        return Task::none();
+    };
+    state.picture = Some(path);
+    window::screenshot(id).map(Message::Shot)
+}
+
+fn subscription(state: &Files) -> Subscription<Message> {
+    let mut followed = vec![
+        window::close_requests().map(Message::CloseRequested),
+        window::close_events().map(Message::Closed),
+        window::resize_events().map(|(id, size)| Message::Resized(id, size)),
+        event::listen_with(events),
+    ];
+    // a window that is only there to have its picture taken answers nothing and follows nothing,
+    // so a running Files keeps its socket
+    if state.screenshot.is_none() {
+        followed.push(terminal());
+        followed.push(ticking());
+    }
+    Subscription::batch(followed)
+}
+
+/// The keys, the pointer's back and forward buttons and a window coming to the front. A key a
+/// field has taken is its own, except Escape, which closes whatever is open.
+fn events(event: iced::Event, status: event::Status, id: window::Id) -> Option<Message> {
+    match event {
+        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+            Some(Message::Modifiers(modifiers))
+        }
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        }) => Some(Message::Escape(id)),
+        iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+            if status == event::Status::Ignored =>
+        {
+            Some(Message::Key(id, key, modifiers))
+        }
+        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => {
+            Some(Message::Back(id))
+        }
+        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => {
+            Some(Message::Forward(id))
+        }
+        iced::Event::Window(window::Event::Focused) => Some(Message::Focused(id)),
+        _ => None,
+    }
+}
+
+/// A tick every second, to look at the folders on screen for a change. The subscription is named,
+/// because iced tells two apart by the type of the stream and the address of the function that
+/// makes it.
+fn ticking() -> Subscription<Message> {
+    Subscription::run_with("tick", |_| {
+        let (sender, receiver) = mpsc::unbounded();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(LOOK);
+                if sender.unbounded_send(Message::Tick).is_err() {
+                    return;
+                }
+            }
+        });
+        receiver
+    })
+}
+
+/// The socket in the runtime directory, read on a thread of its own. The state query is answered
+/// there, from the lines the app keeps up to date.
+fn terminal() -> Subscription<Message> {
+    Subscription::run_with("terminal", |_| {
+        let (sender, receiver) = mpsc::unbounded();
+        thread::spawn(move || {
+            if let Err(why) = control::serve(|command| {
+                if command == Command::State {
+                    return Some(kept());
+                }
+                let _ = sender.unbounded_send(Message::Said(command));
+                None
+            }) {
+                eprintln!("rift-files: {why}");
+            }
+        });
+        receiver
+    })
+}
+
+/// What the socket answers a state query with.
+fn kept() -> String {
+    STATE
+        .lock()
+        .map_or_else(|_| "the app is busy\n".to_string(), |state| state.clone())
+}
+
+/// Keep what `--state` prints.
+fn keep(state: &Files) {
+    if let Ok(mut kept) = STATE.lock() {
+        *kept = state.state();
+    }
+}
+
+static STATE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Start a job, and keep it to follow.
+pub fn start_job(state: &mut Files, id: Option<window::Id>, work: jobs::Work) -> Task<Message> {
+    let number = state.jobs.iter().map(|job| job.number).max().unwrap_or(0) + 1;
+    let job = Job::new(number, work, id);
+    let task = jobs::start(&job, state.offset);
+    state.jobs.push(job);
+    // the ones that ended long ago go, except the last few, which Undo may still want
+    let ended: Vec<u64> = state
+        .jobs
+        .iter()
+        .filter(|job| !job.running())
+        .map(|job| job.number)
+        .collect();
+    if ended.len() > 8 {
+        let keep_from = ended[ended.len() - 8];
+        state
+            .jobs
+            .retain(|job| job.running() || job.number >= keep_from);
+    }
+    task
+}

@@ -1,0 +1,33 @@
+[package]
+name = "files"
+description = "Files: the file manager, a window for each folder, with the trash and the apps that open each kind of file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rift-files"
+path = "src/main.rs"
+
+[dependencies]
+# what is in a folder and the kind of each file, the trash, the places, the apps that open files and
+# which one opens each kind, and the colours the owner chose
+librift = { workspace = true }
+# the colours, the rows, the menus, the dialogs and the icons Settings and Welcome draw with too
+rift-ui = { workspace = true }
+
+# a normal window for each folder, drawn in software like the shell so no gpu driver is needed,
+# which can all close while a copy goes on. svg draws the icons, and the image widget an icon that
+# ships as png, read by the png reader alone
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "thread-pool", "wayland", "svg", "image-without-codecs", "advanced"] }
+image = { version = "0.25.9", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# a copy on btrfs shares the blocks of the file it copies, and a rename never writes over a name
+rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
+
+[lints]
+workspace = true
