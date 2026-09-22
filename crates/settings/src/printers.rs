@@ -22,6 +22,8 @@ use crate::widgets::{GAP, TEXT_SIZE, action, group, heading, line, note, pressab
 
 /// How often the page asks CUPS again while it is up.
 const EVERY: Duration = Duration::from_secs(2);
+/// The names `rift-settings --set` takes for this page.
+pub const NAMES: [&str; 3] = ["printer", "resume", "cancel"];
 
 /// What the owner asked of a printer or a job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,19 @@ pub enum Asked {
     Resume(String),
     /// Cancel the job with this number.
     Cancel(u32),
+}
+
+/// What `rift-settings --set` asks of this page, the way pressing it would: a printer by the name of
+/// its queue and a job by its number, which CUPS checks.
+#[must_use]
+pub fn named(name: &str, value: &str) -> Option<Asked> {
+    let value = value.trim();
+    match name {
+        "printer" => Some(Asked::Default(value.to_string())),
+        "resume" => Some(Asked::Resume(value.to_string())),
+        "cancel" => value.parse().ok().map(Asked::Cancel),
+        _ => None,
+    }
 }
 
 /// Ask CUPS now.
@@ -265,6 +280,21 @@ const NOT_YET: &str = "Adding a printer by its address is not in Settings yet. D
 mod tests {
     use super::*;
     use librift::printers::JobState;
+
+    #[test]
+    fn a_setting_from_a_terminal_is_what_the_page_would_press() {
+        assert_eq!(
+            named("printer", " Office "),
+            Some(Asked::Default("Office".into()))
+        );
+        assert_eq!(
+            named("resume", "Rift_test"),
+            Some(Asked::Resume("Rift_test".into()))
+        );
+        assert_eq!(named("cancel", "4"), Some(Asked::Cancel(4)));
+        assert_eq!(named("cancel", "four"), None);
+        assert_eq!(named("print", "Office"), None);
+    }
 
     fn printer(name: &str, info: &str, state: State, message: &str) -> Printer {
         Printer {

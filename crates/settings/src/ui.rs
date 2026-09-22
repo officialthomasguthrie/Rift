@@ -32,11 +32,11 @@ use crate::control::{self, Command};
 use crate::net::Joining;
 use crate::page::Page;
 use crate::theme::{Colors, colors};
-use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
+use crate::widgets::{BOLD, FONT, TEXT_SIZE, scroll};
 use crate::{
     about, accessibility, ai, appearance, apps, backups, bluetooth, datetime, displays, dock,
-    icons, keyboard, net, notifications, pointer, power, printers, privacy, region, search, sound,
-    updates, watch,
+    icons, keyboard, net, notifications, owner, pointer, power, printers, privacy, region, search,
+    sound, updates, watch,
 };
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
@@ -139,6 +139,10 @@ pub struct Settings {
     pub privacy: Option<Box<privacy::Picture>>,
     /// What fwupd says about the firmware, once it has answered.
     pub security: Option<Result<Security, String>>,
+    /// What Vault says about the owner, once the Owner page has asked.
+    pub owner: Option<Result<librift::owner::Owner, String>>,
+    /// What is typed on the Owner page.
+    pub signing: owner::Form,
     /// What the dock keeps and where it stands, once the Dock page has read it, and again every
     /// second while it is up.
     pub dock: Option<dock::Picture>,
@@ -255,6 +259,10 @@ pub enum Message {
     Private(privacy::Asked),
     /// What fwupd says about the firmware.
     Security(Result<Security, String>),
+    /// What Vault says about the owner now.
+    Owner(Result<librift::owner::Owner, String>),
+    /// A field or a button on the Owner page, or how a change there went.
+    Owning(owner::Asked),
     /// What localed says about the keyboard now.
     Layouts(Result<Region, String>),
     /// A layout was added, taken off or put first, or the shortcuts were asked for.
@@ -416,6 +424,9 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
     if state.page == Page::Privacy {
         work.push(privacy::ask_fwupd());
     }
+    if state.page == Page::Owner {
+        work.push(owner::read());
+    }
     if start.screenshot.is_some() {
         work.push(shoot());
     }
@@ -480,6 +491,8 @@ impl Settings {
             unfolded: None,
             privacy: None,
             security: None,
+            owner: None,
+            signing: owner::Form::default(),
             dock: None,
             notices: None,
             joining: None,
@@ -552,6 +565,7 @@ impl Settings {
         .chain(notifications::state(self))
         .chain(apps::state(self))
         .chain(privacy::state(self))
+        .chain(owner::state(self))
         // what went wrong last, which the page shows in red under everything else
         .chain(self.problem.as_ref().map(|why| format!("problem {why}")))
         .collect::<Vec<_>>()
@@ -667,6 +681,7 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Notices(asked) => return notifications::asked(state, &asked),
         Message::Apps(asked) => return apps::asked(state, asked),
         Message::Private(asked) => return privacy::asked(state, asked),
+        Message::Owning(asked) => return owner::asked(state, asked),
         Message::Pointer(changed) => pointer::update(state, changed),
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
@@ -723,6 +738,7 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Kinds(picture) => state.defaults = Some(picture),
         Message::Privacy(picture) => state.privacy = Some(picture),
         Message::Security(answer) => state.security = Some(answer),
+        Message::Owner(answer) => state.owner = Some(answer),
         Message::Layouts(answer) => state.keyboard = Some(answer),
         Message::Devices(answer) => state.devices = Some(answer),
         Message::Backups(answer) => state.disk = Some(answer),
@@ -774,7 +790,7 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
 /// Show a page. What went wrong on the page that was up, and what it was doing, belong to that
 /// page and are left behind. The Wi-Fi page asks the card to sweep as it comes up, so the list is
 /// what is around now rather than what was around when the window opened; leaving it drops a
-/// password half typed, and a search for a time zone.
+/// password half typed, a search for a time zone, and what was typed on the Owner page.
 fn show(state: &mut Settings, page: Page) -> Task<Message> {
     if state.page == page {
         return Task::none();
@@ -786,6 +802,7 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
     state.joining = None;
     state.finding.clear();
     state.unfolded = None;
+    state.signing = owner::Form::default();
     match page {
         Page::Wifi => {
             state.swept = true;
@@ -835,6 +852,9 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
             state.apps = librift::apps::load();
             privacy::ask_fwupd()
         }
+        // the owner's name and password are Vault's to answer, and nothing changes them while the
+        // page is up but the page itself, which asks again after each change
+        Page::Owner => owner::read(),
         _ => Task::none(),
     }
 }
@@ -898,16 +918,8 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
         // a zone by its name in the database, which timedated checks: `--set timezone Europe/London`
         "timezone" => Task::done(Message::Zone(value.trim().to_string())),
         // a printer by the name of its queue and a job by its number, which CUPS checks
-        "printer" => Task::done(Message::Printer(printers::Asked::Default(
-            value.trim().to_string(),
-        ))),
-        "resume" => Task::done(Message::Printer(printers::Asked::Resume(
-            value.trim().to_string(),
-        ))),
-        "cancel" => value.trim().parse().map_or_else(
-            |_| Task::none(),
-            |job| Task::done(Message::Printer(printers::Asked::Cancel(job))),
-        ),
+        name if printers::NAMES.contains(&name) => printers::named(name, value)
+            .map_or_else(Task::none, |asked| Task::done(Message::Printer(asked))),
         "screen-reader" => Task::done(Message::Turn(Tool::Reader, on(value))),
         "on-screen-keyboard" => Task::done(Message::Turn(Tool::Keyboard, on(value))),
         // a layout by its word, `gb` or `us(dvorak)`, which the list of layouts checks
@@ -932,6 +944,8 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
             .map_or_else(Task::none, |asked| Task::done(Message::Apps(asked))),
         name if privacy::NAMES.contains(&name) => privacy::named(state, name, value)
             .map_or_else(Task::none, |asked| Task::done(Message::Private(asked))),
+        // the owner's name, and the current password and a new one, each typed and pressed
+        name if owner::NAMES.contains(&name) => owner::named(name, value),
         // the mouse and the touchpad, by the names their file has, for a device this machine has
         name if librift::pointer::NAMES.contains(&name) => pointer::named(state, name, value)
             .map_or_else(Task::none, |chosen| {
@@ -1180,26 +1194,13 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),
-        Page::Owner => nothing_yet(look, Page::Owner),
+        Page::Owner => owner::view(state, look),
     };
     scroll(
         look,
         container(inside).width(Fill).padding(crate::widgets::PAD),
     )
     .height(Fill)
-    .into()
-}
-
-/// A page for something the system cannot do from here yet: its name and one sentence.
-fn nothing_yet<'a>(look: Colors, page: Page) -> Element<'a, Message> {
-    column![
-        text(page.label())
-            .size(TITLE_SIZE)
-            .font(BOLD)
-            .color(look.text),
-        text(page.note()).size(TEXT_SIZE).color(look.dim),
-    ]
-    .spacing(10)
     .into()
 }
 

@@ -1,6 +1,5 @@
 //! The pages of Settings, in the order the sidebar lists them. Each one has a name, the word the
-//! control socket takes, a symbolic icon, and a sentence for the pages the system cannot do from
-//! here yet.
+//! control socket takes, and a symbolic icon.
 
 /// One page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,71 +181,11 @@ impl Page {
             .into_iter()
             .find(|page| word.eq_ignore_ascii_case(page.word()))
     }
-
-    /// What a page that Settings cannot do yet says, in one sentence, with a second one where
-    /// there is another way to do it today. A page with one of its own says nothing here.
-    #[must_use]
-    pub const fn note(self) -> &'static str {
-        match self {
-            Self::Wifi
-            | Self::Network
-            | Self::Bluetooth
-            | Self::Displays
-            | Self::Sound
-            | Self::Power
-            | Self::Appearance
-            | Self::Dock
-            | Self::Apps
-            | Self::Notifications
-            | Self::Search
-            | Self::Keyboard
-            | Self::Pointer
-            | Self::Printers
-            | Self::Accessibility
-            | Self::Privacy
-            | Self::DateTime
-            | Self::Region
-            | Self::Updates
-            | Self::Backups
-            | Self::Ai
-            | Self::About => "",
-            Self::Owner => {
-                "The owner is not in Settings yet. rift host says what this machine is to the drive."
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
-    /// and one sentence.
-    const REAL: [Page; 22] = [
-        Page::Wifi,
-        Page::Network,
-        Page::Bluetooth,
-        Page::Displays,
-        Page::Sound,
-        Page::Power,
-        Page::Appearance,
-        Page::Dock,
-        Page::Apps,
-        Page::Notifications,
-        Page::Search,
-        Page::Keyboard,
-        Page::Pointer,
-        Page::Printers,
-        Page::Accessibility,
-        Page::Privacy,
-        Page::DateTime,
-        Page::Region,
-        Page::Updates,
-        Page::Backups,
-        Page::Ai,
-        Page::About,
-    ];
 
     #[test]
     fn every_page_has_a_name_a_word_and_an_icon_of_its_own() {
@@ -266,19 +205,5 @@ mod tests {
         }
         assert_eq!(Page::from_word(" About \n"), Some(Page::About));
         assert_eq!(Page::from_word("printer"), None);
-    }
-
-    #[test]
-    fn a_page_with_nothing_on_it_says_so_in_a_sentence() {
-        for page in Page::ALL {
-            let note = page.note();
-            if REAL.contains(&page) {
-                assert!(note.is_empty(), "{page:?}: {note}");
-                continue;
-            }
-            assert!(note.ends_with('.'), "{page:?}: {note}");
-            assert!(note.contains("not in Settings yet"), "{page:?}: {note}");
-            assert!(note.is_ascii(), "{page:?}: {note}");
-        }
     }
 }
