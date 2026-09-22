@@ -158,6 +158,7 @@ mod tests {
             icon: Some(program.into()),
             wm_class: None,
             category: librift::apps::Category::Accessories,
+            types: Vec::new(),
         }
     }
 

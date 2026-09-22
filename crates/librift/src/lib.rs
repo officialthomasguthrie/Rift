@@ -2,7 +2,8 @@
 //! the rift command run, the client side of the services on the system bus (Rift's own, and
 //! `NetworkManager`, `BlueZ`, `UPower` and logind for the system menu, timedated and localed for
 //! the clock, the language and the keyboard layouts), the printers CUPS has a queue for, the apps
-//! the desktop entries name and where their icons are, what the dock keeps and where it stands, Do
+//! the desktop entries name and where their icons are, which app opens each kind of file, what
+//! the camera portal and the firewall allow, what the dock keeps and where it stands, Do
 //! not disturb and the apps whose banners stay off, which of the programs the shell's keys start is
 //! running, the index for search by meaning, what the system calls itself, dark or light and the
 //! wallpaper, the mouse and the touchpad, the sound `PipeWire` plays and hears, how the boot looks,
@@ -24,6 +25,8 @@ pub mod bluetooth;
 pub mod boot;
 pub mod bus;
 pub mod clock;
+#[cfg(unix)]
+pub mod defaults;
 #[cfg(feature = "disk")]
 pub mod disk;
 pub mod dock;
@@ -39,6 +42,9 @@ pub mod os;
 pub mod pointer;
 #[cfg(unix)]
 pub mod printers;
+// the camera portal, dconf and the firewall's unit belong to a freedesktop session too
+#[cfg(unix)]
+pub mod privacy;
 pub mod quasar;
 pub mod region;
 pub mod release;

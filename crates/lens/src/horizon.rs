@@ -313,6 +313,7 @@ mod tests {
             icon: None,
             wm_class: None,
             category: Category::Accessories,
+            types: Vec::new(),
         }
     }
 

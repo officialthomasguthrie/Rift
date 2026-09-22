@@ -594,6 +594,7 @@ mod tests {
             icon: Some(id.to_string()),
             wm_class: None,
             category: Category::Accessories,
+            types: Vec::new(),
         }
     }
 

@@ -728,7 +728,8 @@ fn kdl_string(text: &str) -> String {
     out
 }
 
-fn write_key(key: &str, value: &str) -> Result<(), String> {
+/// Write one dconf key, unless it already says it.
+pub(crate) fn write_key(key: &str, value: &str) -> Result<(), String> {
     let read = Command::new("dconf")
         .args(["read", key])
         .output()

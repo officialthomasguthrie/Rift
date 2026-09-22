@@ -547,6 +547,7 @@ mod tests {
             icon: Some(name.to_lowercase()),
             wm_class: None,
             category,
+            types: Vec::new(),
         }
     }
 

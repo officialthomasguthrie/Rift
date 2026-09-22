@@ -23,6 +23,8 @@ pub struct App {
     pub wm_class: Option<String>,
     /// The section of the menu the Categories field puts it in.
     pub category: Category,
+    /// The `MimeType` field: the kinds of file and the kinds of link it says it opens.
+    pub types: Vec<String>,
 }
 
 /// The section of the Applications menu an app is listed under. The six the menu of GNOME
@@ -203,6 +205,7 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
     let mut icon = None;
     let mut wm_class = None;
     let mut categories = String::new();
+    let mut types = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
@@ -225,6 +228,14 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
                 wm_class = Some(value.trim().to_string());
             }
             "Categories" => categories = value.trim().to_string(),
+            "MimeType" => {
+                types = value
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|kind| !kind.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+            }
             "NoDisplay" | "Hidden" if value.trim() == "true" => return None,
             _ => {}
         }
@@ -244,6 +255,7 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
         icon,
         wm_class,
         category: Category::of(&categories),
+        types,
     })
 }
 
@@ -307,6 +319,21 @@ mod tests {
         assert_eq!(app.category, Category::Internet);
         // with no StartupWMClass the entry's id is what its windows are called
         assert!(app.wm_class.is_none());
+        assert!(app.types.is_empty());
+    }
+
+    #[test]
+    fn an_entry_says_what_it_opens() {
+        let app = parse(
+            "Helix",
+            "[Desktop Entry]\nType=Application\nName=Helix\nExec=hx %F\nTerminal=true\n\
+             MimeType=text/plain; text/x-csrc;;application/x-shellscript\n",
+        )
+        .unwrap();
+        assert_eq!(
+            app.types,
+            ["text/plain", "text/x-csrc", "application/x-shellscript"]
+        );
     }
 
     #[test]
