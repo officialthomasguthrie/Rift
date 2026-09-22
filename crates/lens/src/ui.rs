@@ -260,14 +260,14 @@ pub enum Message {
     Zone(window::Id, i32),
     /// Open the menu of a dock item, this tall, with its left edge here, on the dock's edge.
     OpenItemMenu(window::Id, u32, i32, Edge),
-    /// Open the menu's surface, this tall.
-    Open(window::Id, u32),
-    /// Open the system menu's surface, this tall.
-    OpenSystem(window::Id, u32),
+    /// Open the menu's surface, this tall and this far from the top of the working area.
+    Open(window::Id, u32, i32),
+    /// Open the system menu's surface, this tall and this far from the top of the working area.
+    OpenSystem(window::Id, u32, i32),
     /// Open a dialog's surface, this tall.
     OpenDialog(window::Id, u32),
-    /// Open the clock menu's surface, this tall.
-    OpenClock(window::Id, u32),
+    /// Open the clock menu's surface, this tall and this far from the top of the working area.
+    OpenClock(window::Id, u32, i32),
     /// Open a notification's surface, this tall and this far under the bar.
     OpenBanner(window::Id, u32, u32),
     /// Open the key popup's surface.
@@ -297,10 +297,10 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
 
     fn try_from(message: Message) -> Result<Self, Message> {
         match message {
-            Message::Open(id, height) => Ok(Self::new(
+            Message::Open(id, height, top) => Ok(Self::new(
                 None,
                 LayerShellCustomAction::NewLayerShell {
-                    settings: menu_surface(height),
+                    settings: menu_surface(height, top),
                     id,
                 },
             )),
@@ -330,10 +330,10 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
                     id,
                 },
             )),
-            Message::OpenSystem(id, height) => Ok(Self::new(
+            Message::OpenSystem(id, height, top) => Ok(Self::new(
                 None,
                 LayerShellCustomAction::NewLayerShell {
-                    settings: system_surface(height),
+                    settings: system_surface(height, top),
                     id,
                 },
             )),
@@ -344,10 +344,10 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
                     id,
                 },
             )),
-            Message::OpenClock(id, height) => Ok(Self::new(
+            Message::OpenClock(id, height, top) => Ok(Self::new(
                 None,
                 LayerShellCustomAction::NewLayerShell {
-                    settings: clock_surface(height),
+                    settings: clock_surface(height, top),
                     id,
                 },
             )),
@@ -383,22 +383,33 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
     }
 }
 
-/// What a menu of the bar keeps of the screen: -1, which places it on the whole screen rather than
-/// in what the bar and the dock leave of it, with the bar's height as its margin from the top. A dock
-/// along the top edge then does not push the menu down from the button that opened it; the menu
-/// stands over the dock instead, the way a menu does.
-const UNDER_THE_BAR: i32 = -1;
+/// How far a menu of the bar stands from the top of the working area. A menu keeps nothing of the
+/// screen, so it is placed in what the bar, the dock and the on-screen keyboard leave, and never
+/// reaches over the keyboard or behind a dock along the bottom. With the dock along the top the
+/// working area starts under the dock, so the menu goes up by the dock's height and its gap: it
+/// hangs from the button that opened it and stands over the dock, the way a menu does.
+fn menu_top(dock: &Dock) -> i32 {
+    if dock.options.edge != Edge::Top {
+        return 0;
+    }
+    let gap = if dock.options.extend {
+        0
+    } else {
+        margin(dock::OFF_EDGE)
+    };
+    -(margin(dock.height()) + gap)
+}
 
-/// The menu's surface: on the overlay layer, hanging under the bar, its left edge under the
-/// Applications button. It takes the keyboard on demand, which the compositor gives it as it
-/// appears and takes away as soon as anything else is clicked.
-fn menu_surface(height: u32) -> NewLayerShellSettings {
+/// The menu's surface: on the overlay layer, hanging under the bar inside the working area, its
+/// left edge under the Applications button. It takes the keyboard on demand, which the compositor
+/// gives it as it appears and takes away as soon as anything else is clicked.
+fn menu_surface(height: u32, top: i32) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((scaled(menu::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Left,
-        exclusive_zone: Some(UNDER_THE_BAR),
-        margin: Some((margin(bar::HEIGHT), 0, 0, margin(menu::PAD))),
+        exclusive_zone: Some(0),
+        margin: Some((top, 0, 0, margin(menu::PAD))),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -473,16 +484,16 @@ fn item_menu_surface(height: u32, left: i32, edge: Edge) -> NewLayerShellSetting
     }
 }
 
-/// The system menu's surface: on the overlay layer, hanging under the bar, its right edge under
-/// the status icons. It takes the keyboard the way the Applications menu does, so a click anywhere
-/// else closes it.
-fn system_surface(height: u32) -> NewLayerShellSettings {
+/// The system menu's surface: on the overlay layer, hanging under the bar inside the working area,
+/// its right edge under the status icons. It takes the keyboard the way the Applications menu
+/// does, so a click anywhere else closes it.
+fn system_surface(height: u32, top: i32) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((scaled(system::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Right,
-        exclusive_zone: Some(UNDER_THE_BAR),
-        margin: Some((margin(bar::HEIGHT), margin(system::PAD), 0, 0)),
+        exclusive_zone: Some(0),
+        margin: Some((top, margin(system::PAD), 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -507,16 +518,16 @@ fn dialog_surface(height: u32) -> NewLayerShellSettings {
     }
 }
 
-/// The clock menu's surface: on the overlay layer, hanging under the bar and anchored to no side,
-/// so it is in the middle of the screen under the clock. It takes the keyboard the way the other
-/// menus do, so a click anywhere else closes it.
-fn clock_surface(height: u32) -> NewLayerShellSettings {
+/// The clock menu's surface: on the overlay layer, hanging under the bar inside the working area
+/// and anchored to no side, so it is in the middle of the screen under the clock. It takes the
+/// keyboard the way the other menus do, so a click anywhere else closes it.
+fn clock_surface(height: u32, top: i32) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((scaled(datemenu::WIDTH), scaled(height))),
         layer: Layer::Overlay,
         anchor: Anchor::Top,
-        exclusive_zone: Some(UNDER_THE_BAR),
-        margin: Some((margin(bar::HEIGHT), 0, 0, 0)),
+        exclusive_zone: Some(0),
+        margin: Some((top, 0, 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -1055,7 +1066,7 @@ fn toggle_clock(state: &mut Lens) -> Task<Message> {
         Month::of,
     );
     state.datemenu = Some(datemenu::Menu { id, height, month });
-    Task::done(Message::OpenClock(id, height))
+    Task::done(Message::OpenClock(id, height, menu_top(&state.dock)))
 }
 
 fn close_clock(state: &mut Lens) -> Task<Message> {
@@ -1234,7 +1245,8 @@ fn toggle_system(state: &mut Lens) -> Task<Message> {
         // what the scan finds comes back through NetworkManager's signals
         std::thread::spawn(move || network::scan(&device));
     }
-    Task::batch([Task::done(Message::OpenSystem(id, height)), reading])
+    let top = menu_top(&state.dock);
+    Task::batch([Task::done(Message::OpenSystem(id, height, top)), reading])
 }
 
 fn close_system(state: &mut Lens) -> Task<Message> {
@@ -1495,7 +1507,7 @@ fn open(state: &mut Lens) -> Task<Message> {
     let menu = Menu::new(id, &state.apps);
     let height = menu.height;
     state.menu = Some(menu);
-    Task::done(Message::Open(id, height))
+    Task::done(Message::Open(id, height, menu_top(&state.dock)))
 }
 
 fn close(state: &mut Lens) -> Task<Message> {
