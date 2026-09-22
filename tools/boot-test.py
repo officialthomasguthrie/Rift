@@ -406,6 +406,16 @@ WELCOME_NOTE = "~/.local/state/rift/welcomed"
 WELCOME_SIZE = (880, 640)
 WELCOME_HEADER = (48, 48, 48)
 WELCOME_PAGE = (38, 38, 38)
+# files, from crates/files: the app id its windows have, in lower case the way the window list is
+# searched, the unit the test opens a folder in the way another app would, the folders of home the
+# session makes, the file the test copies, renames and throws away, and what the trash's note says
+FILES_APP = "Files"
+FILES_APP_ID = "dev.rift.files"
+FILES_UNIT = "rift-files-test"
+FILES_FOLDERS = ["Documents", "Downloads", "Music", "Pictures", "Videos"]
+FILES_NOTE = "notes.txt"
+FILES_RENAMED = "minutes.txt"
+FILES_FOLDER = "Plans"
 # one window of `horizon msg --json windows`, whose fields come in the order niri-ipc declares them
 WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
@@ -554,6 +564,7 @@ DEFAULT_APPS = [
     ("video/mp4", "org.gnome.Showtime.desktop"),
     ("audio/flac", "org.gnome.Decibels.desktop"),
     ("application/zip", "org.gnome.FileRoller.desktop"),
+    ("inode/directory", "dev.rift.Files.desktop"),
 ]
 # the kind of file the image has more than one app for, as the Apps page words it: the app the image
 # opens it with, the one the page chooses instead, which runs in a terminal, and a second type of the
@@ -6093,6 +6104,186 @@ def main():
                      f"{without_console(output).strip()[-200:]!r}")
             ok(f"Settings shows the About page and every one of its {SETTINGS_PAGES} pages by name")
             close_app(SETTINGS_APP, SETTINGS_APP_ID)
+
+            # 5n. Files, the file manager. the session makes the folders of home and the file that
+            # names them for every app, and a folder opens in Files: xdg-open asks for the app of
+            # inode/directory, which is Files now and was the disk usage analyzer before. the test
+            # drives the window over its socket the way a person would with the pointer: a second
+            # window from the command line, a folder from its dialog, a file copied and pasted into
+            # it, a rename, the trash with its note and Undo, the trash's own view and emptying it, a
+            # menu, and a photograph opened with the app that opens its kind, in a scope of its own
+            def files_state(what):
+                """What rift-files --state prints, a line each, or None while nothing answers."""
+                status, output = run("rift-files --state", what)
+                if status != 0:
+                    return None
+                return [line.strip() for line in without_console(output).splitlines() if line.strip()]
+
+            def files_value(lines, key):
+                """The rest of the first line that starts with key, or None."""
+                for printed in lines or []:
+                    if printed.startswith(key + " "):
+                        return printed[len(key) + 1:]
+                return None
+
+            def files_until(seconds, ready, what):
+                """Ask rift-files --state until ready(lines) is true, and answer those lines."""
+                deadline = time.monotonic() + seconds
+                while True:
+                    lines = files_state(what)
+                    if lines and ready(lines):
+                        return lines
+                    if time.monotonic() > deadline:
+                        _, output = run("journalctl --user -b -o cat -n 40 | cat", "the user manager's log")
+                        fail(f"Files did not come to {what} in {seconds} s, its state is {lines!r}; the user "
+                             f"manager's log said {without_console(output).strip()[-800:]!r}"[:2400])
+                    time.sleep(2)
+
+            def files_set(name, value, what):
+                """Press something in the window in front, over the socket."""
+                status, output = run(f'rift-files --set {name} "{value}"', what)
+                if status != 0:
+                    fail(f"rift-files --set {name} exited with {status}: "
+                         f"{without_console(output).strip()[-300:]!r}")
+
+            def files_select(name):
+                files_set("select", name, f"{name} selected")
+                files_until(20, lambda lines: f"selected {name}" in lines, f"{name} selected")
+
+            files_home = f"/home/{OWNER_USER}"
+            files_documents = f"{files_home}/Documents"
+            _, files_listed = run(" ".join(["ls", "-d"] + [f"~/{name}" for name in FILES_FOLDERS])
+                                  + "; cat ~/.config/user-dirs.dirs", "the folders of home")
+            files_listed = without_console(files_listed)
+            files_lines = [printed.strip() for printed in files_listed.splitlines()]
+            files_missing = [name for name in FILES_FOLDERS if f"{files_home}/{name}" not in files_lines]
+            if files_missing or 'XDG_DOWNLOAD_DIR="$HOME/Downloads"' not in files_listed:
+                fail(f"home is missing {files_missing}, or the file that names its folders says "
+                     f"{files_listed.strip()[-400:]!r}")
+            ok(f"the session made {', '.join(FILES_FOLDERS)} in home, and the file that names them for every app")
+
+            run(f"printf 'Minutes of the meeting\\n' > ~/Documents/{FILES_NOTE}", "a file for Files to copy")
+            run(f"systemd-run --user --quiet --collect --unit={FILES_UNIT} -- xdg-open {files_documents}",
+                "a folder opened the way another app opens one")
+            files_until(120, lambda lines: files_value(lines, "location") == files_documents
+                        and files_value(lines, "ready") == "yes" and f"row file {FILES_NOTE}" in lines,
+                        "its window on Documents")
+            if not wait_for(60, lambda: app_windows(FILES_APP_ID, "Files' window")):
+                fail(f"rift-files answers on its socket and horizon lists no {FILES_APP_ID} window")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{FILES_APP} on Documents with its title bar", f"{stem}-files{extension}", 120,
+                 apps=[FILES_APP], journals=("horizon",), settle=3)
+            ok(f"xdg-open opened {files_documents} in Files, whose list has {FILES_NOTE} in it")
+
+            run(f"rift-files {files_home}/Downloads", "a second window, from the command line")
+            files_until(30, lambda lines: files_value(lines, "windows") == "2"
+                        and files_value(lines, "location") == f"{files_home}/Downloads", "a second window on Downloads")
+            files_set("close", "now", "closing the second window")
+            files_until(30, lambda lines: files_value(lines, "windows") == "1"
+                        and files_value(lines, "location") == files_documents, "one window again")
+            ok("rift-files with Files running opened a second window in the same app, and it closed again")
+
+            files_set("new-folder", FILES_FOLDER, "a new folder, named in its dialog")
+            files_until(30, lambda lines: files_value(lines, "dialog") == "new-folder"
+                        and files_value(lines, "dialog-name") == FILES_FOLDER, "the dialog for a new folder")
+            shot(f"{stem}-files-new-folder{extension}", "files-new-folder")
+            files_set("confirm", "now", "Create")
+            files_until(30, lambda lines: f"row folder {FILES_FOLDER}" in lines and f"selected {FILES_FOLDER}" in lines
+                        and files_value(lines, "dialog") == "none", "the new folder, selected")
+            _, files_said = run(f"test -d ~/Documents/{FILES_FOLDER}; and echo made; or echo missing", "the new folder")
+            if "made" not in without_console(files_said):
+                fail(f"Files lists {FILES_FOLDER} and there is no such folder in Documents")
+
+            files_select(FILES_NOTE)
+            files_set("copy", "now", "Copy")
+            files_until(20, lambda lines: files_value(lines, "clipboard") == "copy 1", "a file on the clipboard")
+            files_set("activate", FILES_FOLDER, f"{FILES_FOLDER} opened")
+            files_until(30, lambda lines: files_value(lines, "location") == f"{files_documents}/{FILES_FOLDER}"
+                        and files_value(lines, "ready") == "yes", f"the window on {FILES_FOLDER}")
+            files_set("paste", "now", "Paste")
+            files_until(60, lambda lines: f"row file {FILES_NOTE}" in lines, f"{FILES_NOTE} pasted into {FILES_FOLDER}")
+            _, files_said = run(f"cmp ~/Documents/{FILES_NOTE} ~/Documents/{FILES_FOLDER}/{FILES_NOTE}; "
+                                "and echo same; or echo differ", "the copy against the original")
+            if "same" not in without_console(files_said):
+                fail(f"the copy of {FILES_NOTE} is not the same as the original: {without_console(files_said).strip()!r}")
+
+            files_select(FILES_NOTE)
+            files_set("rename", FILES_RENAMED, "a new name, typed in its dialog")
+            files_until(30, lambda lines: files_value(lines, "dialog") == "rename"
+                        and files_value(lines, "dialog-name") == FILES_RENAMED, "the dialog for a new name")
+            files_set("confirm", "now", "Rename")
+            files_until(30, lambda lines: f"row file {FILES_RENAMED}" in lines and f"row file {FILES_NOTE}" not in lines,
+                        f"{FILES_NOTE} called {FILES_RENAMED}")
+            ok(f"a folder made in its dialog, {FILES_NOTE} copied and pasted into it the same as the original, "
+               f"and the copy renamed {FILES_RENAMED}")
+
+            files_select(FILES_RENAMED)
+            files_set("trash", "now", "Move to trash")
+            files_until(30, lambda lines: f"row file {FILES_RENAMED}" not in lines and files_value(lines, "trash") == "full",
+                        f"{FILES_RENAMED} in the trash")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            shot(f"{stem}-files-trashed{extension}", "files-trashed")
+            _, files_note = run(f"cat ~/.local/share/Trash/info/{FILES_RENAMED}.trashinfo; "
+                                f"ls ~/.local/share/Trash/files", "the trash's note")
+            files_note = without_console(files_note)
+            if (f"Path={files_documents}/{FILES_FOLDER}/{FILES_RENAMED}" not in files_note
+                    or "DeletionDate=" not in files_note):
+                fail(f"the trash's note for {FILES_RENAMED} says {files_note.strip()[-400:]!r}")
+            files_set("undo", "now", "Undo")
+            files_until(30, lambda lines: f"row file {FILES_RENAMED}" in lines and files_value(lines, "trash") == "empty",
+                        f"{FILES_RENAMED} back from the trash")
+            ok(f"{FILES_RENAMED} went into the trash with the note every GTK app writes, and Undo put it back")
+
+            files_select(FILES_RENAMED)
+            files_set("trash", "now", "Move to trash again")
+            files_until(30, lambda lines: files_value(lines, "trash") == "full", f"{FILES_RENAMED} in the trash again")
+            files_set("place", "trash", "the trash in the sidebar")
+            files_until(30, lambda lines: files_value(lines, "location") == "trash" and
+                        f"row file {FILES_RENAMED} from {files_documents}/{FILES_FOLDER}/{FILES_RENAMED}" in lines,
+                        "the trash's own view")
+            shot(f"{stem}-files-trash{extension}", "files-trash")
+            files_set("empty", "now", "Empty trash")
+            files_until(30, lambda lines: files_value(lines, "dialog") == "empty", "the question before the trash is emptied")
+            shot(f"{stem}-files-empty{extension}", "files-empty")
+            files_set("confirm", "now", "Empty trash")
+            files_until(60, lambda lines: files_value(lines, "rows") == "0" and files_value(lines, "trash") == "empty",
+                        "an empty trash")
+            _, files_left = run("find ~/.local/share/Trash -mindepth 2 | wc -l", "what is left in the trash")
+            if without_console(files_left).strip().splitlines()[-1:] != ["0"]:
+                fail(f"the trash still holds {without_console(files_left).strip()!r} things after it was emptied")
+            ok(f"the trash listed {FILES_RENAMED} with where it was, and emptying it left nothing behind")
+
+            files_set("place", "documents", "Documents in the sidebar")
+            files_until(30, lambda lines: files_value(lines, "location") == files_documents
+                        and files_value(lines, "ready") == "yes", "Documents again")
+            files_select(FILES_NOTE)
+            files_set("menu", "selection", "the menu of the selection")
+            files_until(30, lambda lines: files_value(lines, "menu") == "selection", "the menu of the selection")
+            shot(f"{stem}-files-menu{extension}", "files-menu")
+            files_set("escape", "now", "Escape")
+            files_until(20, lambda lines: files_value(lines, "menu") == "none", "the menu closed")
+
+            run(f"cp /run/current-system/sw/share/backgrounds/rift/{PICTURE}.jpg ~/Pictures/", "a photograph in Pictures")
+            files_set("place", "pictures", "Pictures in the sidebar")
+            files_until(30, lambda lines: files_value(lines, "location") == f"{files_home}/Pictures"
+                        and f"row file {PICTURE}.jpg" in lines, "the photograph in Pictures")
+            files_set("activate", f"{PICTURE}.jpg", "the photograph, pressed twice")
+            if not wait_for(180, lambda: app_windows("loupe", "the image viewer's window")):
+                _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"Files opened no image viewer for {PICTURE}.jpg: {without_console(output).strip()[-800:]!r}")
+            _, files_scopes = run("systemctl --user list-units --type=scope --no-legend --plain | cat", "the apps' scopes")
+            if "app-rift-org.gnome.Loupe-" not in without_console(files_scopes):
+                fail(f"the image viewer Files opened is in no scope of its own: {without_console(files_scopes).strip()[-600:]!r}")
+            close_app("the image viewer", "loupe")
+            ok(f"{PICTURE}.jpg opened in the image viewer, the app for its kind, in a scope of its own")
+
+            files_set("close", "now", "Files' close button")
+            if not wait_for(60, lambda: not app_windows(FILES_APP_ID, "Files' window after it closed")):
+                fail("Files' window did not close")
+            _, files_unit = run(f"systemctl --user is-active {FILES_UNIT} | cat", "the unit xdg-open ran in")
+            if without_console(files_unit).strip().splitlines()[-1:] == ["active"]:
+                fail("xdg-open's unit is still active after the last window of Files closed")
+            ok("the last window of Files closed, and with it the app and the xdg-open that started it")
 
             # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again
