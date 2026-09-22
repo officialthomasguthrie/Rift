@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use iced::futures::channel::oneshot;
 use iced::widget::operation::{self, AbsoluteOffset};
 use iced::{Point, Task, window};
 use librift::apps::{self, App};
 use librift::defaults::{Found, entry_id};
+use librift::drives;
 use librift::files::trash::Trash;
 use librift::files::{self, Kind, Sort, free_name, mime};
 
@@ -224,21 +226,24 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
             Task::none()
         }
         Act::Restore => {
-            let names = chosen_names(state, id);
-            if names.is_empty() {
+            let files = chosen_files(state, id);
+            if files.is_empty() {
                 return Task::none();
             }
-            ui::start_job(state, Some(id), Work::Restore(names))
+            ui::start_job(state, Some(id), Work::Restore(files))
         }
         Act::Forget => {
             if let Some(browser) = state.windows.get_mut(&id)
                 && browser.location == Location::Trash
             {
                 let chosen = browser.chosen();
-                let names: Vec<OsString> = chosen.iter().map(|entry| entry.name.clone()).collect();
+                let files: Vec<PathBuf> = chosen
+                    .iter()
+                    .map(|entry| PathBuf::from(&entry.name))
+                    .collect();
                 let labels = chosen.iter().map(|entry| entry.label.clone()).collect();
-                if !names.is_empty() {
-                    browser.dialog = Some(Dialog::Forget { names, labels });
+                if !files.is_empty() {
+                    browser.dialog = Some(Dialog::Forget { files, labels });
                 }
             }
             Task::none()
@@ -251,6 +256,8 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
             }
             Task::none()
         }
+        Act::Mount(drive) => disk(state, id, &drive, Doing::Mount),
+        Act::Eject(drive) => disk(state, id, &drive, Doing::Eject),
         Act::SelectAll => {
             if let Some(browser) = state.windows.get_mut(&id) {
                 browser.select_all();
@@ -282,7 +289,7 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
         Act::Close => window::close(id),
         Act::Reload => {
             if let Some(browser) = state.windows.get_mut(&id) {
-                browser.stamp = ui::stamp(&browser.location);
+                browser.stamp = Vec::new();
             }
             ui::read(state, id)
         }
@@ -298,12 +305,12 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
 }
 
 /// The names of the selected rows.
-fn chosen_names(state: &Files, id: window::Id) -> Vec<OsString> {
+fn chosen_files(state: &Files, id: window::Id) -> Vec<PathBuf> {
     state.windows.get(&id).map_or_else(Vec::new, |browser| {
         browser
             .chosen()
             .iter()
-            .map(|entry| entry.name.clone())
+            .map(|entry| PathBuf::from(&entry.name))
             .collect()
     })
 }
@@ -510,16 +517,51 @@ pub fn pasted(state: &mut Files, id: window::Id, text: Option<&str>) -> Task<Mes
     else {
         return Task::none();
     };
-    let work = if clip.cut {
-        state.clipboard = None;
-        Work::Move {
+    // what is already there under the same name. nothing is written over without being asked
+    let taken: Vec<String> = clip
+        .paths
+        .iter()
+        .filter(|path| !(clip.cut && path.parent() == Some(into.as_path())))
+        .filter_map(|path| path.file_name())
+        .filter(|name| fs::symlink_metadata(into.join(name)).is_ok())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    if taken.is_empty() {
+        return transfer(state, id, clip.paths, into, clip.cut, false);
+    }
+    if let Some(browser) = state.windows.get_mut(&id) {
+        browser.dialog = Some(Dialog::Replace {
             from: clip.paths,
             into,
+            moving: clip.cut,
+            names: taken,
+        });
+    }
+    Task::none()
+}
+
+/// Copy or move what was on the clipboard into a folder, and let the clipboard go when it was
+/// cut, since a cut is pasted once.
+fn transfer(
+    state: &mut Files,
+    id: window::Id,
+    from: Vec<PathBuf>,
+    into: PathBuf,
+    moving: bool,
+    replace: bool,
+) -> Task<Message> {
+    let work = if moving {
+        state.clipboard = None;
+        Work::Move {
+            from,
+            into,
+            replace,
         }
     } else {
         Work::Copy {
-            from: clip.paths,
+            from,
             into,
+            replace,
         }
     };
     ui::start_job(state, Some(id), work)
@@ -538,7 +580,10 @@ fn trash(state: &mut Files, id: window::Id) -> Task<Message> {
     if paths.is_empty() {
         return Task::none();
     }
-    let takes = Trash::home().is_some_and(|trash| paths.iter().all(|path| trash.takes(path)));
+    let uid = files::uid();
+    let takes = paths
+        .iter()
+        .all(|path| Trash::for_path(path, uid).is_some());
     if !takes {
         browser.dialog = Some(Dialog::Delete {
             paths,
@@ -628,7 +673,7 @@ fn go_to_path(state: &mut Files, id: window::Id, path: &Path) -> Option<Task<Mes
 
 /// Take back what a job did: what it moved to the trash comes back, once.
 fn undo(state: &mut Files, id: window::Id, number: u64) -> Task<Message> {
-    let names = state
+    let files = state
         .jobs
         .iter_mut()
         .find(|job| job.number == number)
@@ -638,10 +683,10 @@ fn undo(state: &mut Files, id: window::Id, number: u64) -> Task<Message> {
     if let Some(browser) = state.windows.get_mut(&id) {
         browser.toast = None;
     }
-    if names.is_empty() {
+    if files.is_empty() {
         return Task::none();
     }
-    ui::start_job(state, Some(id), Work::Restore(names))
+    ui::start_job(state, Some(id), Work::Restore(files))
 }
 
 /// The default button of the dialog that is open.
@@ -687,16 +732,47 @@ pub fn confirm(state: &mut Files, id: window::Id) -> Task<Message> {
             }
         }
         Dialog::Delete { paths, .. } => ui::start_job(state, Some(id), Work::Delete(paths)),
-        Dialog::Forget { names, .. } => ui::start_job(state, Some(id), Work::Forget(names)),
-        Dialog::Empty => ui::start_job(state, Some(id), Work::Empty),
+        Dialog::Forget { files, .. } => ui::start_job(state, Some(id), Work::Forget(files)),
+        Dialog::Empty => {
+            let roots = state
+                .trashes()
+                .iter()
+                .map(|trash| trash.root().to_path_buf())
+                .collect();
+            ui::start_job(state, Some(id), Work::Empty(roots))
+        }
+        // its default button keeps both, which is what the job does when nothing is replaced
+        Dialog::Replace {
+            from, into, moving, ..
+        } => transfer(state, id, from, into, moving, false),
     }
+}
+
+/// The other answer to the question before a name is replaced: what is there goes to the trash
+/// and the new one takes its name.
+pub fn replace(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(Dialog::Replace {
+        from, into, moving, ..
+    }) = state
+        .windows
+        .get_mut(&id)
+        .and_then(|browser| browser.dialog.take())
+    else {
+        return Task::none();
+    };
+    transfer(state, id, from, into, moving, true)
 }
 
 /// Read the folder again now, and select a name in it once it has been read.
 fn reread_selecting(state: &mut Files, id: window::Id, name: OsString) -> Task<Message> {
+    let now = state
+        .windows
+        .get(&id)
+        .map(|browser| ui::stamp(state, &browser.location))
+        .unwrap_or_default();
     if let Some(browser) = state.windows.get_mut(&id) {
         browser.select_after = vec![name];
-        browser.stamp = ui::stamp(&browser.location);
+        browser.stamp = now;
     }
     ui::read(state, id)
 }
@@ -828,15 +904,20 @@ pub fn job_step(state: &mut Files, number: u64, step: Step) -> Task<Message> {
     let mut tasks = Vec::new();
     let ids: Vec<window::Id> = state.windows.keys().copied().collect();
     for id in ids {
+        let now = state
+            .windows
+            .get(&id)
+            .map(|browser| ui::stamp(state, &browser.location))
+            .unwrap_or_default();
         if let Some(browser) = state.windows.get_mut(&id) {
             if Some(id) == started_in && made_into.as_deref() == browser.location.folder() {
                 browser.select_after.clone_from(&made);
             }
-            browser.stamp = ui::stamp(&browser.location);
+            browser.stamp = now;
         }
         tasks.push(ui::read(state, id));
     }
-    state.trash_full = Trash::home().is_some_and(|trash| trash.count() > 0);
+    state.trash_full = state.anything_trashed();
     match started_in.filter(|id| state.windows.contains_key(id)) {
         Some(id) => tasks.push(toast(state, id, said, undo)),
         None => tell(&said),
@@ -888,6 +969,10 @@ pub fn set(state: &mut Files, name: &str, value: &str) -> Task<Message> {
             return go_to_path(state, id, &path).unwrap_or_else(Task::none);
         }
         ("place", _) => return place(state, id, value),
+        ("drive", _) => return by_name(state, id, value, Doing::Mount),
+        ("unmount", _) => return by_name(state, id, value, Doing::Unmount),
+        ("eject", _) => return by_name(state, id, value, Doing::Eject),
+        ("replace", _) => Message::Replace(id),
         ("select", Some(at)) => {
             if let Some(browser) = state.windows.get_mut(&id) {
                 browser.select_only(at);
@@ -980,10 +1065,90 @@ fn named_act(word: &str, value: &str) -> Option<Act> {
     })
 }
 
+/// What a press on a disk in the sidebar starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Doing {
+    /// Mount it and go there.
+    Mount,
+    /// Unmount it.
+    Unmount,
+    /// Unmount everything on it and eject it.
+    Eject,
+}
+
+/// Mount, unmount or eject a disk, on a thread of its own: udisks reads the file system before it
+/// answers, and an unmount writes out everything that was waiting.
+fn disk(state: &mut Files, id: window::Id, drive: &str, doing: Doing) -> Task<Message> {
+    let Some(volume) = state.drive(drive) else {
+        return Task::none();
+    };
+    if volume.locked || state.working.iter().any(|busy| busy == drive) {
+        return Task::none();
+    }
+    state.working.push(drive.to_string());
+    let name = drive.to_string();
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let done = match doing {
+            Doing::Mount => drives::mount(&name).map(Some),
+            Doing::Unmount => drives::unmount(&name).map(|()| None),
+            Doing::Eject => drives::eject(&name).map(|()| None),
+        };
+        let _ = sender.send(Message::Disk(Some(id), name, Box::new(done)));
+    });
+    Task::perform(receiver, move |said| said.unwrap_or(Message::CloseMenu(id)))
+}
+
+/// A disk was mounted, unmounted or ejected, or it was not. A disk that was just mounted opens in
+/// the window that asked for it, and udisks is asked again at once, rather than waiting for it to
+/// say something on its own.
+pub fn disk_done(
+    state: &mut Files,
+    id: Option<window::Id>,
+    drive: &str,
+    done: Result<Option<PathBuf>, String>,
+) -> Task<Message> {
+    state.working.retain(|busy| busy != drive);
+    let name = state
+        .drive(drive)
+        .map_or_else(|| "The disk".to_string(), |volume| volume.name.clone());
+    let here = id.filter(|id| state.windows.contains_key(id));
+    let mut tasks = vec![look_at_disks()];
+    match (done, here) {
+        (Ok(Some(mount)), Some(id)) => tasks.push(ui::go(state, id, Location::Folder(mount))),
+        // unmounted and ejected: everything on it is written out, so it can be pulled out
+        (Ok(None), Some(id)) => {
+            tasks.push(toast(state, id, format!("{name} can be taken out."), None));
+        }
+        (Err(why), Some(id)) => tasks.push(toast(state, id, why, None)),
+        (Err(why), None) => eprintln!("rift-files: {why}"),
+        (Ok(_), None) => {}
+    }
+    Task::batch(tasks)
+}
+
+/// Ask udisks what is there now, on a thread of its own.
+fn look_at_disks() -> Task<Message> {
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let _ = sender.send(Message::Drives(drives::volumes().unwrap_or_default()));
+    });
+    Task::perform(receiver, |said| {
+        said.unwrap_or_else(|_| Message::Drives(Vec::new()))
+    })
+}
+
 /// Go to a place of the sidebar by its word.
 fn place(state: &mut Files, id: window::Id, word: &str) -> Task<Message> {
     if word == "trash" {
         return ui::go(state, id, Location::Trash);
+    }
+    if word == "exchange" {
+        let path = state.exchange.clone();
+        return path.map_or_else(Task::none, |path| ui::go(state, id, Location::Folder(path)));
+    }
+    if state.drives.iter().any(|drive| drive.name == word) {
+        return by_name(state, id, word, Doing::Mount);
     }
     let path = state
         .places
@@ -991,6 +1156,19 @@ fn place(state: &mut Files, id: window::Id, word: &str) -> Task<Message> {
         .find(|place| place.word == word)
         .map(|place| place.path.clone());
     path.map_or_else(Task::none, |path| ui::go(state, id, Location::Folder(path)))
+}
+
+/// Mount, unmount or eject the disk the sidebar calls this, which is how `--set drive`, `--set
+/// unmount` and `--set eject` name one. A disk that is mounted already is opened instead.
+fn by_name(state: &mut Files, id: window::Id, name: &str, doing: Doing) -> Task<Message> {
+    let Some(drive) = state.drives.iter().find(|drive| drive.name == name) else {
+        return Task::none();
+    };
+    let (drive_id, mount) = (drive.id.clone(), drive.mount.clone());
+    match (doing, mount) {
+        (Doing::Mount, Some(mount)) => ui::go(state, id, Location::Folder(mount)),
+        _ => disk(state, id, &drive_id, doing),
+    }
 }
 
 /// Open a menu by its word, where a press in the middle of the list would open it.

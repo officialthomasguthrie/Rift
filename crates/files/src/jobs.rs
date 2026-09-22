@@ -1,9 +1,10 @@
 //! The work that takes a while: copying, moving, the trash and deleting. Each job runs on a thread
 //! of its own and says how far it has got, and the app goes on while it does, closed windows and
 //! all, until every job is done. Nothing is ever written over: a copy or a move into a folder that
-//! already has the name gets a name of its own beside it.
+//! already has the name gets a name of its own beside it, and when the owner asks to replace what
+//! is there, what is there goes to the trash first, so it can still be brought back.
 
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,8 @@ pub enum Work {
         from: Vec<PathBuf>,
         /// Where to.
         into: PathBuf,
+        /// Whether a name that is taken is replaced, what was there going to the trash.
+        replace: bool,
     },
     /// Move these into a folder.
     Move {
@@ -40,17 +43,19 @@ pub enum Work {
         from: Vec<PathBuf>,
         /// Where to.
         into: PathBuf,
+        /// Whether a name that is taken is replaced, what was there going to the trash.
+        replace: bool,
     },
-    /// Move these into the trash.
+    /// Move these into the trash: the one in home, or the drive's own.
     Trash(Vec<PathBuf>),
     /// Delete these for good.
     Delete(Vec<PathBuf>),
-    /// Put these back from the trash, by their names there.
-    Restore(Vec<OsString>),
-    /// Delete these in the trash for good, by their names there.
-    Forget(Vec<OsString>),
-    /// Delete everything in the trash for good.
-    Empty,
+    /// Put these back from the trash, each by where it lies in the trash it is in.
+    Restore(Vec<PathBuf>),
+    /// Delete these in the trash for good, each by where it lies in the trash it is in.
+    Forget(Vec<PathBuf>),
+    /// Delete everything in these trashes for good.
+    Empty(Vec<PathBuf>),
 }
 
 /// How a job ended.
@@ -58,10 +63,12 @@ pub enum Work {
 pub struct Outcome {
     /// Where each thing it copied, moved or put back ended up.
     pub made: Vec<PathBuf>,
-    /// The names in the trash of what it moved there, for Undo.
-    pub trashed: Vec<OsString>,
+    /// Where what it moved to the trash lies there, for Undo.
+    pub trashed: Vec<PathBuf>,
     /// How many things it did.
     pub count: usize,
+    /// How many names it replaced, what was there going to the trash.
+    pub replaced: usize,
     /// The first thing that went wrong.
     pub problem: Option<String>,
     /// Whether it was stopped before the end.
@@ -137,17 +144,17 @@ impl Work {
     #[must_use]
     pub fn doing(&self) -> String {
         match self {
-            Self::Copy { from, into } => {
+            Self::Copy { from, into, .. } => {
                 format!("Copying {} to {}", things(from), files::shown(into))
             }
-            Self::Move { from, into } => {
+            Self::Move { from, into, .. } => {
                 format!("Moving {} to {}", things(from), files::shown(into))
             }
             Self::Trash(from) => format!("Moving {} to the trash", things(from)),
             Self::Delete(from) => format!("Deleting {}", things(from)),
             Self::Restore(names) => format!("Putting back {}", count_words(names.len())),
             Self::Forget(names) => format!("Deleting {}", count_words(names.len())),
-            Self::Empty => "Emptying the trash".to_string(),
+            Self::Empty(_) => "Emptying the trash".to_string(),
         }
     }
 
@@ -165,8 +172,12 @@ impl Work {
             }
         };
         let what = match self {
-            Self::Copy { from, into } => format!("Copied {} to {}", made(from), files::shown(into)),
-            Self::Move { from, into } => format!("Moved {} to {}", made(from), files::shown(into)),
+            Self::Copy { from, into, .. } => {
+                format!("Copied {} to {}", made(from), files::shown(into))
+            }
+            Self::Move { from, into, .. } => {
+                format!("Moved {} to {}", made(from), files::shown(into))
+            }
             Self::Trash(from) => format!("Moved {} to the trash", things(from)),
             Self::Delete(from) => format!("Deleted {}", things(from)),
             Self::Restore(_) if outcome.made.len() == 1 => format!(
@@ -178,13 +189,18 @@ impl Work {
             ),
             Self::Restore(names) => format!("Put back {}", count_words(names.len())),
             Self::Forget(names) => format!("Deleted {}", count_words(names.len())),
-            Self::Empty => "Emptied the trash".to_string(),
+            Self::Empty(_) => "Emptied the trash".to_string(),
+        };
+        let old = match outcome.replaced {
+            0 => String::new(),
+            1 => " The one that was there is in the trash.".to_string(),
+            many => format!(" The {many} that were there are in the trash."),
         };
         match (outcome.stopped, outcome.made.is_empty(), self) {
             (true, true, Self::Move { .. }) => "Stopped. Nothing was moved.".to_string(),
             (true, true, _) => "Stopped. Nothing was copied.".to_string(),
-            (true, false, _) => format!("Stopped. {what}."),
-            (false, _, _) => format!("{what}."),
+            (true, false, _) => format!("Stopped. {what}.{old}"),
+            (false, _, _) => format!("{what}.{old}"),
         }
     }
 
@@ -271,34 +287,44 @@ enum Halt {
 fn run(work: &Work, stop: &AtomicBool, said: &mut Said, offset: i32) -> Outcome {
     let mut outcome = Outcome::default();
     match work {
-        Work::Copy { from, into } => {
+        Work::Copy {
+            from,
+            into,
+            replace,
+        } => {
             said.send(Step::Counted(from.iter().map(|path| bytes(path)).sum()));
-            transfer(from, into, stop, said, &mut outcome, false);
+            let how = How {
+                moving: false,
+                replace: *replace,
+                in_bytes: true,
+                offset,
+            };
+            transfer(from, into, stop, said, &mut outcome, how);
         }
-        Work::Move { from, into } => {
-            said.send(Step::Counted(from.len() as u64));
-            transfer(from, into, stop, said, &mut outcome, true);
+        Work::Move {
+            from,
+            into,
+            replace,
+        } => {
+            // a move onto another disk copies every byte, so it counts them; one within a disk is
+            // a rename each, and counting the things is what shows how far it has got
+            let in_bytes = crossing(from, into);
+            said.send(Step::Counted(if in_bytes {
+                from.iter().map(|path| bytes(path)).sum()
+            } else {
+                from.len() as u64
+            }));
+            let how = How {
+                moving: true,
+                replace: *replace,
+                in_bytes,
+                offset,
+            };
+            transfer(from, into, stop, said, &mut outcome, how);
         }
         Work::Trash(from) => {
             said.send(Step::Counted(from.len() as u64));
-            let trash = Trash::home();
-            let now = librift::time::now();
-            for source in from {
-                let put = trash
-                    .as_ref()
-                    .ok_or_else(|| "There is no home to keep the trash in.".to_string())
-                    .and_then(|trash| trash.put(source, now, offset));
-                match put {
-                    Ok(trashed) => {
-                        outcome.trashed.push(trashed.name);
-                        outcome.count += 1;
-                    }
-                    Err(why) => {
-                        outcome.problem.get_or_insert(why);
-                    }
-                }
-                said.add(1);
-            }
+            into_the_trash(from, said, &mut outcome, offset);
         }
         Work::Delete(from) => {
             said.send(Step::Counted(from.len() as u64));
@@ -312,17 +338,15 @@ fn run(work: &Work, stop: &AtomicBool, said: &mut Said, offset: i32) -> Outcome 
                 said.add(1);
             }
         }
-        Work::Restore(names) | Work::Forget(names) => {
-            said.send(Step::Counted(names.len() as u64));
-            let Some(trash) = Trash::home() else {
-                outcome.problem = Some("There is no home to keep the trash in.".to_string());
-                return outcome;
-            };
-            for name in names {
-                let done = if matches!(work, Work::Restore(_)) {
-                    trash.restore(name).map(|back| outcome.made.push(back))
-                } else {
-                    trash.delete(name)
+        Work::Restore(files) | Work::Forget(files) => {
+            said.send(Step::Counted(files.len() as u64));
+            for file in files {
+                let done = match Trash::of(file) {
+                    Some((trash, name)) if matches!(work, Work::Restore(_)) => {
+                        trash.restore(&name).map(|back| outcome.made.push(back))
+                    }
+                    Some((trash, name)) => trash.delete(&name),
+                    None => Err(format!("{} is not in the trash.", file.display())),
                 };
                 match done {
                     Ok(()) => outcome.count += 1,
@@ -333,39 +357,97 @@ fn run(work: &Work, stop: &AtomicBool, said: &mut Said, offset: i32) -> Outcome 
                 said.add(1);
             }
         }
-        Work::Empty => {
-            said.send(Step::Counted(1));
-            match Trash::home().map(|trash| trash.empty()) {
-                Some(Ok(())) => outcome.count = 1,
-                Some(Err(why)) => outcome.problem = Some(why),
-                None => {
-                    outcome.problem = Some("There is no home to keep the trash in.".to_string());
+        Work::Empty(roots) => {
+            said.send(Step::Counted(roots.len() as u64));
+            for root in roots {
+                match Trash::at(root.clone()).empty() {
+                    Ok(()) => outcome.count += 1,
+                    Err(why) => {
+                        outcome.problem.get_or_insert(why);
+                    }
                 }
+                said.add(1);
             }
-            said.add(1);
         }
     }
     outcome
 }
 
-/// Copy or move each of `from` into a folder, until the job is stopped. A move counts things as it
-/// goes, a copy bytes.
+/// Move each of these to the trash: the one in home for anything on home's file system, and the
+/// drive's own for anything on a drive.
+fn into_the_trash(from: &[PathBuf], said: &mut Said, outcome: &mut Outcome, offset: i32) {
+    let now = librift::time::now();
+    let uid = files::uid();
+    for source in from {
+        let put = Trash::for_path(source, uid)
+            .ok_or_else(|| {
+                format!(
+                    "{} is on a disk with no trash.",
+                    source
+                        .file_name()
+                        .unwrap_or(source.as_os_str())
+                        .to_string_lossy()
+                )
+            })
+            .and_then(|trash| trash.put(source, now, offset));
+        match put {
+            Ok(trashed) => {
+                outcome.trashed.push(trashed.file());
+                outcome.count += 1;
+            }
+            Err(why) => {
+                outcome.problem.get_or_insert(why);
+            }
+        }
+        said.add(1);
+    }
+}
+
+/// How a copy or a move goes.
+#[derive(Debug, Clone, Copy)]
+struct How {
+    /// Whether it moves what it copies.
+    moving: bool,
+    /// Whether a name that is taken is replaced, what was there going to the trash first.
+    replace: bool,
+    /// Whether it counts bytes rather than things.
+    in_bytes: bool,
+    /// The local zone's distance from UTC, for the note the trash writes.
+    offset: i32,
+}
+
+/// Copy or move each of `from` into a folder, until the job is stopped.
 fn transfer(
     from: &[PathBuf],
     into: &Path,
     stop: &AtomicBool,
     said: &mut Said,
     outcome: &mut Outcome,
-    moving: bool,
+    how: How,
 ) {
     for source in from {
-        let done = if moving {
-            move_into(source, into, stop, said)
+        // what a rename moves in one go, which no copy will count
+        let whole = if how.moving && how.in_bytes {
+            bytes(source)
         } else {
-            copy_into(source, into, stop, said)
+            0
+        };
+        let taken = how.replace
+            && source
+                .file_name()
+                .is_some_and(|name| fs::symlink_metadata(into.join(name)).is_ok());
+        let before = said.done;
+        let done = if how.moving {
+            move_into(source, into, stop, said, how)
+        } else {
+            copy_into(source, into, stop, said, how)
         };
         match done {
             Ok(made) => {
+                // it kept the name only because what was there went to the trash
+                if taken && made.file_name() == source.file_name() {
+                    outcome.replaced += 1;
+                }
                 outcome.made.push(made);
                 outcome.count += 1;
             }
@@ -377,10 +459,42 @@ fn transfer(
                 outcome.problem.get_or_insert(why);
             }
         }
-        if moving {
-            said.add(1);
+        if how.moving {
+            if how.in_bytes {
+                said.add(whole.saturating_sub(said.done - before));
+            } else {
+                said.add(1);
+            }
         }
     }
+}
+
+/// Whether any of these is on another file system from the folder they are going to, which is
+/// what makes a move a copy.
+fn crossing(from: &[PathBuf], into: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(target) = fs::metadata(into) else {
+        return false;
+    };
+    from.iter()
+        .any(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.dev() != target.dev()))
+}
+
+/// Where something of this name goes in a folder: its own name when it is free, and a name of its
+/// own beside it when it is not. When the owner asked to replace what is there, what is there goes
+/// to the trash first, so the name is free again and nothing a person had is written over; if that
+/// disk has no trash, it keeps both after all.
+fn free_target(into: &Path, name: &OsStr, copy: bool, how: How) -> PathBuf {
+    if how.replace {
+        let taken = into.join(name);
+        if fs::symlink_metadata(&taken).is_ok()
+            && let Some(trash) = Trash::for_path(&taken, files::uid())
+        {
+            let _ = trash.put(&taken, librift::time::now(), how.offset);
+        }
+    }
+    into.join(free_name(into, name, copy))
 }
 
 /// How many bytes a copy of this will write: a file's size, a folder's files together, and
@@ -410,6 +524,7 @@ fn copy_into(
     into: &Path,
     stop: &AtomicBool,
     said: &mut Said,
+    how: How,
 ) -> Result<PathBuf, Halt> {
     let name = source
         .file_name()
@@ -420,7 +535,7 @@ fn copy_into(
             name.to_string_lossy()
         )));
     }
-    let target = into.join(free_name(into, name, true));
+    let target = free_target(into, name, true, how);
     copy_whole(source, &target, stop, said)?;
     Ok(target)
 }
@@ -447,6 +562,7 @@ fn move_into(
     into: &Path,
     stop: &AtomicBool,
     said: &mut Said,
+    how: How,
 ) -> Result<PathBuf, Halt> {
     let name = source
         .file_name()
@@ -460,19 +576,24 @@ fn move_into(
             name.to_string_lossy()
         )));
     }
-    let target = into.join(free_name(into, name, false));
+    let target = free_target(into, name, false, how);
     match rename_new(source, &target) {
         Ok(()) => Ok(target),
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
-            // another file system, so a copy, and the original goes once the copy is whole. the
-            // move counts things, not bytes, so the copy says nothing of its own
-            let mut quiet = Said {
-                sender: said.sender.clone(),
-                number: said.number,
-                done: 0,
-                last: Instant::now(),
-            };
-            copy_whole(source, &target, stop, &mut quiet)?;
+            // another file system, so a copy, and the original goes once the copy is whole. a move
+            // onto another disk counts bytes, so the copy says how it is going; one that counts
+            // things says nothing of its own
+            if how.in_bytes {
+                copy_whole(source, &target, stop, said)?;
+            } else {
+                let mut quiet = Said {
+                    sender: said.sender.clone(),
+                    number: said.number,
+                    done: 0,
+                    last: Instant::now(),
+                };
+                copy_whole(source, &target, stop, &mut quiet)?;
+            }
             remove(source).map_err(Halt::Failed)?;
             Ok(target)
         }
@@ -601,6 +722,17 @@ mod tests {
         root
     }
 
+    /// A copy or a move that keeps both when a name is taken, which is what a paste does until
+    /// the owner answers the question with Replace.
+    fn both(moving: bool) -> How {
+        How {
+            moving,
+            replace: false,
+            in_bytes: !moving,
+            offset: 0,
+        }
+    }
+
     fn quiet() -> (Said, mpsc::UnboundedReceiver<Message>) {
         let (sender, receiver) = mpsc::unbounded();
         (
@@ -623,8 +755,14 @@ mod tests {
         fs::create_dir(root.join("Backup")).unwrap();
         let (mut said, _heard) = quiet();
         let stop = AtomicBool::new(false);
-        let made = copy_into(&root.join("Notes"), &root.join("Backup"), &stop, &mut said)
-            .unwrap_or_else(|_| panic!("the copy"));
+        let made = copy_into(
+            &root.join("Notes"),
+            &root.join("Backup"),
+            &stop,
+            &mut said,
+            both(false),
+        )
+        .unwrap_or_else(|_| panic!("the copy"));
         assert_eq!(made, root.join("Backup/Notes"));
         assert_eq!(
             fs::read_to_string(root.join("Backup/Notes/inside/a.txt")).unwrap(),
@@ -635,13 +773,25 @@ mod tests {
             Path::new("inside/a.txt")
         );
         // again, and the second copy has a name of its own
-        let again = copy_into(&root.join("Notes"), &root.join("Backup"), &stop, &mut said)
-            .unwrap_or_else(|_| panic!("the second copy"));
+        let again = copy_into(
+            &root.join("Notes"),
+            &root.join("Backup"),
+            &stop,
+            &mut said,
+            both(false),
+        )
+        .unwrap_or_else(|_| panic!("the second copy"));
         assert_eq!(again, root.join("Backup/Notes (copy)"));
         assert_eq!(said.done, 2);
         // and a folder never goes into itself
         assert!(matches!(
-            copy_into(&root.join("Notes"), &root.join("Notes/inside"), &stop, &mut said),
+            copy_into(
+                &root.join("Notes"),
+                &root.join("Notes/inside"),
+                &stop,
+                &mut said,
+                both(false)
+            ),
             Err(Halt::Failed(why)) if why == "Notes cannot be copied into itself."
         ));
         let _ = fs::remove_dir_all(&root);
@@ -655,7 +805,13 @@ mod tests {
         let (mut said, _heard) = quiet();
         let stop = AtomicBool::new(true);
         assert!(matches!(
-            copy_into(&root.join("big"), &root.join("to"), &stop, &mut said),
+            copy_into(
+                &root.join("big"),
+                &root.join("to"),
+                &stop,
+                &mut said,
+                both(false)
+            ),
             Err(Halt::Stopped)
         ));
         assert!(!root.join("to/big").exists());
@@ -671,8 +827,14 @@ mod tests {
         fs::write(root.join("b/x.txt"), "there before").unwrap();
         let (mut said, _heard) = quiet();
         let stop = AtomicBool::new(false);
-        let made = move_into(&root.join("a/x.txt"), &root.join("b"), &stop, &mut said)
-            .unwrap_or_else(|_| panic!("the move"));
+        let made = move_into(
+            &root.join("a/x.txt"),
+            &root.join("b"),
+            &stop,
+            &mut said,
+            both(true),
+        )
+        .unwrap_or_else(|_| panic!("the move"));
         assert_eq!(made, root.join("b/x (2).txt"));
         assert_eq!(
             fs::read_to_string(root.join("b/x.txt")).unwrap(),
@@ -680,9 +842,51 @@ mod tests {
         );
         assert!(!root.join("a/x.txt").exists());
         // into the folder it is in already is nothing to do
-        let still = move_into(&made, &root.join("b"), &stop, &mut said)
+        let still = move_into(&made, &root.join("b"), &stop, &mut said, both(true))
             .unwrap_or_else(|_| panic!("the move"));
         assert_eq!(still, made);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn what_is_replaced_goes_to_the_trash_and_the_name_is_free() {
+        let root = temporary("replace");
+        fs::create_dir_all(root.join(".Trash-0/files")).unwrap();
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        fs::write(root.join("a/x.txt"), "new").unwrap();
+        fs::write(root.join("b/x.txt"), "there before").unwrap();
+        let (mut said, _heard) = quiet();
+        let stop = AtomicBool::new(false);
+        let mut outcome = Outcome::default();
+        let how = How {
+            moving: false,
+            replace: true,
+            in_bytes: true,
+            offset: 0,
+        };
+        transfer(
+            &[root.join("a/x.txt")],
+            &root.join("b"),
+            &stop,
+            &mut said,
+            &mut outcome,
+            how,
+        );
+        assert_eq!(outcome.made, vec![root.join("b/x.txt")]);
+        assert_eq!(outcome.replaced, 1);
+        assert_eq!(fs::read_to_string(root.join("b/x.txt")).unwrap(), "new");
+        // the old one is in the trash of the file system it was on, not written over
+        let trash = Trash::for_path(&root.join("b/x.txt"), files::uid()).expect("a trash");
+        let was = fs::canonicalize(&root).unwrap().join("b/x.txt");
+        let found = trash
+            .list(0)
+            .into_iter()
+            .find(|item| item.path == was)
+            .expect("the one that was there, in the trash");
+        assert_eq!(found.label(), "x.txt");
+        // and the test leaves nothing behind in it
+        trash.delete(&found.name).unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -693,6 +897,7 @@ mod tests {
         let copy = Work::Copy {
             from: two.clone(),
             into: PathBuf::from("/home/rift/Documents"),
+            replace: false,
         };
         assert_eq!(copy.doing(), "Copying 2 items to Documents");
         let done = Outcome {
@@ -715,8 +920,22 @@ mod tests {
             ..Outcome::default()
         };
         assert_eq!(
-            Work::Restore(vec![OsString::from("report.pdf")]).done(&back),
+            Work::Restore(vec![PathBuf::from(
+                "/home/rift/.local/share/Trash/files/report.pdf"
+            )])
+            .done(&back),
             "Put report.pdf back in Documents."
+        );
+        // and what it replaced is in the trash, so it is still there to bring back
+        let over = Outcome {
+            count: 2,
+            made: two,
+            replaced: 1,
+            ..Outcome::default()
+        };
+        assert_eq!(
+            copy.done(&over),
+            "Copied 2 items to Documents. The one that was there is in the trash."
         );
         let broke = Outcome {
             problem: Some("a could not be copied: Permission denied.".to_string()),
@@ -726,6 +945,6 @@ mod tests {
             copy.done(&broke),
             "a could not be copied: Permission denied."
         );
-        assert!(copy.stoppable() && !Work::Empty.stoppable());
+        assert!(copy.stoppable() && !Work::Empty(Vec::new()).stoppable());
     }
 }

@@ -17,8 +17,9 @@ use iced::keyboard::{self, Modifiers};
 use iced::widget::scrollable::Viewport;
 use iced::{Point, Size, Subscription, Task, Theme, event, mouse, theme, window};
 use librift::appearance::Look;
+use librift::drives::{self, Volume};
 use librift::files::places::{self, Place};
-use librift::files::trash::{Trash, Trashed};
+use librift::files::trash::{self as bin, Trash, Trashed};
 use librift::files::{self, Entry, Options, Sort, mime};
 
 use crate::browser::{Browser, Location};
@@ -38,6 +39,9 @@ const HEIGHT: f32 = 640.0;
 
 /// How often the folders on screen are looked at for a change.
 const LOOK: Duration = Duration::from_secs(1);
+
+/// What a place's own folders said when they were last read: each one's time and size.
+pub type Stamp = Vec<(i64, i64, u64)>;
 
 /// What the app is started with.
 #[derive(Debug, Default)]
@@ -76,6 +80,13 @@ pub struct Files {
     pub types: Arc<mime::Database>,
     /// Home and the folders the sidebar lists.
     pub places: Vec<Place>,
+    /// The disks a person plugged in, as udisks last said.
+    pub drives: Vec<Volume>,
+    /// The drive's own exchange partition, when it has one and the system has mounted it.
+    pub exchange: Option<PathBuf>,
+    /// The disks being mounted, unmounted or ejected at the moment, by what names them on the bus,
+    /// so a row says what it is doing and is not pressed twice.
+    pub working: Vec<String>,
     /// What was cut or copied last.
     pub clipboard: Option<Clip>,
     /// The jobs that are running, and the ones that ended, for Undo.
@@ -143,6 +154,10 @@ pub enum Act {
     Undo(u64),
     /// Stop this job.
     Stop(u64),
+    /// Mount this disk and go to it.
+    Mount(String),
+    /// Unmount everything on this disk and eject it.
+    Eject(String),
 }
 
 /// What a press, a key, a line on the socket or a job asks for.
@@ -188,6 +203,8 @@ pub enum Message {
     Typed(window::Id, String),
     /// The dialog's default button.
     Confirm(window::Id),
+    /// The other answer to the question before a name is replaced.
+    Replace(window::Id),
     /// The dialog's Cancel.
     Cancel(window::Id),
     /// What is typed in the path bar.
@@ -222,6 +239,15 @@ pub enum Message {
     Shot(window::Screenshot),
     /// A window has opened.
     Opened(window::Id),
+    /// What udisks says is plugged in now.
+    Drives(Vec<Volume>),
+    /// A disk was mounted, unmounted or ejected, or it was not: which one, what was being done,
+    /// and where it went or what went wrong.
+    Disk(
+        Option<window::Id>,
+        String,
+        Box<Result<Option<PathBuf>, String>>,
+    ),
 }
 
 /// Run until the last window is closed and no job is running.
@@ -297,15 +323,19 @@ fn boot(start: &Start) -> (Files, Task<Message>) {
         options: Options::read(),
         types: Arc::new(mime::Database::load()),
         places: places::places(),
+        drives: Vec::new(),
+        exchange: drives::exchange(),
+        working: Vec::new(),
         clipboard: None,
         jobs: Vec::new(),
         offset: files::utc_offset(),
-        trash_full: Trash::home().is_some_and(|trash| trash.count() > 0),
+        trash_full: false,
         modifiers: Modifiers::empty(),
         screenshot: start.screenshot.clone(),
         picture: None,
         shooting: false,
     };
+    state.trash_full = state.anything_trashed();
     let work: Vec<Task<Message>> = if start.open.is_empty() {
         vec![open_window(&mut state, home_location(), None)]
     } else {
@@ -357,7 +387,7 @@ pub fn open_window(
     let (id, opened) = window::open(settings(state.screenshot.is_some()));
     state.opened += 1;
     let mut browser = Browser::new(state.opened, location, Size::new(WIDTH, HEIGHT));
-    browser.stamp = stamp(&browser.location);
+    browser.stamp = stamp(state, &browser.location);
     if let Some(name) = select {
         browser.select_after = vec![name];
     }
@@ -396,6 +426,7 @@ pub fn read(state: &Files, id: window::Id) -> Task<Message> {
     let location = browser.location.clone();
     let types = Arc::clone(&state.types);
     let offset = state.offset;
+    let bins = state.trashes();
     let (sender, receiver) = oneshot::channel();
     thread::spawn(move || {
         let message = match &location {
@@ -403,32 +434,73 @@ pub fn read(state: &Files, id: window::Id) -> Task<Message> {
                 let found = files::read(path, &types);
                 Message::Read(id, location, Box::new(found))
             }
-            Location::Trash => Message::TrashRead(
-                id,
-                Trash::home()
-                    .map(|trash| trash.list(offset))
-                    .unwrap_or_default(),
-            ),
+            Location::Trash => {
+                let mut found: Vec<Trashed> =
+                    bins.iter().flat_map(|trash| trash.list(offset)).collect();
+                bin::newest_first(&mut found);
+                Message::TrashRead(id, found)
+            }
         };
         let _ = sender.send(message);
     });
     Task::perform(receiver, move |said| said.unwrap_or(Message::CloseMenu(id)))
 }
 
-/// What a place's own entry says when it was last changed, to tell when something in it changes:
-/// the folder's time and size, or the trash's notes folder's.
+/// What a place's own entries say when they were last changed, to tell when something in them
+/// changes: the folder's time and size, or every trash's notes folder's.
 #[must_use]
-pub fn stamp(location: &Location) -> Option<(i64, i64, u64)> {
+pub fn stamp(state: &Files, location: &Location) -> Stamp {
     use std::os::unix::fs::MetadataExt;
-    let path = match location {
-        Location::Folder(path) => path.clone(),
-        Location::Trash => Trash::home()?.root().join("info"),
+    let folders: Vec<PathBuf> = match location {
+        Location::Folder(path) => vec![path.clone()],
+        Location::Trash => state
+            .trashes()
+            .iter()
+            .map(|trash| trash.root().join("info"))
+            .collect(),
     };
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.mtime(), meta.mtime_nsec(), meta.len()))
+    folders
+        .iter()
+        .filter_map(|folder| std::fs::metadata(folder).ok())
+        .map(|meta| (meta.mtime(), meta.mtime_nsec(), meta.len()))
+        .collect()
 }
 
 impl Files {
+    /// The tops of the file systems a drive's own trash can be at: the exchange partition of the
+    /// drive, and every disk that is mounted.
+    #[must_use]
+    pub fn tops(&self) -> Vec<PathBuf> {
+        self.exchange
+            .iter()
+            .cloned()
+            .chain(self.drives.iter().filter_map(|drive| drive.mount.clone()))
+            .collect()
+    }
+
+    /// Every trash the owner's things can be in: the one in home, and the one at the top of each
+    /// drive that is mounted.
+    #[must_use]
+    pub fn trashes(&self) -> Vec<Trash> {
+        let uid = files::uid();
+        Trash::home()
+            .into_iter()
+            .chain(self.tops().iter().map(|top| Trash::on(top, uid)))
+            .collect()
+    }
+
+    /// Whether anything is in any of them.
+    #[must_use]
+    pub fn anything_trashed(&self) -> bool {
+        self.trashes().iter().any(|trash| trash.count() > 0)
+    }
+
+    /// The disk this names, when udisks still says it is there.
+    #[must_use]
+    pub fn drive(&self, id: &str) -> Option<&Volume> {
+        self.drives.iter().find(|drive| drive.id == id)
+    }
+
     /// The colours the windows are drawn in.
     #[must_use]
     pub fn colors(&self) -> Colors {
@@ -472,7 +544,28 @@ impl Files {
                 ),
                 None => "clipboard none".to_string(),
             },
+            match &self.exchange {
+                Some(path) => format!("exchange {}", path.display()),
+                None => "exchange none".to_string(),
+            },
         ];
+        for drive in &self.drives {
+            lines.push(format!(
+                "drive {} {} {}",
+                drive.name,
+                if drive.locked {
+                    "locked"
+                } else if drive.mounted() {
+                    "mounted"
+                } else {
+                    "there"
+                },
+                drive
+                    .mount
+                    .as_ref()
+                    .map_or_else(|| "none".to_string(), |path| path.display().to_string()),
+            ));
+        }
         for job in self.jobs.iter().filter(|job| job.running()) {
             lines.push(format!("job {} {}", job.number, job.percent()));
         }
@@ -535,6 +628,7 @@ fn handle(state: &mut Files, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Confirm(id) => actions::confirm(state, id),
+        Message::Replace(id) => actions::replace(state, id),
         Message::Cancel(id) => {
             if let Some(browser) = state.windows.get_mut(&id) {
                 browser.dialog = None;
@@ -562,6 +656,8 @@ fn handle(state: &mut Files, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Tick => tick(state),
+        Message::Drives(found) => drives_read(state, found),
+        Message::Disk(id, drive, done) => actions::disk_done(state, id, &drive, *done),
         Message::Job(number, step) => actions::job_step(state, number, step),
         Message::ToastGone(id, number) => {
             if let Some(browser) = state.windows.get_mut(&id)
@@ -657,7 +753,10 @@ pub fn go(state: &mut Files, id: window::Id, location: Location) -> Task<Message
         return Task::none();
     };
     browser.go(location);
-    browser.stamp = stamp(&browser.location);
+    let now = stamp(state, &state.windows[&id].location);
+    if let Some(browser) = state.windows.get_mut(&id) {
+        browser.stamp = now;
+    }
     read(state, id)
 }
 
@@ -669,7 +768,10 @@ pub fn travel(state: &mut Files, id: window::Id, way: fn(&mut Browser) -> bool) 
     if !way(browser) {
         return Task::none();
     }
-    browser.stamp = stamp(&browser.location);
+    let now = stamp(state, &state.windows[&id].location);
+    if let Some(browser) = state.windows.get_mut(&id) {
+        browser.stamp = now;
+    }
     read(state, id)
 }
 
@@ -688,7 +790,10 @@ pub fn up(state: &mut Files, id: window::Id) -> Task<Message> {
     let name = name.to_owned();
     browser.go(Location::Folder(parent));
     browser.select_after = vec![name];
-    browser.stamp = stamp(&browser.location);
+    let now = stamp(state, &state.windows[&id].location);
+    if let Some(browser) = state.windows.get_mut(&id) {
+        browser.stamp = now;
+    }
     read(state, id)
 }
 
@@ -722,24 +827,53 @@ fn arrived(
     Task::batch([shown, shoot(state)])
 }
 
+/// What udisks says is plugged in now. A drive coming or going takes its own trash with it, so a
+/// window on the trash reads it again.
+fn drives_read(state: &mut Files, found: Vec<Volume>) -> Task<Message> {
+    if state.drives == found {
+        return Task::none();
+    }
+    // a disk that is gone is no longer being worked on
+    let still: Vec<String> = state
+        .working
+        .iter()
+        .filter(|id| found.iter().any(|drive| &&drive.id == id))
+        .cloned()
+        .collect();
+    state.working = still;
+    state.drives = found;
+    state.trash_full = state.anything_trashed();
+    let showing: Vec<window::Id> = state
+        .windows
+        .iter()
+        .filter(|(_, browser)| browser.location == Location::Trash)
+        .map(|(id, _)| *id)
+        .collect();
+    Task::batch(showing.into_iter().map(|id| read(state, id)))
+}
+
 /// Look at every window's place for a change, and at the trash and the colours.
 fn tick(state: &mut Files) -> Task<Message> {
     let look = Look::read();
     if look != state.look {
         state.look = look;
     }
-    state.trash_full = Trash::home().is_some_and(|trash| trash.count() > 0);
-    let changed: Vec<window::Id> = state
+    state.exchange = drives::exchange();
+    state.trash_full = state.anything_trashed();
+    let stamps: Vec<(window::Id, Stamp)> = state
         .windows
-        .iter_mut()
-        .filter_map(|(id, browser)| {
-            let now = stamp(&browser.location);
-            (now != browser.stamp).then(|| {
-                browser.stamp = now;
-                *id
-            })
-        })
+        .iter()
+        .map(|(id, browser)| (*id, stamp(state, &browser.location)))
         .collect();
+    let mut changed = Vec::new();
+    for (id, now) in stamps {
+        if let Some(browser) = state.windows.get_mut(&id)
+            && now != browser.stamp
+        {
+            browser.stamp = now;
+            changed.push(id);
+        }
+    }
     Task::batch(changed.into_iter().map(|id| read(state, id)))
 }
 
@@ -782,6 +916,7 @@ fn subscription(state: &Files) -> Subscription<Message> {
     if state.screenshot.is_none() {
         followed.push(terminal());
         followed.push(ticking());
+        followed.push(disks());
     }
     Subscription::batch(followed)
 }
@@ -827,6 +962,34 @@ fn ticking() -> Subscription<Message> {
                 }
             }
         });
+        receiver
+    })
+}
+
+/// The disks a person plugs in, read from udisks now and again whenever it says something has
+/// changed. Without udisks, which is every machine that is not a Rift drive, the watch fails, is
+/// tried again after a few seconds, and the list stays empty.
+fn disks() -> Subscription<Message> {
+    Subscription::run_with("disks", |_| {
+        let (sender, receiver) = mpsc::unbounded();
+        librift::bus::follow(
+            |poke| {
+                // the watch is tried again every few seconds, and a machine with no udisks would
+                // say the same thing for ever, so it is said once
+                let said = std::sync::atomic::AtomicBool::new(false);
+                librift::bus::listen(
+                    poke,
+                    |each: &mut dyn FnMut() -> bool| drives::watch(each),
+                    move |why| {
+                        if !said.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            eprintln!("rift-files: {why}");
+                        }
+                    },
+                );
+            },
+            || drives::volumes().unwrap_or_default(),
+            move |found| sender.unbounded_send(Message::Drives(found)).is_ok(),
+        );
         receiver
     })
 }

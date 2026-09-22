@@ -1,6 +1,7 @@
-//! The dialogs: a name for a new folder, a new name for a file, and the question before anything is
-//! deleted for good. Each stands in the middle of its window with the rest of the window dimmed
-//! behind it, the way GNOME's dialogs do: a title, one sentence or a field, and two buttons.
+//! The dialogs: a name for a new folder, a new name for a file, the question before a name is
+//! replaced, and the question before anything is deleted for good. Each stands in the middle of its
+//! window with the rest of the window dimmed behind it, the way GNOME's dialogs do: a title, one
+//! sentence or a field, and the answers along the bottom.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -41,13 +42,24 @@ pub enum Dialog {
     },
     /// Delete these in the trash for good.
     Forget {
-        /// Their names in the trash.
-        names: Vec<OsString>,
+        /// Where each of them lies in the trash it is in.
+        files: Vec<PathBuf>,
         /// The names they had, for the question.
         labels: Vec<String>,
     },
     /// Empty the trash.
     Empty,
+    /// A copy or a move whose name is already taken in the folder it is going to.
+    Replace {
+        /// What is being copied or moved.
+        from: Vec<PathBuf>,
+        /// Where to.
+        into: PathBuf,
+        /// Whether it is a move.
+        moving: bool,
+        /// The names that are taken there.
+        names: Vec<String>,
+    },
 }
 
 impl Dialog {
@@ -65,6 +77,7 @@ impl Dialog {
             } => "no-trash",
             Self::Forget { .. } => "forget",
             Self::Empty => "empty",
+            Self::Replace { .. } => "replace",
         }
     }
 
@@ -198,6 +211,12 @@ pub fn view<'a>(
                 destructive(look, "Delete", ready),
             )
         }
+        Dialog::Replace {
+            into,
+            moving,
+            names,
+            ..
+        } => replacing(look, id, into, *moving, names, cancel, ready),
         Dialog::Forget { labels, .. } => {
             let said = if labels.len() == 1 {
                 "It cannot be brought back."
@@ -219,6 +238,45 @@ pub fn view<'a>(
             vec![cancel, destructive(look, "Empty trash", ready)],
         ),
     }
+}
+
+/// The question before a name in the folder is replaced. Keeping both is the default answer, the
+/// way nothing in Rift is ever written over without being asked; Replace puts what is there in
+/// the trash first, so it can still be brought back.
+fn replacing<'a>(
+    look: Colors,
+    id: window::Id,
+    into: &Path,
+    moving: bool,
+    names: &[String],
+    cancel: Element<'a, Message>,
+    ready: Option<Message>,
+) -> Element<'a, Message> {
+    let title = match names {
+        [one] => format!("Replace {one}?"),
+        more => format!("Replace {} items?", more.len()),
+    };
+    let what = if names.len() == 1 {
+        "It is"
+    } else {
+        "They are"
+    };
+    let doing = if moving { "moved" } else { "copied" };
+    let said = format!(
+        "{what} in {} already. What is there goes to the trash, and what is {doing} takes the name.",
+        librift::files::shown(into)
+    );
+    let body: Element<'a, Message> = text(said).size(TEXT_SIZE).color(look.text).into();
+    dialog(
+        look,
+        title,
+        vec![body],
+        vec![
+            cancel,
+            action(look, "Replace", Some(Message::Replace(id))),
+            primary(look, "Keep both", ready),
+        ],
+    )
 }
 
 /// The question before something is deleted for good: its name, or how many there are.

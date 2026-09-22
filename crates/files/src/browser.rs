@@ -76,7 +76,8 @@ pub struct Browser {
     pub read: Vec<Entry>,
     /// What the list shows, in its order: the folder without what is hidden, or the trash.
     pub rows: Vec<Entry>,
-    /// Where each thing in the trash was, by its name there.
+    /// Where each thing in the trash was, by where it lies in the trash it is in, which is the
+    /// name its row carries: two trashes can hold the same name.
     pub origins: HashMap<OsString, PathBuf>,
     /// Whether the folder has been read since the window went there.
     pub ready: bool,
@@ -108,8 +109,9 @@ pub struct Browser {
     pub toast: Option<Toast>,
     /// How many toasts the window has shown.
     pub toasts: u64,
-    /// What the folder's own entry said when it was last read, to tell when it changes.
-    pub stamp: Option<(i64, i64, u64)>,
+    /// What the place's own entries said when they were last read, to tell when one changes: the
+    /// folder's, or every trash's.
+    pub stamp: crate::ui::Stamp,
     /// Names to select once the folder has been read again: what was just made, pasted or left.
     pub select_after: Vec<OsString>,
 }
@@ -141,7 +143,7 @@ impl Browser {
             typing: None,
             toast: None,
             toasts: 0,
-            stamp: None,
+            stamp: Vec::new(),
             select_after: Vec::new(),
         }
     }
@@ -193,7 +195,7 @@ impl Browser {
         self.scroll = 0.0;
         self.menu = None;
         self.typing = None;
-        self.stamp = None;
+        self.stamp.clear();
         self.select_after.clear();
     }
 
@@ -210,12 +212,13 @@ impl Browser {
     pub fn show_trash(&mut self, trashed: Vec<Trashed>, types: &mime::Database, options: Options) {
         self.origins = trashed
             .iter()
-            .map(|item| (item.name.clone(), item.path.clone()))
+            .map(|item| (item.file().into_os_string(), item.path.clone()))
             .collect();
         self.read = trashed
             .into_iter()
             .map(|item| {
                 let label = item.label();
+                let name = item.file().into_os_string();
                 let mime = match item.kind {
                     Kind::Folder => "inode/directory".to_string(),
                     _ => types
@@ -224,7 +227,7 @@ impl Browser {
                         .to_string(),
                 };
                 Entry {
-                    name: item.name,
+                    name,
                     label,
                     kind: item.kind,
                     link: false,

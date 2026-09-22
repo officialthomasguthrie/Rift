@@ -1,11 +1,13 @@
 //! How a window is drawn: the header bar along the top with the way back and forward and the path
-//! of the folder, the places down the left, the list beside them, and over the list whatever stands
-//! there for a moment: the progress of a job, a toast, what is selected, a menu or a dialog.
+//! of the folder, the places and the drives down the left, the list beside them, and over the list
+//! whatever stands there for a moment: the progress of a job, a toast, what is selected, a menu or
+//! a dialog.
 
 use std::path::{Path, PathBuf};
 
 use iced::widget::{button, column, container, mouse_area, opaque, pin, row, space, stack, text};
 use iced::{Border, Center, Color, Element, Fill, Length, Theme, window};
+use librift::drives::{self, Volume};
 
 use crate::actions::PATIENCE;
 use crate::browser::{Browser, Location};
@@ -28,6 +30,8 @@ pub const HEADER: f32 = 45.0;
 pub const LIST_TOP: f32 = HEADER + 1.0 + HEADS + 1.0;
 /// How tall a row of the sidebar is.
 const SIDE_ROW: f32 = 34.0;
+/// How much of a row the eject button takes at its right end.
+const EJECT: f32 = 30.0;
 /// How many parts of a path the path bar shows before it leaves out the middle.
 const CRUMBS: usize = 5;
 
@@ -298,7 +302,9 @@ fn crumb<'a>(
     pressable.into()
 }
 
-/// The places, one row each, the one the window shows in the accent, and the trash last.
+/// The places, one row each, then the exchange partition of the drive and the disks that are
+/// plugged in, then the trash, the way GNOME's Files lists them. The place the window shows is in
+/// the accent.
 fn sidebar<'a>(
     state: &'a Files,
     id: window::Id,
@@ -313,8 +319,24 @@ fn sidebar<'a>(
             place.icon,
             place.name.clone(),
             here,
-            Message::Go(id, Location::Folder(place.path.clone())),
+            Some(Message::Go(id, Location::Folder(place.path.clone()))),
         ));
+    }
+    if !state.drives.is_empty() || state.exchange.is_some() {
+        rows = rows.push(space().height(8.0));
+    }
+    if let Some(path) = &state.exchange {
+        // the drive's own, mounted by the system, so it is a folder and never a disk to eject
+        rows = rows.push(side_row(
+            look,
+            "drive-harddisk-symbolic",
+            drives::EXCHANGE_NAME.to_string(),
+            under(browser, path),
+            Some(Message::Go(id, Location::Folder(path.clone()))),
+        ));
+    }
+    for drive in &state.drives {
+        rows = rows.push(drive_row(state, id, browser, look, drive));
     }
     rows = rows.push(space().height(8.0));
     rows = rows.push(side_row(
@@ -326,7 +348,7 @@ fn sidebar<'a>(
         },
         "Trash".to_string(),
         browser.location == Location::Trash,
-        Message::Go(id, Location::Trash),
+        Some(Message::Go(id, Location::Trash)),
     ));
     row![
         container(scroll(look, rows).height(Fill))
@@ -338,13 +360,93 @@ fn sidebar<'a>(
     .into()
 }
 
+/// Whether a window is showing a folder on this drive.
+fn under(browser: &Browser, mount: &Path) -> bool {
+    browser
+        .location
+        .folder()
+        .is_some_and(|folder| folder.starts_with(mount))
+}
+
+/// One disk in the sidebar: a press mounts it, or opens it when it is mounted already, and the
+/// button at its right end unmounts it and ejects it, so the stick can be pulled out. A locked
+/// disk is dimmed: Rift can see it and cannot open it yet.
+fn drive_row<'a>(
+    state: &Files,
+    id: window::Id,
+    browser: &Browser,
+    look: Colors,
+    drive: &Volume,
+) -> Element<'a, Message> {
+    let busy = state.working.contains(&drive.id);
+    let here = drive
+        .mount
+        .as_deref()
+        .is_some_and(|mount| under(browser, mount));
+    let name = if drive.locked {
+        format!("{} (locked)", drive.name)
+    } else {
+        drive.name.clone()
+    };
+    let press = (!drive.locked && !busy).then(|| match &drive.mount {
+        Some(mount) => Message::Go(id, Location::Folder(mount.clone())),
+        None => Message::Do(id, Act::Mount(drive.id.clone())),
+    });
+    let row = side_row_with(look, drive.icon, name, here, press, EJECT);
+    if !drive.mounted() {
+        return row;
+    }
+    let colour = if here { look.on_accent } else { look.text };
+    let eject = button(icons::symbolic(colour, "media-eject-symbolic", 16.0))
+        .padding(6)
+        .on_press_maybe((!busy).then(|| Message::Do(id, Act::Eject(drive.id.clone()))))
+        .style(move |_: &Theme, status| button::Style {
+            background: Some(
+                match status {
+                    button::Status::Hovered | button::Status::Pressed => look.hover,
+                    _ => Color::TRANSPARENT,
+                }
+                .into(),
+            ),
+            text_color: colour,
+            border: Border {
+                radius: 4.0.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        });
+    container(stack![
+        row,
+        container(eject)
+            .width(Fill)
+            .height(Length::Fixed(SIDE_ROW))
+            .align_right(Fill)
+            .center_y(Fill)
+            .padding([0, 4]),
+    ])
+    .height(Length::Fixed(SIDE_ROW))
+    .into()
+}
+
 /// One row of the sidebar, the way Settings draws its own.
 fn side_row<'a>(
     look: Colors,
     icon: &str,
     label: String,
     here: bool,
-    press: Message,
+    press: Option<Message>,
+) -> Element<'a, Message> {
+    side_row_with(look, icon, label, here, press, 0.0)
+}
+
+/// The same row with room kept at its right end for a button that stands over it.
+fn side_row_with<'a>(
+    look: Colors,
+    icon: &str,
+    label: String,
+    here: bool,
+    press: Option<Message>,
+    trailing: f32,
 ) -> Element<'a, Message> {
     let colour = if here { look.on_accent } else { look.text };
     // a button lays its content out at the top of its box, so the row is centred by hand
@@ -352,7 +454,15 @@ fn side_row<'a>(
         container(
             row![
                 icons::symbolic(colour, icon, 16.0),
-                text(label).size(TEXT_SIZE).color(colour),
+                container(
+                    text(label)
+                        .size(TEXT_SIZE)
+                        .color(colour)
+                        .wrapping(text::Wrapping::None)
+                )
+                .width(Fill)
+                .clip(true),
+                space().width(trailing),
             ]
             .align_y(Center)
             .spacing(10),
@@ -362,7 +472,7 @@ fn side_row<'a>(
     .width(Fill)
     .height(Length::Fixed(SIDE_ROW))
     .padding([0, 10])
-    .on_press(press)
+    .on_press_maybe(press)
     .style(move |_: &Theme, status| button::Style {
         background: Some(
             match (here, status) {
