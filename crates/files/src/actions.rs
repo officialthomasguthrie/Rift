@@ -288,8 +288,13 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
         }
         Act::Close => window::close(id),
         Act::Reload => {
+            let now = state
+                .windows
+                .get(&id)
+                .map(|browser| ui::stamp(state, &browser.location))
+                .unwrap_or_default();
             if let Some(browser) = state.windows.get_mut(&id) {
-                browser.stamp = Vec::new();
+                browser.stamp = now;
             }
             ui::read(state, id)
         }
@@ -304,7 +309,7 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
     }
 }
 
-/// The names of the selected rows.
+/// Where each selected row lies, which in the trash is its path in the trash it is in.
 fn chosen_files(state: &Files, id: window::Id) -> Vec<PathBuf> {
     state.windows.get(&id).map_or_else(Vec::new, |browser| {
         browser
