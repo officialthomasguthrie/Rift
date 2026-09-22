@@ -498,7 +498,7 @@ jobs:
           mkfs.ext4 -q -F -L backup backup.img
           # a memory stick for Files: one exfat file system, the way a stick is sold, with nothing
           # on it. Files mounts it through udisks when its row in the sidebar is pressed
-          truncate -s 64M stick.img
+          truncate -s 256M stick.img
           nix shell --inputs-from . nixpkgs#exfatprogs -c mkfs.exfat -L STICK stick.img
           # the disk the clone goes onto. sparse, the clone fills about 7G of it, and the runner has
           # more than 80G free. the first drive has an exchange partition, so the clone gets one too
