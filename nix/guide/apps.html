@@ -22,11 +22,12 @@ Node.js, Go, Zig and Java, the usual debuggers, Podman for containers, and the t
 expect at a prompt.</p>
 
 <h2>Installing more</h2>
-<p>Apps you install come from Flathub as Flatpaks, and they are stored on your side of the drive, so
-they follow you from machine to machine. Until Rift has a window for that, install one at a prompt.
-The first line is needed once, on a new drive:</p>
-<pre><code>flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install flathub org.videolan.VLC</code></pre>
+<p>Apps you install come from Flathub as Flatpaks. They are stored on the drive, beside your home
+folder rather than in it, so they follow you from machine to machine and stay out of your backups.</p>
+<p>Welcome, in the Applications menu, lists the apps Rift suggests with the size of each and whether it
+needs an account. Tick the ones you want and press Install; they go on installing if you close
+Welcome. Any other app on Flathub installs at a prompt, since Flathub is set up on every drive:</p>
+<pre><code>flatpak install flathub org.videolan.VLC</code></pre>
 <p>A Flatpak app runs in a sandbox of its own and reaches the desktop through portals, so when it
 asks for a file or the camera you see the question and answer it.</p>
 

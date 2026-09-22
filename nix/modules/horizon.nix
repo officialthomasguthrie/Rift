@@ -143,6 +143,12 @@ let
         match app-id=r#"^dev\.rift\.Settings$"#
         default-column-width { proportion 0.75; }
     }
+    // welcome opens over the desktop in the middle of the screen, at the size it asks for, and
+    // nothing else moves for it
+    window-rule {
+        match app-id=r#"^dev\.rift\.Welcome$"#
+        open-floating true
+    }
 
     ${lib.concatMapStringsSep "\n" (
       command: "spawn-at-startup " + lib.concatMapStringsSep " " (word: ''"${word}"'') command
