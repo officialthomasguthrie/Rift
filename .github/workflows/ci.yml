@@ -508,10 +508,12 @@ jobs:
       - name: Boot a drive that makes persist at its first boot
         # rift-flash leaves persist out, the way it writes a drive on macos and windows. the drive
         # asks for a passphrase over serial, makes persist and formats its exchange partition, and the
-        # next boot opens that persist with the same passphrase
+        # next boot opens that persist with the same passphrase. the vm has no network card, so
+        # welcome opens on the page that says there is no network, at both logins
         run: |
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --first-boot --exchange 1G \
-            --log first-boot.log --splash first-boot-splash.png --timeout 900
+            --log first-boot.log --splash first-boot-splash.png --offline desktop-welcome-offline.png \
+            --timeout 900
       - name: Boot with the graphical style
         # the kernel command line picks the other theme, through a SMBIOS string systemd-stub reads. the
         # splash check is the graphical one, and the drive powers off once the shell is up

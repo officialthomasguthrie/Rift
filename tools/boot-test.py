@@ -4,7 +4,8 @@ runs this after it builds the image.
 
 Usage: boot-test.py <rift-vm> <image> <passfile> [--models dir] [--exchange size] [--timeout 600]
        [--log serial.log] [--splash splash.png] [--desktop desktop.png] [--lens] [--updates updates.img]
-       [--backup backup.img] [--clone clone.img] [--first-boot] [--boot-style]
+       [--backup backup.img] [--clone clone.img] [--flatpak dir] [--first-boot] [--offline png]
+       [--boot-style]
 
 With --first-boot rift-flash writes the drive without persist, the way it writes one on macOS and
 Windows, and the drive makes persist when it first starts. The test answers its questions over serial: a
@@ -14,6 +15,11 @@ up to the drive's own: the slots, luks2 with argon2id, the subvolumes, the owner
 partition. Persist has one key slot and the system runs with the machine id in @var. After a reboot the
 drive asks systemd-cryptsetup's question, not the first boot's, and opens the same persist with the same
 passphrase: the same uuids, machine id, key slots and partitions. The test ends there.
+
+With --offline as well the vm has no network card. The session starts Welcome on the new drive, and it
+opens on the page that says there is no network, whose screendump is saved as the png --offline names.
+Open later closes it without writing the note that the drive has been welcomed, and after the reboot
+Welcome opens on the same page again.
 
 <rift-vm> is the program from `nix build .#vm` (result/bin/rift-vm). It writes the image, .raw or
 .raw.zst, onto a drive in a file with rift-flash (through sudo), with the passphrase from the passfile
@@ -104,6 +110,14 @@ the splash.
 With --desktop the test checks that greetd is up and takes a screendump of the running session: horizon
 paints its background gray over the whole screen, a console would show black with text. The vm has a
 virtio gpu for this, horizon renders on it in software.
+
+Before that, Welcome: the session starts it on a new drive, and it opens in the middle of the screen on
+its start page. The test takes a screendump of every page, finds flathub among the system installation's
+remotes on its Apps page, which flatpak adds from /etc/flatpak/remotes.d the first time anything uses that
+installation, and presses Done, which writes the note and closes it. With --flatpak the test serves its
+own signed repository later and adds it as a remote, Welcome opened again lists the test's app with its
+size, and the test ticks it and presses Install: the install finishes, flatpak list has the app and its
+runtime in the system installation, and the app is in the Applications menu.
 
 With --lens the desktop check expects lens's bar along the top of that screen: horizon reports a
 layer surface with its namespace, and the screendump has the bar gray with something drawn at its
@@ -384,6 +398,14 @@ MENU_APP_ID = "com.mitchellh.ghostty"
 DOCK_APP = "Helix"
 # the name the test flatpak of nix/test-flatpak.nix is listed under once it is installed
 FLATPAK_APP = "Rift test app"
+# welcome, from crates/welcome: the app id of its window, the note Done writes under home, the size it
+# opens at, which horizon floats in the middle of the screen, and the grays of its header bar and its
+# page on dark, from crates/rift-ui/src/theme.rs
+WELCOME_APP_ID = "dev.rift.Welcome"
+WELCOME_NOTE = "~/.local/state/rift/welcomed"
+WELCOME_SIZE = (880, 640)
+WELCOME_HEADER = (48, 48, 48)
+WELCOME_PAGE = (38, 38, 38)
 # one window of `horizon msg --json windows`, whose fields come in the order niri-ipc declares them
 WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
@@ -1303,6 +1325,25 @@ def check_apps(width, height, rgb, apps, colors=DARK_COLORS, share_wanted=0.4):
     return report("apps", lines, checks)
 
 
+def check_welcome(width, height, rgb):
+    """Welcome's start page, which fills its window: horizon floats the window in the middle of the
+    screen, so a column a little in from its left edge runs down the gray of its header bar and then
+    the page's for most of the window's height."""
+    x = (width - WELCOME_SIZE[0]) // 2 + 40
+    header = page = 0
+    for y in range(height):
+        px = rgb[(y * width + x) * 3:(y * width + x) * 3 + 3]
+        if near(px, WELCOME_HEADER, 2):
+            header += 1
+        elif near(px, WELCOME_PAGE, 2):
+            page += 1
+    checks = [
+        ("the header bar's gray is in the column", header >= 30, f"{header} rows"),
+        ("and the page's under it", page >= WELCOME_SIZE[1] // 2, f"{page} rows"),
+    ]
+    return report("welcome", [f"welcome: a column at x={x} of {width}x{height}"], checks)
+
+
 def screendump(qmp_path, work, name):
     """Take a screendump through the monitor and return (width, height, rgb)."""
     ppm = os.path.join(work, name + ".ppm")
@@ -1380,8 +1421,10 @@ def main():
     ap.add_argument("--backup", help="an empty ext4 image labelled backup, back up home onto it and restore from it")
     ap.add_argument("--clone", help="an empty file of at least 24G, clone the drive onto it as a removable disk "
                     "and boot the clone")
-    ap.add_argument("--flatpak", help="a directory with platform.flatpak and app.flatpak from nix build .#test-flatpak, "
-                    "install them and run the app with the portals")
+    ap.add_argument("--flatpak", help="the directory nix build .#test-flatpak makes, with a signed repository and its "
+                    "key: add it as a remote, install its app from Welcome and run it with the portals")
+    ap.add_argument("--offline", help="boot with no network card, check Welcome opens on the page that says so, save "
+                    "its screendump as this png, and that it opens again after Open later and a reboot")
     args = ap.parse_args()
     if args.boot_style and not args.splash:
         ap.error("--boot-style needs --splash, which names the png its screendumps are saved beside")
@@ -1389,7 +1432,8 @@ def main():
         passphrase = f.read()
 
     work = tempfile.mkdtemp(prefix="rift-boot-")
-    if (args.splash or args.desktop or args.updates or args.first_boot or args.boot_style) and not args.qmp:
+    if (args.splash or args.desktop or args.updates or args.first_boot or args.boot_style or args.offline) \
+            and not args.qmp:
         args.qmp = os.path.join(work, "qmp.sock")
 
     # the app picks kvm or tcg and the firmware. what follows its options replaces its defaults.
@@ -1420,8 +1464,8 @@ def main():
         "-serial", "stdio",
         "-no-reboot",
         # qemu's user network. the vm reaches the host's loopback at 10.0.2.2, where the network switch
-        # step runs a server of its own
-        "-nic", "user,model=virtio-net-pci",
+        # step runs a server of its own. with --offline the vm has no network card at all
+        "-nic", "none" if args.offline else "user,model=virtio-net-pci",
     ]
     if args.qmp:
         cmd += ["-qmp", f"unix:{args.qmp},server,nowait"]
@@ -1530,6 +1574,71 @@ def main():
         if expect([PROMPT, CHOOSE, PASSPHRASE], "the autologin shell after the first boot made persist") != 0:
             fail("the first boot asked for a passphrase again after it had one")
         ok("shell, after the first boot refused a short passphrase and two that differ and made persist")
+
+    def welcome_said(what):
+        """What rift-welcome --state prints, a line each, or None while no Welcome answers."""
+        status, output = run("rift-welcome --state", what)
+        if status != 0:
+            return None
+        return [printed.strip() for printed in without_console(output).splitlines() if printed.strip()]
+
+    def welcome_value(lines, key):
+        """The rest of the first line that starts with this word."""
+        for printed in lines or []:
+            word, _, rest = printed.partition(" ")
+            if word == key:
+                return rest.strip()
+        return None
+
+    def welcome_until(seconds, ready, what):
+        """Ask rift-welcome --state until ready(lines) is true, and answer those lines."""
+        until = time.monotonic() + seconds
+        while True:
+            lines = welcome_said(what)
+            if lines is not None and ready(lines):
+                return lines
+            if time.monotonic() > until:
+                _, output = run("journalctl -b -t welcome -o cat --no-pager | tail -n 20", "Welcome's log")
+                fail(f"Welcome did not come to {what} in {seconds} s, its state is {lines!r}"[:1500]
+                     + f". It logged: {without_console(output).strip()[-1000:]!r}")
+            time.sleep(2)
+
+    def welcome_picture(png, name, check=False):
+        """A screendump of Welcome as it stands, saved as png. With check, taken again until the
+        start page's window is drawn in the middle of the screen."""
+        until = time.monotonic() + 60
+        while True:
+            try:
+                width, height, rgb = screendump(args.qmp, work, name)
+            except (OSError, RuntimeError) as e:
+                fail(f"screendump: {e}")
+            good, lines = check_welcome(width, height, rgb) if check else (True, [])
+            if good or time.monotonic() > until:
+                break
+            time.sleep(2)
+        write_png(png, width, height, rgb)
+        if lines:
+            print("\nboot-test: " + "\nboot-test: ".join(lines), flush=True)
+        if not good:
+            fail(f"Welcome's window is not drawn in the middle of the screen, see {png}")
+
+    def welcome_gone(what):
+        """Wait for Welcome to end: its socket stops answering."""
+        until = time.monotonic() + 60
+        while welcome_said(f"whether Welcome is still there after {what}") is not None:
+            if time.monotonic() > until:
+                fail(f"Welcome is still running after {what}")
+            time.sleep(2)
+
+    def welcome_offline(what, png):
+        """Welcome on the page that says there is no network, as the session opened it."""
+        lines = welcome_until(300, lambda lines: welcome_value(lines, "page") == "offline",
+                              f"the page with no network on {what}")
+        if welcome_value(lines, "network") != "offline" or welcome_value(lines, "welcomed") != "no":
+            fail(f"Welcome says network {welcome_value(lines, 'network')!r} and welcomed "
+                 f"{welcome_value(lines, 'welcomed')!r} on {what}, with no network card")
+        if png:
+            welcome_picture(png, "welcome-offline", check=True)
 
     # 1. the luks prompt, answered over serial. a second prompt means the passphrase was refused. a
     # drive written with --first-boot asks for a new passphrase instead
@@ -2156,6 +2265,18 @@ def main():
             fail("vault-first-boot did not say it formatted the exchange partition")
         ok(f"persist on {first['partitions'][-1][0]} has one key slot, and the system runs with the machine id in @var")
 
+        # with no network card Welcome, which the session starts on a new drive, opens on the page that
+        # says there is no network. Open later closes it without the note, so the next login opens it
+        if args.offline:
+            welcome_offline("the first boot", args.offline)
+            run("rift-welcome --set later now", "Open later on Welcome's page with no network")
+            welcome_gone("Open later")
+            _, output = run(f"test -e {WELCOME_NOTE}; and echo noted; or echo no-note", "Welcome's note")
+            if not re.search(r"^no-note\s*$", without_console(output), re.M):
+                fail("Open later wrote the note that says the drive has been welcomed")
+            ok(f"Welcome opened on the page that says there is no network, see {args.offline}, and Open later "
+               "closed it without the note")
+
         reboot_action("reset")
         child.send("sudo systemctl reboot\r")
         if expect([CHOOSE, PASSPHRASE], "the passphrase prompt of the second boot") == 0:
@@ -2169,6 +2290,9 @@ def main():
         if "Making persist." in printed or "Formatting the exchange partition." in printed:
             fail("vault-first-boot made something again on the second boot")
         ok("the second boot opened the same persist with the same passphrase and made nothing new")
+        if args.offline:
+            welcome_offline("the second boot", None)
+            ok("the next login opened Welcome again on the page that says there is no network")
 
         power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
@@ -2657,6 +2781,61 @@ def main():
                     print(f"\nboot-test: journalctl -t {tag} printed:\n{without_console(output)}", flush=True)
                 fail(f"{what} is not on screen, see {png}")
             ok(what)
+
+        # 5. first, Welcome. horizon starts rift-welcome --login with the session, and on a drive that has
+        # not been welcomed it opens over the desktop, in the middle of the screen, on its start page,
+        # since the vm has a network. the test walks its pages with a screendump of each. its Apps page
+        # asks flatpak, and flathub is a remote of the system installation from the first time anything
+        # uses it. Done writes the note and closes it, and the desktop behind it is what the checks
+        # below expect
+        stem, extension = os.path.splitext(args.desktop)
+        welcome_now = welcome_until(args.desktop_timeout + 180,
+                                    lambda lines: welcome_value(lines, "page") == "start", "its start page")
+        if welcome_value(welcome_now, "network") != "online" or welcome_value(welcome_now, "welcomed") != "no":
+            fail(f"Welcome says network {welcome_value(welcome_now, 'network')!r} and welcomed "
+                 f"{welcome_value(welcome_now, 'welcomed')!r} on a new drive with a network")
+        _, output = run("set -x NIRI_SOCKET (ls -t /run/user/(id -u)/niri.wayland-1.*.sock | head -n1); "
+                        "horizon msg --json windows", "horizon's windows with Welcome up")
+        welcome_windows = [found.group(2) for found in WINDOW.finditer(without_console(output).replace("\n", ""))]
+        if WELCOME_APP_ID not in welcome_windows:
+            fail(f"horizon lists no {WELCOME_APP_ID} window, only {welcome_windows}")
+        welcome_picture(f"{stem}-welcome-start{extension}", "welcome-start", check=True)
+        run("rift-welcome --set next now", "Next on Welcome's start page")
+        welcome_until(30, lambda lines: welcome_value(lines, "page") == "appearance", "its Appearance page")
+        time.sleep(1)
+        welcome_picture(f"{stem}-welcome-appearance{extension}", "welcome-appearance")
+        run("rift-welcome --set next now", "Next on Welcome's Appearance page")
+        welcome_now = welcome_until(
+            150, lambda lines: welcome_value(lines, "page") == "apps"
+            and welcome_value(lines, "remotes") not in (None, "asking", "unknown")
+            and any(printed.startswith("sizes flathub ") for printed in lines), "what flathub has")
+        welcome_remotes = welcome_value(welcome_now, "remotes") or ""
+        if "flathub" not in welcome_remotes.split(","):
+            fail(f"Welcome's Apps page says remotes {welcome_remotes!r}, and the system installation has no flathub")
+        welcome_sizes = next(printed for printed in welcome_now if printed.startswith("sizes flathub "))
+        _, output = run("flatpak remotes --system --columns=name,url | cat", "the system installation's remotes")
+        if not re.search(r"^flathub\s+https://dl\.flathub\.org/repo/\s*$", without_console(output), re.M):
+            fail(f"flatpak remotes does not list flathub at dl.flathub.org: {without_console(output).strip()!r}")
+        time.sleep(1)
+        welcome_picture(f"{stem}-welcome-apps{extension}", "welcome-apps")
+        run("rift-welcome --page developer", "Welcome's Developer page")
+        welcome_until(30, lambda lines: welcome_value(lines, "page") == "developer", "its Developer page")
+        time.sleep(1)
+        welcome_picture(f"{stem}-welcome-developer{extension}", "welcome-developer")
+        run("rift-welcome --set next now", "Next on Welcome's Developer page")
+        welcome_until(30, lambda lines: welcome_value(lines, "page") == "done", "its Done page")
+        time.sleep(1)
+        welcome_picture(f"{stem}-welcome-done{extension}", "welcome-done")
+        run("rift-welcome --set done now", "Done")
+        welcome_gone("Done")
+        _, output = run(f"test -e {WELCOME_NOTE}; and echo noted; or echo no-note", "Welcome's note")
+        if not re.search(r"^noted\s*$", without_console(output), re.M):
+            fail("Done did not write the note that says the drive has been welcomed")
+        _, output = run("horizon msg --json windows", "horizon's windows after Done")
+        if WELCOME_APP_ID in without_console(output):
+            fail("Welcome's window is still there after Done")
+        ok(f"Welcome opened in the middle of the screen on its start page, its Apps page found flathub among the "
+           f"system installation's remotes ({welcome_sizes}), and Done wrote the note and closed it")
 
         look("desktop", args.desktop, args.desktop_timeout, wallpaper=WALLPAPER_LEFT + WALLPAPER_RIGHT)
 
@@ -6456,35 +6635,92 @@ def main():
     ok("rift net refused a name that is not an app's, airlock refused a start outside a sandbox's scope, "
        "nobody could not turn the switch, and fetcher's network came back")
 
-    # 6e. flatpak with portals. the test's own runtime and app, two bundles served from the host, go into
-    # the owner's installation. the app runs in flatpak's sandbox with the network and nothing of home:
-    # it reads a file of home only after the document portal exported it for that app, it asks the
-    # desktop portal about the network over the session bus, and the bus proxy keeps the rest of that
-    # bus from it. the serial shell has no graphical session, so the portals come up by bus activation
+    # 6e. Welcome installs an app, and flatpak runs it with the portals. the test's own runtime and app
+    # are in a signed repository the host serves, which the test adds to the system installation as a
+    # remote with its key, the way the image has flathub. Welcome, opened again as the Applications menu
+    # opens it, lists the app once that remote is there, with the size the remote gives, and the test
+    # ticks it and presses Install: flatpak's system helper installs the runtime and the app, which
+    # polkit allows the owner, and a row says how far it has got. then the app runs in flatpak's
+    # sandbox with the network and nothing of home: it reads a file of home only after the document
+    # portal exported it for that app, it asks the desktop portal about the network over the session
+    # bus, and the bus proxy keeps the rest of that bus from it. the serial shell has no graphical
+    # session, so the portals come up by bus activation
     if args.flatpak:
         app_id = "dev.rift.TestApp"
-        bundles = http.server.ThreadingHTTPServer(
+        flatpak_stem, flatpak_extension = os.path.splitext(args.desktop or "desktop.png")
+        flatpak_repo = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), functools.partial(Quiet, directory=os.path.abspath(args.flatpak)))
-        threading.Thread(target=bundles.serve_forever, daemon=True).start()
-        base = f"http://10.0.2.2:{bundles.server_address[1]}"
-        status, output = run(f"mkdir -p ~/bundles; and curl -sf -o ~/bundles/platform.flatpak {base}/platform.flatpak; "
-                             f"and curl -sf -o ~/bundles/app.flatpak {base}/app.flatpak", "the flatpak bundles from the host")
-        bundles.shutdown()
+        threading.Thread(target=flatpak_repo.serve_forever, daemon=True).start()
+        flatpak_base = f"http://10.0.2.2:{flatpak_repo.server_address[1]}"
+        status, output = run(f"curl -sf -o ~/rift-test.gpg {flatpak_base}/key.gpg", "the test repository's key")
         if status != 0:
-            fail(f"the vm did not get the flatpak bundles from {base}: {without_console(output).strip()!r}")
-        for bundle in ("platform", "app"):
-            status, printed = sandboxed(f"flatpak install --user --noninteractive --bundle ~/bundles/{bundle}.flatpak",
-                                        f"installing the {bundle} bundle")
-            if status != 0:
-                fail(f"flatpak did not install the {bundle} bundle, it exited with {status}")
-        _, printed = sandboxed("flatpak list --user --columns=application,branch | cat", "the installed flatpaks")
+            fail(f"the vm did not get the test repository's key from {flatpak_base}: {without_console(output).strip()!r}")
+        status, printed = sandboxed(f"sudo flatpak remote-add --system --gpg-import=$HOME/rift-test.gpg rift-test "
+                                    f"{flatpak_base}/repo/", "the test repository as a remote of the system installation")
+        if status != 0:
+            fail(f"flatpak remote-add exited with {status}")
+        # a unit of its own, so the window is not the serial shell's and the test can end it
+        run("systemd-run --user --quiet --collect --unit=rift-welcome-apps rift-welcome --page apps",
+            "Welcome from the Applications menu, on its Apps page")
+        flatpak_listed = re.compile(rf"^app {re.escape(app_id)} (?!unknown)")
+        welcome_now = welcome_until(
+            180, lambda lines: welcome_value(lines, "page") == "apps"
+            and any(flatpak_listed.match(printed) for printed in lines), f"{app_id} listed with its size")
+        flatpak_size = next(printed for printed in welcome_now if flatpak_listed.match(printed)).split(" ", 2)[2]
+        run(f"rift-welcome --set tick {app_id}", f"ticking {app_id}")
+        welcome_until(30, lambda lines: app_id in (welcome_value(lines, "ticked") or "").split(","), f"{app_id} ticked")
+        time.sleep(1)
+        welcome_picture(f"{flatpak_stem}-welcome-ticked{flatpak_extension}", "welcome-ticked")
+        run("rift-welcome --set install now", "Install")
+        flatpak_seen = []
+        flatpak_until = time.monotonic() + 300
+        while True:
+            welcome_now = welcome_said("how the install is going")
+            flatpak_doing = next((printed.split(" ", 2)[2] for printed in welcome_now or []
+                                  if printed.startswith(f"install {app_id} ")), None)
+            if flatpak_doing and flatpak_doing not in flatpak_seen:
+                flatpak_seen.append(flatpak_doing)
+                if flatpak_doing.startswith("running") \
+                        and not any(seen.startswith("running") for seen in flatpak_seen[:-1]):
+                    welcome_picture(f"{flatpak_stem}-welcome-installing{flatpak_extension}", "welcome-installing")
+            if flatpak_doing == "installed" or (flatpak_doing or "").startswith("failed"):
+                break
+            if time.monotonic() > flatpak_until:
+                fail(f"Welcome's install of {app_id} did not finish in 300 s: {flatpak_seen}")
+            time.sleep(1)
+        if flatpak_doing != "installed":
+            _, output = run("journalctl -b -u flatpak-system-helper -o cat --no-pager | tail -n 30",
+                            "the system helper's log")
+            fail(f"Welcome could not install {app_id}: {flatpak_doing}. The system helper said: "
+                 f"{without_console(output).strip()[-1200:]!r}")
+        welcome_picture(f"{flatpak_stem}-welcome-installed{flatpak_extension}", "welcome-installed")
+        _, printed = sandboxed("flatpak list --system --columns=application,branch | cat",
+                               "the system installation's flatpaks")
         for ref in ("dev.rift.TestPlatform", app_id):
             if not re.search(rf"^{re.escape(ref)}\s+test\s*$", printed, re.M):
-                fail(f"flatpak list does not show {ref} on its test branch")
-        ok(f"flatpak installed dev.rift.TestPlatform and {app_id} for the owner from bundles")
+                fail(f"flatpak list does not show {ref} on its test branch in the system installation")
+        if f"app {app_id} installed" not in (welcome_said("the Apps page after the install") or []):
+            fail(f"Welcome's Apps page does not say {app_id} is installed")
+        ok(f"Welcome listed {app_id} at {flatpak_size}, installed it with its runtime into the system "
+           f"installation ({', '.join(flatpak_seen)}), and flatpak list has both")
+
+        # the Appearance page writes what Settings' does, and the shell draws in its accent
+        if args.lens:
+            for flatpak_accent in (SETTINGS_OTHER[0], SETTINGS_ACCENT[0]):
+                run(f"rift-welcome --set accent {flatpak_accent}", f"the accent {flatpak_accent} from Welcome")
+                flatpak_until = time.monotonic() + 30
+                while bar_state("the shell's accent").get("accent") != flatpak_accent:
+                    if time.monotonic() > flatpak_until:
+                        fail(f"lens --state does not say accent {flatpak_accent} after Welcome set it")
+                    time.sleep(2)
+            ok(f"Welcome's accent {SETTINGS_OTHER[0]} reached the shell, and {SETTINGS_ACCENT[0]} again")
+        # nothing is installing, so the close button ends it
+        run("rift-welcome --set close now", "Welcome's close button")
+        welcome_gone("the close button")
+        flatpak_repo.shutdown()
 
         # and an installed flatpak is in the applications menu: it exports a desktop entry into the
-        # owner's own data directory, and the shell reads the entries again every time the menu opens
+        # system installation's folder, and the shell reads the entries again every time the menu opens
         if args.lens:
             run("lens --menu", "the applications menu after the install")
             run(f'lens --type "{FLATPAK_APP}"', "the flatpak's name typed into the field")
