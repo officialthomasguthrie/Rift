@@ -159,6 +159,7 @@ mod tests {
             wm_class: None,
             category: librift::apps::Category::Accessories,
             types: Vec::new(),
+            line: String::new(),
         }
     }
 

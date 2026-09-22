@@ -281,6 +281,7 @@ mod tests {
             wm_class: None,
             category: Category::Accessories,
             types: vec!["text/plain".to_string()],
+            line: String::new(),
         }
     }
 

@@ -537,6 +537,7 @@ mod tests {
             wm_class: None,
             category: Category::Accessories,
             types: types.iter().map(|&mime| mime.to_string()).collect(),
+            line: String::new(),
         }
     }
 

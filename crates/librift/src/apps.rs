@@ -1,8 +1,17 @@
 //! The apps there are: desktop entries from the XDG data directories and the Flatpak exports. The
-//! shell's menu and dock list them and start them, and Settings names the ones the dock keeps.
+//! shell's menu and dock list them and start them, Settings names the ones the dock keeps, and the
+//! file manager opens files with them. An app starts in a scope of its own under the owner's
+//! systemd, whoever starts it.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
+
+/// The terminal that wraps apps with `Terminal=true`. It is given the app's own class, so the
+/// window belongs to that app and not to the terminal, and the dock has one item per app.
+const TERMINAL: &str = "ghostty";
 
 /// An app from a desktop entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +34,9 @@ pub struct App {
     pub category: Category,
     /// The `MimeType` field: the kinds of file and the kinds of link it says it opens.
     pub types: Vec<String>,
+    /// The Exec field as the entry writes it, field codes and all, which say where the files an
+    /// app is asked to open go.
+    pub line: String,
 }
 
 /// The section of the Applications menu an app is listed under. The six the menu of GNOME
@@ -243,7 +255,8 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
     if kind.as_deref() != Some("Application") {
         return None;
     }
-    let exec = split_exec(&exec?);
+    let line = exec?;
+    let exec = split_exec(&line);
     if exec.is_empty() {
         return None;
     }
@@ -256,6 +269,7 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
         wm_class,
         category: Category::of(&categories),
         types,
+        line,
     })
 }
 
@@ -303,9 +317,297 @@ pub fn split_exec(value: &str) -> Vec<String> {
     words
 }
 
+/// The commands that open `files` with an app, one for each start: its Exec line with the field
+/// codes filled in, the way `GLib` fills them. `%F` and `%U` take every file in one start, `%f` and
+/// `%u` one file a start, and a line with no code for files takes one file a start at its end. `%u`
+/// and `%U` are given `file://` addresses. With no files there is one command, the app's own.
+#[must_use]
+pub fn commands(app: &App, files: &[PathBuf]) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut left: &[PathBuf] = files;
+    loop {
+        let (command, taken) = expand(app, left);
+        if command.is_empty() {
+            return commands;
+        }
+        commands.push(command);
+        left = &left[taken.min(left.len())..];
+        if left.is_empty() || taken == 0 {
+            return commands;
+        }
+    }
+}
+
+/// One command for the first of `files`, or for all of them when the line takes a list, and how
+/// many of them it took.
+fn expand(app: &App, files: &[PathBuf]) -> (Vec<String>, usize) {
+    let path = |file: &PathBuf| file.to_string_lossy().into_owned();
+    let address = |file: &PathBuf| crate::files::uri(file);
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    let mut taken = None;
+    let mut chars = app.line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                in_word = true;
+            }
+            '\\' if quoted => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            '%' if !quoted => {
+                let code = chars.next();
+                // a list code that is a word of its own becomes a word for each file
+                let alone = !in_word && chars.peek().is_none_or(|next| next.is_whitespace());
+                match code {
+                    Some('%') => {
+                        word.push('%');
+                        in_word = true;
+                    }
+                    Some(list @ ('F' | 'U')) if alone => {
+                        let each = if list == 'F' { path } else { address };
+                        words.extend(files.iter().map(each));
+                        taken = Some(files.len());
+                    }
+                    Some(one @ ('f' | 'u' | 'F' | 'U')) => {
+                        if let Some(first) = files.first() {
+                            word.push_str(&if one.eq_ignore_ascii_case(&'f') {
+                                path(first)
+                            } else {
+                                address(first)
+                            });
+                            in_word = true;
+                        }
+                        taken = Some(usize::from(!files.is_empty()));
+                    }
+                    Some('i') if alone => {
+                        if let Some(icon) = &app.icon {
+                            words.extend(["--icon".to_string(), icon.clone()]);
+                        }
+                    }
+                    Some('c') => {
+                        word.push_str(&app.name);
+                        in_word = true;
+                    }
+                    _ => {}
+                }
+            }
+            c if c.is_whitespace() && !quoted => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words.retain(|word| !word.is_empty());
+    // no code for files: the first one goes at the end, which is what GLib and KDE do
+    let taken = taken.unwrap_or_else(|| match files.first() {
+        Some(first) if !words.is_empty() => {
+            words.push(path(first));
+            1
+        }
+        _ => 0,
+    });
+    (words, taken)
+}
+
+/// Start an app and let it go, with files for it to open. An app that takes one file a start is
+/// started once for each.
+///
+/// Each start is a scope of its own under the owner's systemd, made by systemd-run before the app
+/// runs, which is what Horizon does for what a key starts: the app outlives whatever started it, a
+/// crash of the shell or the file manager takes no app with it, and the portal knows the app by
+/// the scope's name. A thread waits for systemd-run, since a child nobody waits for stays in the
+/// process table after it ends.
+///
+/// # Errors
+///
+/// When the program cannot be started.
+pub fn launch(app: &App, files: &[PathBuf]) -> Result<(), String> {
+    let class = app.terminal.then(|| format!("--class={}", app.class()));
+    for command in commands(app, files) {
+        let mut words: Vec<String> = Vec::new();
+        if let Some(class) = &class {
+            words.extend([TERMINAL.to_string(), class.clone(), "-e".to_string()]);
+        }
+        words.extend(command);
+        start(&app.id, &app.name, &words, None)?;
+    }
+    Ok(())
+}
+
+/// Run a command as an app in a scope of its own named after `id`, in `folder` when one is given,
+/// and let it go. [`launch`] starts every app this way.
+///
+/// # Errors
+///
+/// When the command is empty or cannot be started.
+pub fn start(id: &str, name: &str, words: &[String], folder: Option<&Path>) -> Result<(), String> {
+    if words.is_empty() {
+        return Err("Nothing to run".to_string());
+    }
+    let mut command = Command::new("systemd-run");
+    command
+        .args([
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            "--slice=app.slice",
+        ])
+        .arg(format!("--unit={}", scope(id)))
+        .arg(format!("--description={name}"))
+        .arg("--")
+        .args(words)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // systemd-run runs the command itself inside the scope, so it starts where systemd-run does
+    if let Some(folder) = folder {
+        command.current_dir(folder);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Could not start {name}: {e}"))?;
+    let name = name.to_string();
+    std::thread::spawn(move || {
+        let program = env::args()
+            .next()
+            .and_then(|arg| {
+                Path::new(&arg)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "rift".to_string());
+        match child.wait() {
+            Ok(status) if !status.success() => eprintln!("{program}: {name} ended: {status}"),
+            Ok(_) => {}
+            Err(why) => eprintln!("{program}: could not wait for {name}: {why}"),
+        }
+    });
+    Ok(())
+}
+
+/// The name of an app's scope, the way the systemd documentation for desktops names them:
+/// `app-rift-<id>-<number>`. A character a unit name cannot hold, and a dash, which would read as
+/// the end of the id, is written as its escape, the way GNOME and Horizon write theirs.
+#[must_use]
+pub fn scope(id: &str) -> String {
+    let mut name = String::from("app-rift-");
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'.') {
+            name.push(char::from(byte));
+        } else {
+            let _ = write!(name, "\\x{byte:02x}");
+        }
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let _ = write!(name, "-{now}");
+    name
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_line(line: &str) -> App {
+        parse(
+            "org.example.App",
+            &format!(
+                "[Desktop Entry]\nType=Application\nName=Example\nIcon=example\nExec={line}\n"
+            ),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn files_go_where_the_field_codes_say() {
+        let files = [
+            PathBuf::from("/home/rift/a b.txt"),
+            PathBuf::from("/home/rift/c.txt"),
+        ];
+        // a list takes every file in one start
+        assert_eq!(
+            commands(&with_line("zeditor %F"), &files),
+            [["zeditor", "/home/rift/a b.txt", "/home/rift/c.txt"]]
+        );
+        assert_eq!(
+            commands(&with_line("loupe %U"), &files),
+            [[
+                "loupe",
+                "file:///home/rift/a%20b.txt",
+                "file:///home/rift/c.txt"
+            ]]
+        );
+        // one file a start
+        assert_eq!(
+            commands(&with_line("hx %f"), &files),
+            [["hx", "/home/rift/a b.txt"], ["hx", "/home/rift/c.txt"]]
+        );
+        assert_eq!(
+            commands(&with_line("app --file=%f --name %c"), &files[..1]),
+            [["app", "--file=/home/rift/a b.txt", "--name", "Example"]]
+        );
+        // flatpak's markers stay around the files
+        assert_eq!(
+            commands(
+                &with_line("/usr/bin/flatpak run --file-forwarding org.x.Y @@u %U @@"),
+                &files[..1]
+            ),
+            [[
+                "/usr/bin/flatpak",
+                "run",
+                "--file-forwarding",
+                "org.x.Y",
+                "@@u",
+                "file:///home/rift/a%20b.txt",
+                "@@"
+            ]]
+        );
+        // no code for files: each goes at the end of a start of its own
+        assert_eq!(
+            commands(&with_line("baobab"), &files),
+            [
+                ["baobab", "/home/rift/a b.txt"],
+                ["baobab", "/home/rift/c.txt"]
+            ]
+        );
+        // no files: the app's own command, codes dropped and the icon given
+        assert_eq!(
+            commands(&with_line("app %i %U"), &[]),
+            [["app", "--icon", "example"]]
+        );
+        assert_eq!(
+            commands(&with_line("\"/opt/My App/run\" 100%%"), &[]),
+            [["/opt/My App/run", "100%"]]
+        );
+    }
+
+    #[test]
+    fn a_scope_is_named_after_the_app() {
+        let named = scope("com.mitchellh.ghostty");
+        let (id, number) = named.rsplit_once('-').expect("a number at the end");
+        assert_eq!(id, "app-rift-com.mitchellh.ghostty");
+        assert!(!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()));
+        // a dash inside the id would read as its end, and a space is no part of a unit name
+        assert!(scope("virt-manager").starts_with("app-rift-virt\\x2dmanager-"));
+        assert!(scope("my app").starts_with("app-rift-my\\x20app-"));
+    }
 
     #[test]
     fn reads_an_entry() {

@@ -7,8 +7,8 @@
 //! not disturb and the apps whose banners stay off, which of the programs the shell's keys start is
 //! running, the index for search by meaning, what the system calls itself, dark or light and the
 //! wallpaper, the mouse and the touchpad, the sound `PipeWire` plays and hears, how the boot looks,
-//! the owner's account, the apps Flatpak installs and the ones Rift suggests, and how a drive is
-//! written.
+//! the owner's account, the apps Flatpak installs and the ones Rift suggests, what is in a folder
+//! and what kind of file each thing is, the trash, and how a drive is written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
 //! which the asking side of the bus turns on, brings in zbus, only the `disk` feature serde and
@@ -31,6 +31,10 @@ pub mod defaults;
 #[cfg(feature = "disk")]
 pub mod disk;
 pub mod dock;
+// folders, the kinds of file and the trash are a freedesktop session's, which rift-flash has no
+// use for on Windows
+#[cfg(unix)]
+pub mod files;
 // flatpak is how a freedesktop session installs apps, which rift-flash has no use for either
 #[cfg(unix)]
 pub mod flatpak;

@@ -61,6 +61,19 @@ const APP_DIRECTORIES: [&str; 10] = [
     "scalable/mimetypes",
 ];
 
+/// The directories the drawing of a kind of file or of a folder comes from, in colour, the way a
+/// list of files draws them: the vector ones first, then the fixed sizes from the largest.
+const FILE_DIRECTORIES: [&str; 8] = [
+    "scalable/mimetypes",
+    "scalable/places",
+    "scalable/devices",
+    "scalable/status",
+    "48x48/mimetypes",
+    "32x32/mimetypes",
+    "16x16/mimetypes",
+    "16x16/places",
+];
+
 /// The file endings, vector first.
 const ENDINGS: [&str; 2] = ["svg", "png"];
 
@@ -82,6 +95,21 @@ pub fn find(name: &str) -> Option<PathBuf> {
 pub fn app(name: &str) -> Option<PathBuf> {
     static FOUND: Found = OnceLock::new();
     remembered(&FOUND, name, &APP_DIRECTORIES).or_else(|| find(name))
+}
+
+/// The same lookup for a file or a folder in a list: the first of `names`, the one that fits best
+/// first, that a theme has in colour, and only when none has, a symbolic one.
+#[must_use]
+pub fn file(names: &[String]) -> Option<PathBuf> {
+    static FOUND: Found = OnceLock::new();
+    names
+        .iter()
+        .find_map(|name| remembered(&FOUND, name, &FILE_DIRECTORIES))
+        .or_else(|| {
+            names
+                .iter()
+                .find_map(|name| find(&format!("{name}-symbolic")))
+        })
 }
 
 /// What a lookup remembers: a name to where it was found, or to nothing.

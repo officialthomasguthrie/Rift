@@ -94,7 +94,7 @@ pub fn snapshot_time(name: &str) -> Option<i64> {
 }
 
 /// Days since 1970-01-01 of a date, the era arithmetic from Howard Hinnant's notes.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
     let yoe = year - era * 400;
@@ -104,7 +104,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 /// The date of a day since 1970-01-01.
-fn civil(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

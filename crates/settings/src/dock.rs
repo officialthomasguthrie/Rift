@@ -435,6 +435,7 @@ mod tests {
             wm_class: None,
             category: Category::Accessories,
             types: Vec::new(),
+            line: String::new(),
         }
     }
 

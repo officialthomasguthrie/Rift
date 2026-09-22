@@ -548,6 +548,7 @@ mod tests {
             wm_class: None,
             category,
             types: Vec::new(),
+            line: String::new(),
         }
     }
 
