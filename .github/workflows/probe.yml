@@ -1,0 +1,39 @@
+name: welcome probe
+on:
+  push:
+    branches: [welcome-probe]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Build the test flatpak and the image's flatpak
+        run: |
+          nix build .#test-flatpak -o test-flatpak -L
+          ls -la test-flatpak test-flatpak/repo
+          nix build .#nixosConfigurations.rift.pkgs.flatpak -o fp -L
+          fp/bin/flatpak --version
+      - name: Flathub from remotes.d, and its sizes
+        run: |
+          sudo mkdir -p /etc/flatpak/remotes.d
+          sudo cp nix/welcome/flathub.flatpakrepo /etc/flatpak/remotes.d/
+          export FLATPAK_SYSTEM_DIR=$PWD/system
+          sudo -E env LC_ALL=C.UTF-8 fp/bin/flatpak remotes --system --columns=name,url | cat -A
+          sudo -E env LC_ALL=C.UTF-8 fp/bin/flatpak remote-ls --system --app --columns=application,installed-size flathub > sizes.txt; echo "exit $?"
+          wc -l sizes.txt
+          grep -E "^(org.videolan.VLC|org.blender.Blender|dev.rift|md.obsidian.Obsidian)" sizes.txt | cat -A
+      - name: The test repository as a remote, and an install into a pipe
+        run: |
+          export FLATPAK_SYSTEM_DIR=$PWD/system
+          (cd test-flatpak && python3 -m http.server 8321 >/dev/null 2>&1 &)
+          sleep 2
+          curl -sf -o /dev/null http://127.0.0.1:8321/repo/config && echo served
+          sudo -E env LC_ALL=C.UTF-8 fp/bin/flatpak remote-add --system --gpg-import=test-flatpak/key.gpg rift-test http://127.0.0.1:8321/repo/; echo "remote-add exit $?"
+          sudo -E env LC_ALL=C.UTF-8 fp/bin/flatpak remotes --system --columns=name,url | cat -A
+          sudo -E env LC_ALL=C.UTF-8 fp/bin/flatpak remote-ls --system --app --columns=application,installed-size rift-test | cat -A
+          sudo -E env LC_ALL=C.UTF-8 fp/bin/flatpak install --system --assumeyes rift-test dev.rift.TestApp > install.txt 2> install-err.txt; echo "install exit $?"
+          echo "--- stdout"; cat -A install.txt
+          echo "--- stderr"; cat -A install-err.txt
+          sudo -E env LC_ALL=C.UTF-8 fp/bin/flatpak list --system --columns=application,branch | cat -A
