@@ -17,12 +17,14 @@ use librift::battery::Battery;
 use librift::bluetooth as bluetooth_picture;
 use librift::boot::Style;
 use librift::clock::Zone;
+use librift::defaults::Kind;
 use librift::keyboard::Layout;
 use librift::models::Tier;
 use librift::network;
 use librift::orbit::Host;
 use librift::pointer::{Device, Pointer};
 use librift::printers::Printers;
+use librift::privacy::Security;
 use librift::region::Region;
 use librift::sound::{self as sound_picture, Side};
 
@@ -32,8 +34,9 @@ use crate::page::Page;
 use crate::theme::{Colors, colors};
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, TITLE_SIZE, scroll};
 use crate::{
-    about, accessibility, ai, appearance, backups, bluetooth, datetime, displays, dock, icons,
-    keyboard, net, notifications, pointer, power, printers, region, search, sound, updates, watch,
+    about, accessibility, ai, appearance, apps, backups, bluetooth, datetime, displays, dock,
+    icons, keyboard, net, notifications, pointer, power, printers, privacy, region, search, sound,
+    updates, watch,
 };
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
@@ -123,9 +126,19 @@ pub struct Settings {
     /// Whether the screen reader and the on-screen keyboard are running, once the Accessibility
     /// page has looked, and again every second while it is up.
     pub access: Option<accessibility::Running>,
-    /// The apps the desktop entries name, for the Dock and Notifications pages, read as either page
-    /// comes up.
+    /// The apps the desktop entries name, for the pages that name apps, read as one of them comes
+    /// up.
     pub apps: Vec<librift::apps::App>,
+    /// Which app opens each kind of file, once the Apps page has read the lists, and again every
+    /// two seconds while it is up.
+    pub defaults: Option<apps::Picture>,
+    /// The kind whose list of apps is open on the Apps page.
+    pub unfolded: Option<Kind>,
+    /// The camera's answers, recent files, the firewall and the sandboxes, once the Privacy and
+    /// security page has read them, and again every two seconds while it is up.
+    pub privacy: Option<Box<privacy::Picture>>,
+    /// What fwupd says about the firmware, once it has answered.
+    pub security: Option<Result<Security, String>>,
     /// What the dock keeps and where it stands, once the Dock page has read it, and again every
     /// second while it is up.
     pub dock: Option<dock::Picture>,
@@ -232,6 +245,16 @@ pub enum Message {
     Noticed(notifications::Picture),
     /// Do not disturb, or an app's banners, from the Notifications page.
     Notices(notifications::Asked),
+    /// Which app opens each kind of file now.
+    Kinds(apps::Picture),
+    /// A kind's list was opened or closed, or an app chosen for it, on the Apps page.
+    Apps(apps::Asked),
+    /// What the Privacy and security page reads now.
+    Privacy(Box<privacy::Picture>),
+    /// A switch on the Privacy and security page.
+    Private(privacy::Asked),
+    /// What fwupd says about the firmware.
+    Security(Result<Security, String>),
     /// What localed says about the keyboard now.
     Layouts(Result<Region, String>),
     /// A layout was added, taken off or put first, or the shortcuts were asked for.
@@ -342,6 +365,16 @@ fn window(screenshot: bool) -> window::Settings {
 
 fn boot(start: &Start) -> (Settings, Task<Message>) {
     let page = start.page.unwrap_or(Page::FIRST);
+    // the pages that name apps read the desktop entries as they come up, and the Apps page the
+    // lists of default apps, which are as small
+    let entries = if matches!(
+        page,
+        Page::Dock | Page::Notifications | Page::Apps | Page::Privacy
+    ) {
+        librift::apps::load()
+    } else {
+        Vec::new()
+    };
     let state = Settings {
         page,
         look: Look::read(),
@@ -356,11 +389,8 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         // Lens's notes are read at once, so a switch is never drawn off while its program runs, and
         // the same for the dock's files and the notification settings, which are as small
         access: (page == Page::Accessibility).then(accessibility::running),
-        apps: if matches!(page, Page::Dock | Page::Notifications) {
-            librift::apps::load()
-        } else {
-            Vec::new()
-        },
+        defaults: (page == Page::Apps).then(|| apps::reading(&entries)),
+        apps: entries,
         dock: (page == Page::Dock).then(dock::reading),
         notices: (page == Page::Notifications).then(notifications::reading),
         problem: None,
@@ -382,6 +412,9 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
     }
     if state.page == Page::Keyboard {
         work.push(keyboard::read());
+    }
+    if state.page == Page::Privacy {
+        work.push(privacy::ask_fwupd());
     }
     if start.screenshot.is_some() {
         work.push(shoot());
@@ -443,6 +476,10 @@ impl Settings {
             printers: None,
             access: None,
             apps: Vec::new(),
+            defaults: None,
+            unfolded: None,
+            privacy: None,
+            security: None,
             dock: None,
             notices: None,
             joining: None,
@@ -513,6 +550,8 @@ impl Settings {
         .chain(pointer::state(self))
         .chain(dock::state(self))
         .chain(notifications::state(self))
+        .chain(apps::state(self))
+        .chain(privacy::state(self))
         // what went wrong last, which the page shows in red under everything else
         .chain(self.problem.as_ref().map(|why| format!("problem {why}")))
         .collect::<Vec<_>>()
@@ -626,6 +665,8 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Keyboard(asked) => return keyboard::asked(state, &asked),
         Message::Dock(asked) => return dock::asked(state, asked),
         Message::Notices(asked) => return notifications::asked(state, &asked),
+        Message::Apps(asked) => return apps::asked(state, asked),
+        Message::Private(asked) => return privacy::asked(state, asked),
         Message::Pointer(changed) => pointer::update(state, changed),
         Message::Wrote => state.wrote(),
         Message::Greeting(on) => {
@@ -679,6 +720,9 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Access(running) => state.access = Some(running),
         Message::Docked(picture) => state.dock = Some(picture),
         Message::Noticed(picture) => state.notices = Some(picture),
+        Message::Kinds(picture) => state.defaults = Some(picture),
+        Message::Privacy(picture) => state.privacy = Some(picture),
+        Message::Security(answer) => state.security = Some(answer),
         Message::Layouts(answer) => state.keyboard = Some(answer),
         Message::Devices(answer) => state.devices = Some(answer),
         Message::Backups(answer) => state.disk = Some(answer),
@@ -741,6 +785,7 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
     state.swept = false;
     state.joining = None;
     state.finding.clear();
+    state.unfolded = None;
     match page {
         Page::Wifi => {
             state.swept = true;
@@ -777,6 +822,18 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
             state.apps = librift::apps::load();
             state.notices = Some(notifications::reading());
             Task::none()
+        }
+        // the lists of default apps are a few small files; the camera's answers, the firewall and
+        // the sandboxes are asked on the subscription's thread, and fwupd once on a thread of its
+        // own, since it starts for the question
+        Page::Apps => {
+            state.apps = librift::apps::load();
+            state.defaults = Some(apps::reading(&state.apps));
+            Task::none()
+        }
+        Page::Privacy => {
+            state.apps = librift::apps::load();
+            privacy::ask_fwupd()
         }
         _ => Task::none(),
     }
@@ -870,6 +927,11 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
             .map_or_else(Task::none, |asked| Task::done(Message::Dock(asked))),
         "do-not-disturb" | "app-banners" => notifications::named(state, name, value)
             .map_or_else(Task::none, |asked| Task::done(Message::Notices(asked))),
+        // a kind's default app, and the camera's answers, recent files and the sandboxes' network
+        name if apps::NAMES.contains(&name) => apps::named(state, name, value)
+            .map_or_else(Task::none, |asked| Task::done(Message::Apps(asked))),
+        name if privacy::NAMES.contains(&name) => privacy::named(state, name, value)
+            .map_or_else(Task::none, |asked| Task::done(Message::Private(asked))),
         // the mouse and the touchpad, by the names their file has, for a device this machine has
         name if librift::pointer::NAMES.contains(&name) => pointer::named(state, name, value)
             .map_or_else(Task::none, |chosen| {
@@ -930,8 +992,9 @@ fn subscription(state: &Settings) -> Subscription<Message> {
     ];
     // the clock turns with the minute, the printers and the jobs are asked for every two seconds,
     // whether the screen reader and the keyboard are running every second, which mice and touchpads
-    // are plugged in every two seconds, and the dock's files and the notification settings every
-    // second, each only while its page is up
+    // are plugged in every two seconds, the dock's files and the notification settings every
+    // second, and the default apps and the privacy settings every two seconds, each only while its
+    // page is up
     match state.page {
         Page::DateTime => followed.push(datetime::ticking()),
         Page::Printers => followed.push(printers::following()),
@@ -939,6 +1002,8 @@ fn subscription(state: &Settings) -> Subscription<Message> {
         Page::Pointer => followed.push(pointer::following()),
         Page::Dock => followed.push(dock::following()),
         Page::Notifications => followed.push(notifications::following()),
+        Page::Apps => followed.push(apps::following()),
+        Page::Privacy => followed.push(privacy::following()),
         _ => {}
     }
     Subscription::batch(followed)
@@ -1110,10 +1175,12 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
         Page::Pointer => pointer::view(state, look),
         Page::Dock => dock::view(state, look),
         Page::Notifications => notifications::view(state, look),
+        Page::Apps => apps::view(state, look),
+        Page::Privacy => privacy::view(state, look),
         Page::Appearance => appearance::view(state, look),
         Page::Displays => displays::view(state, look),
         Page::About => about::view(state, look),
-        other => nothing_yet(look, other),
+        Page::Owner => nothing_yet(look, Page::Owner),
     };
     scroll(
         look,

@@ -196,26 +196,20 @@ impl Page {
             | Self::Power
             | Self::Appearance
             | Self::Dock
+            | Self::Apps
             | Self::Notifications
             | Self::Search
             | Self::Keyboard
             | Self::Pointer
             | Self::Printers
             | Self::Accessibility
+            | Self::Privacy
             | Self::DateTime
             | Self::Region
             | Self::Updates
             | Self::Backups
             | Self::Ai
             | Self::About => "",
-            Self::Apps => {
-                "Default apps and app permissions are not in Settings yet. xdg-mime picks the app \
-                 for a kind of file, and rift run puts an app in a sandbox."
-            }
-            Self::Privacy => {
-                "Privacy and security are not in Settings yet. Mod+L locks the screen, and an app \
-                 asks before it takes the camera."
-            }
             Self::Owner => {
                 "The owner is not in Settings yet. rift host says what this machine is to the drive."
             }
@@ -229,7 +223,7 @@ mod tests {
 
     /// The pages that have a page of their own, which `ui::page` draws. The rest draw their name
     /// and one sentence.
-    const REAL: [Page; 20] = [
+    const REAL: [Page; 22] = [
         Page::Wifi,
         Page::Network,
         Page::Bluetooth,
@@ -238,12 +232,14 @@ mod tests {
         Page::Power,
         Page::Appearance,
         Page::Dock,
+        Page::Apps,
         Page::Notifications,
         Page::Search,
         Page::Keyboard,
         Page::Pointer,
         Page::Printers,
         Page::Accessibility,
+        Page::Privacy,
         Page::DateTime,
         Page::Region,
         Page::Updates,
