@@ -231,32 +231,42 @@ pub fn switch<'a, M: Clone + 'a>(
     toggler(on)
         .on_toggle(toggle)
         .size(20.0)
-        .style(move |_: &Theme, status| {
-            let (track, knob) = match status {
-                toggler::Status::Active { is_toggled }
-                | toggler::Status::Hovered { is_toggled } => (
-                    if is_toggled {
-                        colors.accent
-                    } else {
-                        colors.track
-                    },
-                    colors.knob,
-                ),
-                toggler::Status::Disabled { .. } => (colors.track, colors.dim),
-            };
-            toggler::Style {
-                background: track.into(),
-                background_border_width: 0.0,
-                background_border_color: Color::TRANSPARENT,
-                foreground: knob.into(),
-                foreground_border_width: 0.0,
-                foreground_border_color: Color::TRANSPARENT,
-                text_color: None,
-                border_radius: None,
-                padding_ratio: 0.15,
-            }
-        })
+        .style(move |_: &Theme, status| switched(colors, status))
         .into()
+}
+
+/// The same switch, dimmed and still, for a setting that does nothing the way things stand.
+pub fn still<'a, M: Clone + 'a>(colors: Colors, on: bool) -> Element<'a, M> {
+    toggler(on)
+        .size(20.0)
+        .style(move |_: &Theme, status| switched(colors, status))
+        .into()
+}
+
+/// How a switch is drawn: the track in the accent while it is on, and dimmed while it cannot move.
+fn switched(colors: Colors, status: toggler::Status) -> toggler::Style {
+    let (track, knob) = match status {
+        toggler::Status::Active { is_toggled } | toggler::Status::Hovered { is_toggled } => (
+            if is_toggled {
+                colors.accent
+            } else {
+                colors.track
+            },
+            colors.knob,
+        ),
+        toggler::Status::Disabled { .. } => (colors.track, colors.dim),
+    };
+    toggler::Style {
+        background: track.into(),
+        background_border_width: 0.0,
+        background_border_color: Color::TRANSPARENT,
+        foreground: knob.into(),
+        foreground_border_width: 0.0,
+        foreground_border_color: Color::TRANSPARENT,
+        text_color: None,
+        border_radius: None,
+        padding_ratio: 0.15,
+    }
 }
 
 /// The slider of a row that is a number between two others, with the number and its unit beside it.

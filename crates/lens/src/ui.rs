@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use iced::widget::container;
 use iced::{
-    Element, Font, Length, Subscription, Task, Theme, event, font, keyboard, theme, window,
+    Element, Font, Length, Subscription, Task, Theme, event, font, keyboard, mouse, theme, window,
 };
 use iced_layershell::actions::{LayerShellCustomAction, LayerShellCustomActionWithId};
 use iced_layershell::reexport::{
@@ -244,6 +244,10 @@ pub enum Message {
     DockNew(String),
     /// A right click on one: the menu of what can be done with it.
     DockMenu(String),
+    /// The pointer came onto a surface, or went off it.
+    Pointer(window::Id, bool),
+    /// The wait with this number after the pointer went off the dock is over.
+    HideDock(u64),
     /// A row of that menu.
     DockRow(dock::Row),
     /// A click on a workspace button.
@@ -258,8 +262,9 @@ pub enum Message {
     Margins(window::Id, (i32, i32, i32, i32)),
     /// Keep this much of the screen for the dock.
     Zone(window::Id, i32),
-    /// Open the menu of a dock item, this tall, with its left edge here, on the dock's edge.
-    OpenItemMenu(window::Id, u32, i32, Edge),
+    /// Open the menu of a dock item, this tall, with its left edge here, on the dock's edge, this
+    /// far off the edge of the working area.
+    OpenItemMenu(window::Id, u32, i32, Edge, i32),
     /// Open the menu's surface, this tall and this far from the top of the working area.
     Open(window::Id, u32, i32),
     /// Open the system menu's surface, this tall and this far from the top of the working area.
@@ -323,10 +328,10 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
                 Some(id),
                 LayerShellCustomAction::ExclusiveZoneChange(zone),
             )),
-            Message::OpenItemMenu(id, height, left, edge) => Ok(Self::new(
+            Message::OpenItemMenu(id, height, left, edge, above) => Ok(Self::new(
                 None,
                 LayerShellCustomAction::NewLayerShell {
-                    settings: item_menu_surface(height, left, edge),
+                    settings: item_menu_surface(height, left, edge, above),
                     id,
                 },
             )),
@@ -420,13 +425,28 @@ fn menu_surface(height: u32, top: i32) -> NewLayerShellSettings {
 /// Where the dock stands: along its edge from one side of the screen to the other, or only as wide
 /// as what it holds in the middle of its edge and a gap off it. Either way it keeps its height of
 /// the screen, so a window stands clear of it and nothing is ever hidden behind it; the compositor
-/// adds the gap to what it keeps.
+/// adds the gap to what it keeps. A dock that hides keeps nothing: the windows have the room, and
+/// the dock comes out over them. Hidden, it is a line along the bottom edge, as wide as it is.
 fn dock_place(dock: &Dock) -> Place {
     let edge = match dock.options.edge {
         Edge::Bottom => Anchor::Bottom,
         Edge::Top => Anchor::Top,
     };
-    let zone = margin(dock.height());
+    let hides = dock.options.hides();
+    let zone = if hides { 0 } else { margin(dock.height()) };
+    if hides && dock.hidden {
+        let (anchor, width) = if dock.options.extend {
+            (Anchor::Bottom | Anchor::Left | Anchor::Right, 0)
+        } else {
+            (Anchor::Bottom, scaled(dock.width()))
+        };
+        return Place {
+            anchor,
+            size: (width, scaled(dock::HIDDEN)),
+            margin: (0, 0, 0, 0),
+            zone,
+        };
+    }
     if dock.options.extend {
         return Place {
             anchor: edge | Anchor::Left | Anchor::Right,
@@ -465,9 +485,9 @@ fn dock_surface(place: Place) -> NewLayerShellSettings {
 /// The menu a right click on a dock item opens: standing on the dock, or hanging from it when the
 /// dock is along the top, its left edge where the item is. A surface that reserves nothing is
 /// placed inside the working area, so the dock's own height is already taken off and the margin
-/// towards it is nothing. It takes the keyboard the same way the Applications menu does, so a click
-/// anywhere else closes it.
-fn item_menu_surface(height: u32, left: i32, edge: Edge) -> NewLayerShellSettings {
+/// towards it is nothing, `above` being the height of a dock that hides and so keeps nothing. It
+/// takes the keyboard the same way the Applications menu does, so a click anywhere else closes it.
+fn item_menu_surface(height: u32, left: i32, edge: Edge, above: i32) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((scaled(dock::MENU_WIDTH), scaled(height))),
         layer: Layer::Overlay,
@@ -476,7 +496,7 @@ fn item_menu_surface(height: u32, left: i32, edge: Edge) -> NewLayerShellSetting
             Edge::Top => Anchor::Top,
         } | Anchor::Left,
         exclusive_zone: Some(0),
-        margin: Some((0, 0, 0, margin(u32::try_from(left).unwrap_or(0)))),
+        margin: Some((0, 0, above, margin(u32::try_from(left).unwrap_or(0)))),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -720,6 +740,9 @@ fn focus() -> Subscription<Message> {
         iced::Event::Window(window::Event::Resized(size)) => Some(Message::Sized(id, size.width)),
         iced::Event::Window(window::Event::Focused) => Some(Message::Focus(id, true)),
         iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(id, false)),
+        // the pointer on the dock or off it, which a dock that hides follows
+        iced::Event::Mouse(mouse::Event::CursorEntered) => Some(Message::Pointer(id, true)),
+        iced::Event::Mouse(mouse::Event::CursorLeft) => Some(Message::Pointer(id, false)),
         _ => None,
     })
 }
@@ -863,6 +886,11 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
         | Message::DockRow(_)
         | Message::Space(_) => horizon_said(state, message),
         Message::Focus(..) | Message::Opened(..) | Message::Sized(..) => surface(state, &message),
+        Message::Pointer(id, over) => pointed(state, id, over),
+        Message::HideDock(number) => {
+            state.dock.waited(number);
+            Task::none()
+        }
         // the runtime takes these before update ever sees them
         Message::Open(..)
         | Message::OpenDock(..)
@@ -909,6 +937,17 @@ fn place_dock(state: &mut Lens) -> Task<Message> {
         work.push(Task::done(Message::Zone(id, wanted.zone)));
     }
     Task::batch(work)
+}
+
+/// The pointer came onto a surface or went off it. On the line a hidden dock leaves it brings the
+/// dock out, and off the dock it starts the wait before a dock that hides goes again.
+fn pointed(state: &mut Lens, id: window::Id, over: bool) -> Task<Message> {
+    if id != state.dock.id {
+        return Task::none();
+    }
+    state.dock.pointed(over).map_or_else(Task::none, |number| {
+        later(dock::HIDE_AFTER, Message::HideDock(number))
+    })
 }
 
 /// The short name of the keyboard layout in use, while there are two or more to switch between.
@@ -1585,9 +1624,20 @@ fn dock_menu(state: &mut Lens, key: &str) -> Task<Message> {
         rows,
     });
     let edge = state.dock.options.edge;
+    // a dock that hides keeps nothing of the screen, so its menu stands on it by its height
+    let above = if state.dock.options.hides() {
+        let gap = if state.dock.options.extend {
+            0
+        } else {
+            margin(dock::OFF_EDGE)
+        };
+        margin(state.dock.height()) + gap
+    } else {
+        0
+    };
     Task::batch([
         closing,
-        Task::done(Message::OpenItemMenu(id, height, left, edge)),
+        Task::done(Message::OpenItemMenu(id, height, left, edge, above)),
     ])
 }
 
@@ -1615,13 +1665,17 @@ fn dock_row(state: &mut Lens, row: &dock::Row) -> Task<Message> {
     closing
 }
 
-/// Close the menu a right click opened, when one is open.
+/// Close the menu a right click opened, when one is open. A dock that hides stayed out while it
+/// was, so the wait before it goes starts again unless the pointer is on it.
 fn close_item_menu(state: &mut Lens) -> Task<Message> {
-    state
-        .dock
-        .menu
-        .take()
-        .map_or_else(Task::none, |menu| Task::done(Message::Close(menu.id)))
+    let Some(menu) = state.dock.menu.take() else {
+        return Task::none();
+    };
+    let closing = Task::done(Message::Close(menu.id));
+    match state.dock.wait() {
+        Some(number) => Task::batch([closing, later(dock::HIDE_AFTER, Message::HideDock(number))]),
+        None => closing,
+    }
 }
 
 /// Start an app from the dock. What went wrong goes in the journal: the dock has no line to say
@@ -1886,6 +1940,7 @@ fn remember(state: &Lens) {
         let (key, value) = setting.split_once(' ').unwrap_or((&setting, ""));
         line(key, value);
     }
+    line("dock-hidden", if state.dock.hidden { "yes" } else { "no" });
     line("workspaces", &state.dock.spaces_line());
     line("layout", state.layout.as_deref().unwrap_or("none"));
     if let Some(menu) = &state.dock.menu {

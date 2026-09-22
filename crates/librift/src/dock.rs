@@ -24,7 +24,7 @@ pub const KEPT: [&str; 4] = [
 ];
 
 /// The names of the settings, in the order the file and `rift-settings --state` have them.
-pub const NAMES: [&str; 3] = ["dock-position", "dock-extend", "dock-icons"];
+pub const NAMES: [&str; 4] = ["dock-position", "dock-extend", "dock-icons", "dock-hide"];
 
 /// The apps the dock keeps, in their order. The four the image ships with when the owner has not
 /// said otherwise.
@@ -179,7 +179,8 @@ impl Size {
 }
 
 /// Where the dock stands and how it is drawn. None of it is the default but the first of each:
-/// flush with the bottom edge, from one side of the screen to the other, with 32 pixel icons.
+/// flush with the bottom edge, from one side of the screen to the other, with 32 pixel icons, and
+/// always there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     /// The edge it stands on.
@@ -189,6 +190,9 @@ pub struct Options {
     pub extend: bool,
     /// How big its icons are.
     pub size: Size,
+    /// Whether it hides until the pointer reaches the bottom edge of the screen. Windows then have
+    /// the room it stood in. Along the top it never hides: the bar holds that edge.
+    pub hide: bool,
 }
 
 impl Default for Options {
@@ -197,6 +201,7 @@ impl Default for Options {
             edge: Edge::Bottom,
             extend: true,
             size: Size::Small,
+            hide: false,
         }
     }
 }
@@ -231,6 +236,8 @@ impl Options {
             ("dock-position", "top") => self.edge = Edge::Top,
             ("dock-extend", "on") => self.extend = true,
             ("dock-extend", "off") => self.extend = false,
+            ("dock-hide", "on") => self.hide = true,
+            ("dock-hide", "off") => self.hide = false,
             ("dock-icons", word) => {
                 let Some(size) = Size::ALL.into_iter().find(|size| size.word() == word) else {
                     return false;
@@ -242,13 +249,22 @@ impl Options {
         true
     }
 
+    /// Whether the dock hides where it stands: along the bottom with hiding on. The pointer comes
+    /// to the top edge on its way to the bar's buttons, so a dock along the top stays.
+    #[must_use]
+    pub const fn hides(&self) -> bool {
+        self.hide && matches!(self.edge, Edge::Bottom)
+    }
+
     /// A line for each setting, its name and its value, in the order of [`NAMES`].
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
+        let word = |on: bool| if on { "on" } else { "off" };
         let values = [
             self.edge.word(),
-            if self.extend { "on" } else { "off" },
+            word(self.extend),
             self.size.word(),
+            word(self.hide),
         ];
         NAMES
             .iter()
@@ -326,19 +342,31 @@ mod tests {
         let options = Options::default();
         assert_eq!(
             options.lines(),
-            ["dock-position bottom", "dock-extend on", "dock-icons small"]
+            [
+                "dock-position bottom",
+                "dock-extend on",
+                "dock-icons small",
+                "dock-hide off"
+            ]
         );
         let mut chosen = options;
         assert!(chosen.set("dock-position", "Top"));
         assert!(chosen.set("dock-extend", "off"));
         assert!(chosen.set("dock-icons", "large"));
+        assert!(chosen.set("dock-hide", "on"));
         assert_eq!(Options::parse(&chosen.lines().join("\n")), chosen);
         assert_eq!(chosen.size.icon(), 48);
+        // a dock along the top stays whatever the setting says, and hides again along the bottom
+        assert!(chosen.hide && !chosen.hides());
+        assert!(chosen.set("dock-position", "bottom"));
+        assert!(chosen.hides());
+        // a file written before there was a setting for hiding reads as a dock that stays
+        assert!(!Options::parse("dock-position bottom\ndock-extend on\ndock-icons small\n").hide);
         // a word that is not one changes nothing
         assert!(!chosen.set("dock-position", "left"));
         assert!(!chosen.set("dock-icons", "huge"));
         assert!(!chosen.set("autohide", "on"));
-        assert_eq!(chosen.edge, Edge::Top);
+        assert_eq!(chosen.edge, Edge::Bottom);
         // and a file with nothing in it is the image's own dock
         assert_eq!(Options::parse(""), Options::default());
     }

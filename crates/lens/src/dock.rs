@@ -3,7 +3,10 @@
 //! lists comes from the desktop entries and from Horizon's event stream, and a click goes back to
 //! Horizon. It stands along the bottom of the screen from one side to the other with 32 pixel
 //! icons, or where the owner put it on the Dock page: along the top, only as wide as what it holds
-//! in the middle of its edge, with bigger icons.
+//! in the middle of its edge, with bigger icons. Along the bottom it can hide until the pointer
+//! reaches the edge of the screen, leaving a line two pixels tall there.
+
+use std::time::Duration;
 
 use iced::widget::{button, column, container, mouse_area, row, space, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme, window};
@@ -45,6 +48,12 @@ const SPACE: u32 = 24;
 const SPACE_GAP: u32 = 4;
 /// The corner of an item and of a workspace button.
 const RADIUS: f32 = 4.0;
+/// How tall the line a hidden dock leaves at the bottom edge of the screen is. The pointer stops
+/// on it when it is pushed against the edge, the way a hidden taskbar on Windows leaves one.
+pub const HIDDEN: u32 = 2;
+/// How long the dock waits after the pointer has gone off it before it hides, so a pointer that
+/// slips off for a moment does not send it away.
+pub const HIDE_AFTER: Duration = Duration::from_millis(500);
 
 /// How wide the menu a right click opens is.
 pub const MENU_WIDTH: u32 = 240;
@@ -194,19 +203,29 @@ pub struct Dock {
     pub items: Vec<Item>,
     /// The menu a right click opened, when there is one.
     pub menu: Option<Menu>,
+    /// Whether it is hidden now, which only a dock whose settings say it hides ever is.
+    pub hidden: bool,
+    /// Whether the pointer is on it now.
+    pub pointer: bool,
+    /// How many times the pointer has gone off it, so only the wait after the last time hides it.
+    pub left: u64,
 }
 
 impl Dock {
     /// The dock as it is when the shell starts: the pinned apps, nothing running yet.
     #[must_use]
     pub fn new(id: window::Id, apps: &[App]) -> Self {
+        let options = Options::read();
         let mut dock = Self {
             id,
-            options: Options::read(),
+            options,
             pinned: librift::dock::pinned(),
             open: Open::default(),
             items: Vec::new(),
             menu: None,
+            hidden: options.hides(),
+            pointer: false,
+            left: 0,
         };
         dock.build(apps);
         dock
@@ -232,11 +251,45 @@ impl Dock {
         self.build(apps);
     }
 
-    /// Read the list and the settings again, which Settings has just written.
+    /// Read the list and the settings again, which Settings has just written. A dock told to hide
+    /// hides at once unless the pointer is on it, and one told to stay comes back.
     pub fn reload(&mut self, apps: &[App]) {
         self.options = Options::read();
         self.pinned = librift::dock::pinned();
+        self.hidden = self.options.hides() && !self.pointer && self.menu.is_none();
         self.build(apps);
+    }
+
+    /// The pointer came onto the dock, or onto the line a hidden dock leaves, which brings it out;
+    /// or it went off, and the dock hides a moment later. The number the wait after going off
+    /// carries, when there is one to start.
+    pub fn pointed(&mut self, over: bool) -> Option<u64> {
+        self.pointer = over;
+        // coming back on, or going off, makes any wait that is running the wrong one
+        self.left += 1;
+        if over {
+            self.hidden = false;
+            return None;
+        }
+        self.wait()
+    }
+
+    /// The number of a new wait before hiding, when the dock hides and is out, and the pointer is
+    /// not on it. The menu of an item keeps it out while it is open.
+    pub fn wait(&mut self) -> Option<u64> {
+        if !self.options.hides() || self.hidden || self.pointer {
+            return None;
+        }
+        self.left += 1;
+        Some(self.left)
+    }
+
+    /// The wait with this number is over: the dock hides, unless the pointer came back, its menu
+    /// is open or it no longer hides.
+    pub fn waited(&mut self, number: u64) {
+        if number == self.left && self.options.hides() && !self.pointer && self.menu.is_none() {
+            self.hidden = true;
+        }
     }
 
     /// How tall it is, in logical pixels.
@@ -363,8 +416,12 @@ pub fn items(apps: &[App], pinned: &[String], open: &Open) -> Vec<Item> {
 
 /// The dock: the apps at the left, the workspaces at the right, on the bar's gray. One that runs
 /// from side to side has a hairline along the edge that faces the windows, and one that is only as
-/// wide as what it holds a border all round, like a menu.
+/// wide as what it holds a border all round, like a menu. A hidden dock is the top of itself, the
+/// hairline over the bar's gray, or its border.
 pub fn view(look: Palette, dock: &Dock) -> Element<'_, Message> {
+    if dock.hidden {
+        return hidden(look, dock.options.extend);
+    }
     let size = dock.options.size;
     let mut apps = row![].spacing(GAP).align_y(iced::Center);
     for item in &dock.items {
@@ -419,6 +476,37 @@ pub fn view(look: Palette, dock: &Dock) -> Element<'_, Message> {
         Edge::Bottom => column![hairline, content].into(),
         Edge::Top => column![content, hairline].into(),
     }
+}
+
+/// What is left of a hidden dock at the bottom edge: the hairline along its top over the bar's
+/// gray, or the border of one that does not reach the sides.
+fn hidden(look: Palette, extend: bool) -> Element<'static, Message> {
+    let fill = |colour: Color| {
+        move |_: &Theme| container::Style {
+            background: Some(colour.into()),
+            ..container::Style::default()
+        }
+    };
+    if extend {
+        return column![
+            container(space().width(Length::Fill).height(LINE)).style(fill(look.line)),
+            container(space().width(Length::Fill).height(Length::Fill)).style(fill(look.bar)),
+        ]
+        .into();
+    }
+    container(space().width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(look.bar.into()),
+            border: Border {
+                color: look.edge,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// One app: its icon, a mark per window under it, and the accent line under the one being used. A
@@ -762,6 +850,9 @@ mod tests {
             open: Open::default(),
             items: Vec::new(),
             menu: None,
+            hidden: false,
+            pointer: false,
+            left: 0,
         };
         dock.changed(&apps(), open);
         assert_eq!(dock.line(), "firefox:0 com.mitchellh.ghostty:1* Helix:1");
@@ -792,6 +883,9 @@ mod tests {
             open: Open::default(),
             items: Vec::new(),
             menu: None,
+            hidden: false,
+            pointer: false,
+            left: 0,
         };
         dock.build(&known);
         dock.pinned.push("Helix".to_string());
@@ -801,6 +895,60 @@ mod tests {
         dock.pinned.retain(|key| key != "firefox");
         dock.build(&known);
         assert!(dock.item("firefox").is_none());
+    }
+
+    #[test]
+    fn a_dock_that_hides_waits_for_the_pointer_to_go_then_hides() {
+        let mut dock = Dock {
+            id: window::Id::unique(),
+            options: Options {
+                hide: true,
+                ..Options::default()
+            },
+            pinned: kept(),
+            open: Open::default(),
+            items: Vec::new(),
+            menu: None,
+            hidden: true,
+            pointer: false,
+            left: 0,
+        };
+        // the pointer on the line at the edge brings it out, and going off it starts a wait
+        assert_eq!(dock.pointed(true), None);
+        assert!(!dock.hidden);
+        let first = dock.pointed(false).expect("a wait");
+        // coming back before the wait is over keeps it out, and the old wait does nothing
+        assert_eq!(dock.pointed(true), None);
+        dock.waited(first);
+        assert!(!dock.hidden);
+        let second = dock.pointed(false).expect("a wait");
+        // a menu that is open when the wait is over keeps it out too
+        dock.menu = Some(Menu {
+            id: window::Id::unique(),
+            key: "firefox".to_string(),
+            rows: vec![Row::New],
+        });
+        dock.waited(second);
+        assert!(!dock.hidden);
+        dock.menu = None;
+        let third = dock.wait().expect("a wait once the menu has closed");
+        dock.waited(second);
+        assert!(!dock.hidden, "only the last wait counts");
+        dock.waited(third);
+        assert!(dock.hidden);
+        // a hidden dock starts no wait, and one that does not hide never hides
+        assert_eq!(dock.wait(), None);
+        dock.options.hide = false;
+        assert_eq!(dock.pointed(true), None);
+        assert_eq!(dock.pointed(false), None);
+        assert!(!dock.hidden);
+        // along the top it stays whatever the setting says
+        dock.options = Options {
+            hide: true,
+            edge: Edge::Top,
+            ..Options::default()
+        };
+        assert_eq!(dock.pointed(false), None);
     }
 
     #[test]

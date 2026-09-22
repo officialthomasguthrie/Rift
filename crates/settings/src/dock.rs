@@ -1,5 +1,6 @@
 //! The Dock page: the apps the dock keeps and their order, the edge it stands on, whether it runs
-//! from one side of the screen to the other, and how big its icons are.
+//! from one side of the screen to the other, whether it hides until the pointer reaches the bottom
+//! edge, and how big its icons are.
 //!
 //! The shell keeps the dock's apps in a file of the owner's and writes it when an app is pinned from
 //! its menu in the dock, so the page reads the file as it comes up and every second while it is
@@ -19,7 +20,7 @@ use crate::icons;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
 use crate::widgets::{
-    GAP, TEXT_SIZE, action, choice, field, group, heading, note, pressable, setting, switch,
+    GAP, TEXT_SIZE, action, choice, field, group, heading, note, pressable, setting, still, switch,
 };
 
 /// The field an app to pin is searched for in.
@@ -30,12 +31,13 @@ const LISTED: usize = 8;
 const EVERY: Duration = Duration::from_secs(1);
 /// How big an app's icon is in a row.
 const ICON: f32 = 24.0;
-/// The names `rift-settings --set` takes for this page: the three settings, then the four changes
+/// The names `rift-settings --set` takes for this page: the four settings, then the four changes
 /// to the list, each with an app's id.
-pub const NAMES: [&str; 7] = [
+pub const NAMES: [&str; 8] = [
     "dock-position",
     "dock-extend",
     "dock-icons",
+    "dock-hide",
     "pin",
     "unpin",
     "move-up",
@@ -331,7 +333,7 @@ fn kept<'a>(
     .into()
 }
 
-/// The edge the dock stands on, and whether it runs from one side to the other.
+/// The edge the dock stands on, whether it runs from one side to the other, and whether it hides.
 fn the_position<'a>(look: Colors, options: Options) -> Element<'a, Message> {
     let edges = [(Edge::Bottom, "Bottom"), (Edge::Top, "Top")]
         .into_iter()
@@ -346,19 +348,40 @@ fn the_position<'a>(look: Colors, options: Options) -> Element<'a, Message> {
             )
         })
         .collect();
-    let extend = vec![setting(
-        look,
-        "Extend to the edges",
-        Some(EXTEND),
-        switch(look, options.extend, move |extend| {
-            Message::Dock(Asked::Options(Options { extend, ..options }))
-        }),
-    )];
+    // along the top the dock stays, since the pointer crosses that edge on its way to the bar, so
+    // the switch stands still there and keeps what it says for the bottom
+    let hiding = if options.edge == Edge::Bottom {
+        setting(
+            look,
+            "Hide automatically",
+            Some(HIDE),
+            switch(look, options.hide, move |hide| {
+                Message::Dock(Asked::Options(Options { hide, ..options }))
+            }),
+        )
+    } else {
+        setting(
+            look,
+            "Hide automatically",
+            Some(HIDE_TOP),
+            still(look, options.hide),
+        )
+    };
+    let switches = vec![
+        setting(
+            look,
+            "Extend to the edges",
+            Some(EXTEND),
+            switch(look, options.extend, move |extend| {
+                Message::Dock(Asked::Options(Options { extend, ..options }))
+            }),
+        ),
+        hiding,
+    ];
     column![
         heading(look, "Position"),
         group(look, edges),
-        group(look, extend),
-        note(look, HIDING)
+        group(look, switches),
     ]
     .spacing(8)
     .into()
@@ -390,8 +413,12 @@ const APPS: &str = "The dock shows these in this order, then the apps that are r
 /// Under the switch that makes the dock run from side to side.
 const EXTEND: &str = "Off, the dock is only as wide as its apps and stands in the middle of its \
                       edge, a little way off it.";
-/// What the page cannot do yet.
-const HIDING: &str = "Hiding the dock until the pointer reaches its edge is not in Rift yet.";
+/// Under the switch that makes the dock hide.
+const HIDE: &str = "Windows have the room it stood in, and it comes back over them when the \
+                    pointer reaches the bottom edge of the screen.";
+/// The same, with the dock along the top.
+const HIDE_TOP: &str = "Along the top the dock stays, since the pointer crosses it on the way to \
+                        the bar.";
 
 #[cfg(test)]
 mod tests {
@@ -445,6 +472,7 @@ mod tests {
                 "dock-position bottom",
                 "dock-extend on",
                 "dock-icons small",
+                "dock-hide off",
             ]
         );
     }
@@ -470,6 +498,13 @@ mod tests {
         );
         assert_eq!(named(&kept, "pin", "klingon"), None);
         assert_eq!(named(&kept, "dock-icons", "huge"), None);
+        assert_eq!(
+            named(&kept, "dock-hide", "on"),
+            Some(Asked::Options(Options {
+                hide: true,
+                ..Options::default()
+            }))
+        );
         assert_eq!(named(&kept, "autohide", "on"), None);
     }
 
@@ -492,7 +527,7 @@ mod tests {
 
     #[test]
     fn the_sentences_are_sentences() {
-        for sentence in [APPS, EXTEND, HIDING] {
+        for sentence in [APPS, EXTEND, HIDE, HIDE_TOP] {
             assert!(sentence.ends_with('.'), "{sentence}");
             assert!(sentence.is_ascii(), "{sentence}");
         }
