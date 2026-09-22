@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 # what is in a folder and the kind of each file, the trash, the places, the apps that open files and
 # which one opens each kind, and the colours the owner chose. the bus feature is udisks, which
-# answers what disks are plugged in and mounts the ones polkit lets the owner mount
+# answers what disks are plugged in and mounts the ones polkit does not refuse
 librift = { workspace = true, features = ["bus"] }
 # the colours, the rows, the menus, the dialogs and the icons Settings and Welcome draw with too
 rift-ui = { workspace = true }

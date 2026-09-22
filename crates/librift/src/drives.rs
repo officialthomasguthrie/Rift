@@ -1,7 +1,7 @@
 //! The disks a person plugs in, and the exchange partition of the drive itself.
 //!
 //! udisks answers on the system bus for every block device the kernel knows, and mounts the ones
-//! polkit lets the owner mount. Rift's polkit rule refuses every udisks action whose id ends in
+//! polkit does not refuse. Rift's polkit rule refuses every udisks action whose id ends in
 //! `-system`, which is the one udisks asks for when the device is internal to the machine, so a
 //! host's own disks can be looked at and never mounted. What is left is removable disks and disks
 //! on USB, which are the ones a person brought with them: those are what this lists.
@@ -387,6 +387,118 @@ mod asking {
     /// When the bus cannot be reached or closes the connection.
     pub fn watch<F: FnMut() -> bool>(each: F) -> Result<(), String> {
         bus::signals(SERVICE, each)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn value(of: impl Into<zbus::zvariant::Value<'static>>) -> OwnedValue {
+            OwnedValue::try_from(of.into()).expect("a property")
+        }
+
+        /// One object's interfaces, each with the properties named.
+        fn object_of(pairs: &[(&str, &[(&str, OwnedValue)])]) -> Interfaces {
+            pairs
+                .iter()
+                .map(|(interface, properties)| {
+                    (
+                        (*interface).to_string(),
+                        properties
+                            .iter()
+                            .map(|(key, held)| {
+                                ((*key).to_string(), held.try_clone().expect("a property"))
+                            })
+                            .collect(),
+                    )
+                })
+                .collect()
+        }
+
+        fn path_of_str(path: &str) -> OwnedObjectPath {
+            OwnedObjectPath::try_from(path).expect("an object path")
+        }
+
+        /// A disk and one file system on it, the way udisks answers.
+        fn disk(
+            objects: &mut Objects,
+            name: &str,
+            removable: bool,
+            label: &str,
+            mounted: Option<&str>,
+        ) {
+            let drive = format!("/org/freedesktop/UDisks2/drives/{name}");
+            objects.insert(
+                path_of_str(&drive),
+                object_of(&[(
+                    DRIVE,
+                    &[
+                        ("Removable", value(removable)),
+                        ("ConnectionBus", value(String::new())),
+                        ("Ejectable", value(removable)),
+                        ("CanPowerOff", value(removable)),
+                        ("Vendor", value("QEMU".to_string())),
+                        ("Model", value("HARDDISK".to_string())),
+                    ],
+                )]),
+            );
+            let mut block: Vec<(&str, OwnedValue)> = vec![
+                ("IdLabel", value(label.to_string())),
+                ("IdType", value("exfat".to_string())),
+                ("Size", value(64u64 * 1024 * 1024)),
+                ("HintIgnore", value(false)),
+                ("Drive", value(path_of_str(&drive))),
+                ("Device", value(format!("/dev/{name}\0").into_bytes())),
+            ];
+            let mut points: Vec<(&str, OwnedValue)> = Vec::new();
+            if let Some(mount) = mounted {
+                points.push((
+                    "MountPoints",
+                    value(vec![format!("{mount}\0").into_bytes()]),
+                ));
+            }
+            block.push(("ReadOnly", value(false)));
+            objects.insert(
+                path_of_str(&format!("/org/freedesktop/UDisks2/block_devices/{name}")),
+                object_of(&[(BLOCK, &block), (FILESYSTEM, &points)]),
+            );
+        }
+
+        #[test]
+        fn only_the_disks_a_person_plugged_in_are_listed() {
+            let mut objects = Objects::new();
+            // the drive rift runs from, which is removable on a real stick
+            disk(&mut objects, "sda", true, "EXCHANGE", None);
+            // a disk of the machine, which polkit would refuse anyway
+            disk(
+                &mut objects,
+                "nvme0n1",
+                false,
+                "backup",
+                Some("/mnt/backup"),
+            );
+            // and a memory stick, mounted
+            disk(
+                &mut objects,
+                "sdb",
+                true,
+                "STICK",
+                Some("/run/media/rift/STICK"),
+            );
+            let ours = listed(&objects, Some(Path::new("/dev/sda")));
+            let names: Vec<&str> = ours.iter().map(|volume| volume.name.as_str()).collect();
+            assert_eq!(names, ["STICK"]);
+            assert_eq!(ours[0].device, "/dev/sdb");
+            assert_eq!(
+                ours[0].mount.as_deref(),
+                Some(Path::new("/run/media/rift/STICK"))
+            );
+            assert!(ours[0].eject && !ours[0].locked);
+            assert_eq!(ours[0].icon, "drive-harddisk-symbolic");
+            // with no drive of its own to leave out, the machine's disk is still not one
+            let every = listed(&objects, None);
+            let names: Vec<&str> = every.iter().map(|volume| volume.name.as_str()).collect();
+            assert_eq!(names, ["EXCHANGE", "STICK"]);
+        }
     }
 }
 
