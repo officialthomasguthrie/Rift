@@ -496,6 +496,10 @@ jobs:
           # an empty disk for the backup step. vault finds it by the uuid mkfs gives it
           truncate -s 256M backup.img
           mkfs.ext4 -q -F -L backup backup.img
+          # a memory stick for Files: one exfat file system, the way a stick is sold, with nothing
+          # on it. Files mounts it through udisks when its row in the sidebar is pressed
+          truncate -s 64M stick.img
+          nix shell --inputs-from . nixpkgs#exfatprogs -c mkfs.exfat -L STICK stick.img
           # the disk the clone goes onto. sparse, the clone fills about 7G of it, and the runner has
           # more than 80G free. the first drive has an exchange partition, so the clone gets one too
           truncate -s 26G clone.img
@@ -504,7 +508,8 @@ jobs:
           # the vm app writes the image onto a drive in a file with rift-flash and boots that
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --models models/cache \
             --exchange 1G --log serial.log --splash splash.png --desktop desktop.png --lens \
-            --updates updates.img --backup backup.img --clone clone.img --flatpak test-flatpak --timeout 2400
+            --updates updates.img --backup backup.img --clone clone.img --stick stick.img \
+            --flatpak test-flatpak --timeout 2400
       - name: Boot a drive that makes persist at its first boot
         # rift-flash leaves persist out, the way it writes a drive on macos and windows. the drive
         # asks for a passphrase over serial, makes persist and formats its exchange partition, and the

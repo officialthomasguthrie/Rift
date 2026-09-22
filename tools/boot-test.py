@@ -416,6 +416,11 @@ FILES_FOLDERS = ["Documents", "Downloads", "Music", "Pictures", "Videos"]
 FILES_NOTE = "notes.txt"
 FILES_RENAMED = "minutes.txt"
 FILES_FOLDER = "Plans"
+# the disks in Files' sidebar: the drive's own exchange partition and the stick --stick attaches
+DRIVE_EXCHANGE = "/exchange"
+DRIVE_LABEL = "STICK"
+DRIVE_MOUNT = f"/run/media/rift/{DRIVE_LABEL}"
+DRIVE_FILE = "handover.txt"
 # one window of `horizon msg --json windows`, whose fields come in the order niri-ipc declares them
 WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
@@ -1432,6 +1437,8 @@ def main():
     ap.add_argument("--backup", help="an empty ext4 image labelled backup, back up home onto it and restore from it")
     ap.add_argument("--clone", help="an empty file of at least 24G, clone the drive onto it as a removable disk "
                     "and boot the clone")
+    ap.add_argument("--stick", help=f"an image holding one file system labelled {DRIVE_LABEL}, attach it as a "
+                    "removable disk and mount it, copy onto it and eject it from Files")
     ap.add_argument("--flatpak", help="the directory nix build .#test-flatpak makes, with a signed repository and its "
                     "key: add it as a remote, install its app from Welcome and run it with the portals")
     ap.add_argument("--offline", help="boot with no network card, check Welcome opens on the page that says so, save "
@@ -1492,12 +1499,19 @@ def main():
         # and one for backups. vault mounts it by the uuid of its file system
         cmd += ["-drive", f"if=none,id=backup,format=raw,file={os.path.abspath(args.backup)}",
                 "-device", "nvme,drive=backup,serial=backup"]
+    if args.clone or args.stick:
+        # a scsi controller for the disks that say they are removable, the way a stick in a card
+        # reader does
+        cmd += ["-device", "virtio-scsi-pci,id=scsi"]
     if args.clone:
-        # and the disk the clone goes onto: a scsi disk that says it is removable, the way a stick in a
-        # card reader does, since vault clones onto nothing else. zeros written to it stay holes in the file
-        cmd += ["-device", "virtio-scsi-pci,id=scsi",
-                "-drive", f"if=none,id=clone,format=raw,discard=unmap,detect-zeroes=unmap,file={os.path.abspath(args.clone)}",
+        # the disk the clone goes onto, since vault clones onto nothing else. zeros written to it stay
+        # holes in the file
+        cmd += ["-drive", f"if=none,id=clone,format=raw,discard=unmap,detect-zeroes=unmap,file={os.path.abspath(args.clone)}",
                 "-device", "scsi-hd,bus=scsi.0,drive=clone,serial=clone,removable=on"]
+    if args.stick:
+        # and a memory stick with a file system on it, which Files mounts through udisks
+        cmd += ["-drive", f"if=none,id=stick,format=raw,file={os.path.abspath(args.stick)}",
+                "-device", "scsi-hd,bus=scsi.0,drive=stick,serial=stick,removable=on"]
     print("boot-test: " + " ".join(cmd), flush=True)
 
     start = time.monotonic()
@@ -6286,6 +6300,124 @@ def main():
                 fail(f"the image viewer Files opened is in no scope of its own: {without_console(files_scopes).strip()[-600:]!r}")
             close_app("the image viewer", "loupe")
             ok(f"{PICTURE}.jpg opened in the image viewer, the app for its kind, in a scope of its own")
+
+            # 5o. the disks in the sidebar. the drive's own exchange partition is mounted by the
+            # system, because every partition of the drive belongs to the drive; a memory stick is
+            # mounted by udisks when the owner presses it, and never by itself. nothing of the
+            # machine's own can be mounted at all, which 5j shows polkit refusing. then a file is
+            # copied onto the stick, one on the stick goes to the stick's own trash, a second copy
+            # asks before it replaces a name, and the stick is unmounted and ejected
+            def drive_lines(lines):
+                """The disks --state printed, by name."""
+                found = {}
+                for printed in lines or []:
+                    if printed.startswith("drive "):
+                        name, state, mount = printed[len("drive "):].rsplit(" ", 2)
+                        found[name] = (state, mount)
+                return found
+
+            if args.exchange:
+                _, drive_said = run(f"findmnt --noheadings --output SOURCE,FSTYPE {DRIVE_EXCHANGE}; "
+                                    f"printf 'for another computer\\n' > {DRIVE_EXCHANGE}/{DRIVE_FILE}; "
+                                    f"stat -c owner=%U {DRIVE_EXCHANGE}/{DRIVE_FILE}",
+                                    "the exchange partition, and a file written on it")
+                drive_said = without_console(drive_said)
+                if "exfat" not in drive_said or f"owner={OWNER_USER}" not in drive_said:
+                    fail(f"{DRIVE_EXCHANGE} is not the drive's exfat partition the owner can write to: "
+                         f"{drive_said.strip()[-400:]!r}")
+                files_set("place", "exchange", "the exchange partition in the sidebar")
+                files_until(30, lambda lines: files_value(lines, "location") == DRIVE_EXCHANGE
+                            and f"row file {DRIVE_FILE}" in lines, "the exchange partition's own folder")
+                ok(f"the system mounted the drive's exchange partition at {DRIVE_EXCHANGE}, the owner wrote "
+                   f"{DRIVE_FILE} on it, and Files lists it in the sidebar")
+
+            if args.stick:
+                drive_found = files_until(180, lambda lines: DRIVE_LABEL in drive_lines(lines),
+                                          f"the {DRIVE_LABEL} disk in the sidebar")
+                drive_listed = drive_lines(drive_found)
+                if drive_listed[DRIVE_LABEL] != ("there", "none"):
+                    fail(f"Files says {DRIVE_LABEL} is {drive_listed[DRIVE_LABEL]}, and nothing is mounted "
+                         "by itself")
+                if list(drive_listed) != [DRIVE_LABEL]:
+                    fail(f"Files lists the disks {list(drive_listed)}, and only a disk a person plugged in "
+                         "belongs there: the backup disk of this machine is not one")
+                files_set("drive", DRIVE_LABEL, f"{DRIVE_LABEL} in the sidebar")
+                drive_found = files_until(120, lambda lines: drive_lines(lines).get(DRIVE_LABEL)
+                                          == ("mounted", DRIVE_MOUNT)
+                                          and files_value(lines, "location") == DRIVE_MOUNT
+                                          and files_value(lines, "ready") == "yes",
+                                          f"{DRIVE_LABEL} mounted and open")
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                look(f"{FILES_APP} on the disk, with it in the sidebar", f"{stem}-files-drive{extension}", 120,
+                     apps=[FILES_APP], journals=("horizon",), settle=3)
+                ok(f"Files listed {DRIVE_LABEL} without mounting it, and mounted it at {DRIVE_MOUNT} when it "
+                   "was pressed")
+
+                files_set("place", "documents", "Documents in the sidebar")
+                files_until(30, lambda lines: files_value(lines, "location") == files_documents
+                            and f"row file {FILES_NOTE}" in lines, "Documents again")
+                files_select(FILES_NOTE)
+                files_set("copy", "now", "Copy")
+                files_until(20, lambda lines: files_value(lines, "clipboard") == "copy 1", "a file on the clipboard")
+                files_set("drive", DRIVE_LABEL, f"{DRIVE_LABEL} again")
+                files_until(60, lambda lines: files_value(lines, "location") == DRIVE_MOUNT
+                            and files_value(lines, "ready") == "yes", f"{DRIVE_LABEL} open again")
+                files_set("paste", "now", "Paste onto the disk")
+                files_until(120, lambda lines: f"row file {FILES_NOTE}" in lines,
+                            f"{FILES_NOTE} on {DRIVE_LABEL}")
+                _, drive_said = run(f"cmp ~/Documents/{FILES_NOTE} {DRIVE_MOUNT}/{FILES_NOTE}; "
+                                    "and echo same; or echo differ", "the copy on the disk")
+                if "same" not in without_console(drive_said):
+                    fail(f"the copy of {FILES_NOTE} on {DRIVE_LABEL} differs: {without_console(drive_said).strip()!r}")
+                ok(f"{FILES_NOTE} was copied from home onto {DRIVE_LABEL}")
+
+                files_select(FILES_NOTE)
+                files_set("trash", "now", "Move to trash on the disk")
+                files_until(60, lambda lines: f"row file {FILES_NOTE}" not in lines
+                            and files_value(lines, "trash") == "full", f"{FILES_NOTE} in the disk's trash")
+                _, drive_said = run(f"ls -1 {DRIVE_MOUNT}/.Trash-1000/files; "
+                                    f"cat {DRIVE_MOUNT}/.Trash-1000/info/{FILES_NOTE}.trashinfo",
+                                    "the disk's own trash")
+                drive_said = without_console(drive_said)
+                # the note says where it was under the top of the disk, not where the disk is mounted
+                if FILES_NOTE not in drive_said or f"Path={FILES_NOTE}" not in drive_said:
+                    fail(f"the disk's own trash holds {drive_said.strip()[-400:]!r}")
+                files_set("place", "trash", "the trash in the sidebar")
+                files_until(30, lambda lines: files_value(lines, "location") == "trash"
+                            and f"row file {FILES_NOTE} from {DRIVE_MOUNT}/{FILES_NOTE}" in lines,
+                            "the disk's trash in the trash's own view")
+                files_set("undo", "now", "Undo")
+                files_until(60, lambda lines: files_value(lines, "rows") == "0", "the trash empty again")
+                ok(f"{FILES_NOTE} went into {DRIVE_LABEL}'s own trash, listed there with where it was on the "
+                   "disk, and Undo put it back")
+
+                files_set("drive", DRIVE_LABEL, f"{DRIVE_LABEL} once more")
+                files_until(60, lambda lines: files_value(lines, "location") == DRIVE_MOUNT
+                            and f"row file {FILES_NOTE}" in lines, f"{FILES_NOTE} back on {DRIVE_LABEL}")
+                files_set("paste", "now", "Paste the same name again")
+                files_until(60, lambda lines: files_value(lines, "dialog") == "replace",
+                            "the question before a name is replaced")
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                shot(f"{stem}-files-replace{extension}", "files-replace")
+                files_set("replace", "now", "Replace")
+                files_until(120, lambda lines: files_value(lines, "toast") is not None
+                            and "in the trash" in files_value(lines, "toast"),
+                            "what the copy that replaced a name says")
+                _, drive_said = run(f"ls -1 {DRIVE_MOUNT}/.Trash-1000/files", "the disk's trash after the replace")
+                if FILES_NOTE not in without_console(drive_said):
+                    fail(f"the name that was replaced is not in {DRIVE_LABEL}'s trash: "
+                         f"{without_console(drive_said).strip()[-300:]!r}")
+                ok("a copy onto a name that is taken asked first, and the one that was there went to the "
+                   "disk's own trash")
+
+                files_set("eject", DRIVE_LABEL, f"eject {DRIVE_LABEL}")
+                files_until(120, lambda lines: drive_lines(lines).get(DRIVE_LABEL, ("gone", ""))[0] != "mounted",
+                            f"{DRIVE_LABEL} unmounted")
+                _, drive_said = run(f"findmnt --noheadings --output TARGET {DRIVE_MOUNT} | cat",
+                                    "what is mounted where the disk was")
+                if DRIVE_MOUNT in without_console(drive_said):
+                    fail(f"{DRIVE_MOUNT} is still mounted after {DRIVE_LABEL} was ejected")
+                ok(f"{DRIVE_LABEL} was unmounted and ejected from its row in the sidebar")
 
             files_set("close", "now", "Files' close button")
             if not wait_for(60, lambda: not app_windows(FILES_APP_ID, "Files' window after it closed")):
