@@ -31,6 +31,10 @@ pub mod defaults;
 #[cfg(feature = "disk")]
 pub mod disk;
 pub mod dock;
+// the disks a person plugs in and the exchange partition of the drive, which are a freedesktop
+// session's too
+#[cfg(unix)]
+pub mod drives;
 // folders, the kinds of file and the trash are a freedesktop session's, which rift-flash has no
 // use for on Windows
 #[cfg(unix)]

@@ -679,6 +679,40 @@ pub fn path_of(given: &str) -> PathBuf {
     PathBuf::from(given)
 }
 
+/// The top of the file system a path is on: the folder over it that something is mounted at,
+/// found by walking up while the file system stays the same. `/` for anything on the root file
+/// system. The trash specification calls it the top directory, and a drive keeps its own trash
+/// there.
+#[must_use]
+pub fn top_of(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let start = if fs::symlink_metadata(path).ok()?.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    let mut top = fs::canonicalize(&start).ok()?;
+    let device = fs::metadata(&top).ok()?.dev();
+    while let Some(parent) = top.parent() {
+        match fs::metadata(parent) {
+            Ok(meta) if meta.dev() == device => top = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    Some(top)
+}
+
+/// The account this is running as, which names the trash on a drive. The kernel says so where
+/// there is a /proc, and home's own owner says it everywhere else.
+#[must_use]
+pub fn uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata("/proc/self")
+        .ok()
+        .or_else(|| home().and_then(|home| fs::metadata(home).ok()))
+        .map_or(0, |meta| meta.uid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

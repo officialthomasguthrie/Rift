@@ -1,8 +1,13 @@
 //! The trash, the way the freedesktop trash specification keeps it, which is also where every GTK
 //! app's Move to trash and the portal put things: `~/.local/share/Trash`, with the file itself in
 //! `files` and a note in `info` of where it was and when it went, under the same name. A file
-//! goes into the trash by a rename, so only a file on the same file system as the trash can; a
-//! file anywhere else is deleted instead, when the owner says so.
+//! goes into the trash by a rename, so only a file on the same file system as the trash can.
+//!
+//! A drive keeps its own, at the top of its file system: `$top/.Trash/$uid` when an administrator
+//! made a sticky `.Trash` there, and `$top/.Trash-$uid` otherwise, which is the one the desktop
+//! makes itself. Its notes say where a file was as a path under the top, so the drive still knows
+//! where everything belongs on another machine, where it is mounted somewhere else. A file on a
+//! file system with no trash of its own is deleted instead, when the owner says so.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -20,11 +25,17 @@ const NOTE: &str = ".trashinfo";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trash {
     root: PathBuf,
+    /// The top of the drive this trash is on, when it is a drive's own: its notes say where a
+    /// file was as a path under that folder. Nothing for the trash in home, whose notes say the
+    /// whole path.
+    top: Option<PathBuf>,
 }
 
 /// Something in the trash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trashed {
+    /// The trash it is in, which is the folder that holds `files` and `info`.
+    pub root: PathBuf,
     /// Its name in the trash, which is its note's name too.
     pub name: OsString,
     /// Where it was.
@@ -46,6 +57,12 @@ impl Trashed {
             |name| name.to_string_lossy().into_owned(),
         )
     }
+
+    /// Where it lies in the trash, which names it whichever trash it is in.
+    #[must_use]
+    pub fn file(&self) -> PathBuf {
+        self.root.join("files").join(&self.name)
+    }
 }
 
 impl Trash {
@@ -59,16 +76,79 @@ impl Trash {
         Some(Self::at(data.join("Trash")))
     }
 
-    /// The trash in this folder.
+    /// The trash in this folder, which is a drive's own when it is named like one.
     #[must_use]
     pub fn at(root: PathBuf) -> Self {
-        Self { root }
+        let top = top_of_trash(&root);
+        Self { root, top }
+    }
+
+    /// The trash at the top of a drive: the one an administrator made, `$top/.Trash/$uid`, when
+    /// it is there and sticky, and `$top/.Trash-$uid` otherwise, which is the one the desktop
+    /// makes for itself.
+    #[must_use]
+    pub fn on(top: &Path, uid: u32) -> Self {
+        let shared = top.join(".Trash");
+        let root = match fs::symlink_metadata(&shared) {
+            Ok(meta) if meta.is_dir() && meta.permissions().mode() & 0o1000 != 0 => {
+                shared.join(uid.to_string())
+            }
+            _ => top.join(format!(".Trash-{uid}")),
+        };
+        Self {
+            root,
+            top: Some(top.to_path_buf()),
+        }
+    }
+
+    /// The trash a file belongs in: the one in home for anything on home's file system, and the
+    /// drive's own for anything else. Nothing for a file on a file system with no top of its own
+    /// to keep a trash at.
+    #[must_use]
+    pub fn for_path(path: &Path, uid: u32) -> Option<Self> {
+        let home = Self::home();
+        if home.as_ref().is_some_and(|trash| trash.takes(path)) {
+            return home;
+        }
+        let top = super::top_of(path)?;
+        if top == Path::new("/") {
+            return None;
+        }
+        Some(Self::on(&top, uid))
+    }
+
+    /// The trash a file that lies in one belongs to, and its name there.
+    #[must_use]
+    pub fn of(file: &Path) -> Option<(Self, OsString)> {
+        let name = file.file_name()?.to_owned();
+        let files = file.parent()?;
+        if files.file_name() != Some(OsStr::new("files")) {
+            return None;
+        }
+        Some((Self::at(files.parent()?.to_path_buf()), name))
+    }
+
+    /// The top of the drive this trash is on, when it is a drive's own.
+    #[must_use]
+    pub fn top(&self) -> Option<&Path> {
+        self.top.as_deref()
     }
 
     /// The folder the trash is.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Where a note says its file was, as a whole path: a drive's own trash writes it under the
+    /// top of the drive, and the trash in home writes it whole already. Nothing when a note says
+    /// something this trash cannot make sense of.
+    fn whole(&self, said: &Path) -> Option<PathBuf> {
+        match (said.is_absolute(), &self.top) {
+            (true, _) => Some(said.to_path_buf()),
+            (false, Some(top)) => Some(top.join(said)),
+            (false, None) => None,
+        }
     }
 
     fn files(&self) -> PathBuf {
@@ -133,9 +213,13 @@ impl Trash {
             }
             _ => fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
         };
+        let written = match &self.top {
+            Some(top) => whole.strip_prefix(top).unwrap_or(&whole).to_path_buf(),
+            None => whole.clone(),
+        };
         let text = format!(
             "[Trash Info]\nPath={}\nDeletionDate={}\n",
-            escaped(&whole),
+            escaped(&written),
             local_stamp(now, offset)
         );
         let base = path.file_name().unwrap_or(path.as_os_str()).to_owned();
@@ -176,6 +260,7 @@ impl Trash {
         }
         let kind = kind_of(&own, &self.files().join(&name));
         Ok(Trashed {
+            root: self.root.clone(),
             name,
             path: whole,
             deleted: Some(now),
@@ -199,12 +284,7 @@ impl Trash {
                 self.read(OsStr::from_bytes(name), offset)
             })
             .collect();
-        found.sort_by(|one, other| {
-            other
-                .deleted
-                .cmp(&one.deleted)
-                .then_with(|| super::natural(&one.label(), &other.label()))
-        });
+        newest_first(&mut found);
         found
     }
 
@@ -213,9 +293,11 @@ impl Trash {
     pub fn read(&self, name: &OsStr, offset: i32) -> Option<Trashed> {
         let text = fs::read_to_string(self.note(name)).ok()?;
         let (path, deleted) = read_note(&text)?;
+        let path = self.whole(&path)?;
         let file = self.files().join(name);
         let own = fs::symlink_metadata(&file).ok()?;
         Some(Trashed {
+            root: self.root.clone(),
             name: name.to_owned(),
             path,
             deleted: deleted.and_then(|written| stamp_seconds(&written, offset)),
@@ -233,12 +315,14 @@ impl Trash {
     pub fn restore(&self, name: &OsStr) -> Result<PathBuf, String> {
         let text = fs::read_to_string(self.note(name))
             .map_err(|_| format!("{} is not in the trash.", name.to_string_lossy()))?;
-        let (path, _) = read_note(&text).ok_or_else(|| {
-            format!(
-                "The trash's note for {} cannot be read.",
-                name.to_string_lossy()
-            )
-        })?;
+        let (path, _) = read_note(&text)
+            .and_then(|(path, when)| Some((self.whole(&path)?, when)))
+            .ok_or_else(|| {
+                format!(
+                    "The trash's note for {} cannot be read.",
+                    name.to_string_lossy()
+                )
+            })?;
         let shown = path.file_name().map_or_else(
             || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
@@ -301,6 +385,33 @@ impl Trash {
     }
 }
 
+/// Put what came out of one trash or several in the order the trash view lists them: the newest
+/// first, and things thrown away in the same second by name.
+pub fn newest_first(found: &mut [Trashed]) {
+    found.sort_by(|one, other| {
+        other
+            .deleted
+            .cmp(&one.deleted)
+            .then_with(|| super::natural(&one.label(), &other.label()))
+    });
+}
+
+/// The top of the drive a trash folder is on, from its name: `$top/.Trash-$uid`, or `$uid` in a
+/// sticky `$top/.Trash` an administrator made. Nothing for the trash in home, which is not named
+/// either way and whose notes say whole paths.
+fn top_of_trash(root: &Path) -> Option<PathBuf> {
+    let name = root.file_name()?.to_string_lossy().into_owned();
+    let parent = root.parent()?;
+    let number = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    if name.strip_prefix(".Trash-").is_some_and(number) {
+        return Some(parent.to_path_buf());
+    }
+    if parent.file_name() == Some(OsStr::new(".Trash")) && number(&name) {
+        return parent.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
 /// What a file in the trash is: a link counts as what it points at, as in a folder.
 fn kind_of(own: &fs::Metadata, path: &Path) -> Kind {
     if own.file_type().is_symlink() {
@@ -341,7 +452,7 @@ pub fn read_note(text: &str) -> Option<(PathBuf, Option<String>)> {
             deleted = Some(value.to_string());
         }
     }
-    path.filter(|path| path.is_absolute())
+    path.filter(|path| !path.as_os_str().is_empty())
         .map(|path| (path, deleted))
 }
 
@@ -457,11 +568,52 @@ mod tests {
             trash.put(&root.join("a"), NOW, 0).unwrap_err(),
             "a is not there any more."
         );
-        assert_eq!(
-            read_note("[Trash Info]\nPath=relative/a\n"),
-            None,
-            "the home trash keeps whole paths"
-        );
+        // a note that says a path under a top means nothing to a trash that has no top
+        fs::write(
+            root.join("Trash/info/a.trashinfo"),
+            "[Trash Info]\nPath=under/a\nDeletionDate=2026-09-22T10:42:00\n",
+        )
+        .unwrap();
+        assert_eq!(trash.read(OsStr::new("a"), 0), None);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_drive_keeps_its_own_trash_at_its_top() {
+        let top = temporary("drive");
+        let trash = Trash::on(&top, 1000);
+        assert_eq!(trash.root(), top.join(".Trash-1000"));
+        assert_eq!(trash.top(), Some(top.as_path()));
+        fs::create_dir_all(top.join("Photos")).unwrap();
+        fs::write(top.join("Photos/aurora.jpg"), "bytes").unwrap();
+        let put = trash.put(&top.join("Photos/aurora.jpg"), NOW, 0).unwrap();
+        assert_eq!(put.path, top.join("Photos/aurora.jpg"));
+        // the note says where it was under the top, so the drive knows on another machine too
+        let note = fs::read_to_string(top.join(".Trash-1000/info/aurora.jpg.trashinfo")).unwrap();
+        assert_eq!(
+            note,
+            "[Trash Info]\nPath=Photos/aurora.jpg\nDeletionDate=2026-09-22T10:42:00\n"
+        );
+        let listed = trash.list(0);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, top.join("Photos/aurora.jpg"));
+        assert_eq!(listed[0].file(), top.join(".Trash-1000/files/aurora.jpg"));
+        // and it is found again from where it lies
+        let (again, name) = Trash::of(&listed[0].file()).unwrap();
+        assert_eq!(again, trash);
+        assert_eq!(name, OsString::from("aurora.jpg"));
+        assert_eq!(again.restore(&name).unwrap(), top.join("Photos/aurora.jpg"));
+        assert_eq!(
+            fs::read_to_string(top.join("Photos/aurora.jpg")).unwrap(),
+            "bytes"
+        );
+        // an administrator's sticky .Trash is used before the one the desktop makes
+        let shared = top.join(".Trash");
+        fs::create_dir_all(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+        let admin = Trash::on(&top, 1000);
+        assert_eq!(admin.root(), shared.join("1000"));
+        assert_eq!(top_of_trash(&shared.join("1000")), Some(top.clone()));
+        let _ = fs::remove_dir_all(&top);
     }
 }
