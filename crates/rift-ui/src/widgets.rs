@@ -5,7 +5,9 @@ use iced::widget::{
     button, checkbox, column, container, progress_bar, row, rule, scrollable, slider, space, text,
     text_input, toggler,
 };
-use iced::{Border, Center, Color, Element, Fill, Font, Length, Theme, font};
+use iced::{
+    Border, Center, Color, Element, Fill, Font, Length, Point, Shadow, Theme, Vector, font,
+};
 
 use librift::appearance::{Accent, Theme as Mode};
 
@@ -36,6 +38,18 @@ pub const PAD: f32 = 20.0;
 pub const GAP: f32 = 16.0;
 /// How wide a field is.
 const FIELD: f32 = 200.0;
+/// How wide a menu is at the least, and at the most.
+const MENU_WIDTHS: (f32, f32) = (200.0, 380.0);
+/// About how wide a character of a menu's rows is, to make the menu as wide as its longest row.
+const MENU_CHARACTER: f32 = 7.6;
+/// How tall a row of a menu is.
+pub const MENU_ROW: f32 = 30.0;
+/// The space around the rows of a menu.
+pub const MENU_PAD: f32 = 6.0;
+/// How tall the line between two groups of a menu's rows is, with the space around it.
+pub const MENU_LINE: f32 = 9.0;
+/// How wide a dialog is.
+pub const DIALOG_WIDTH: f32 = 420.0;
 /// How wide and tall a swatch of an accent colour is.
 const SWATCH: f32 = 28.0;
 /// How wide the label of a row is when its value fills the rest of the row.
@@ -471,10 +485,38 @@ pub fn field<'a, M: Clone + 'a>(
     hint: &'a str,
     value: &'a str,
     secret: bool,
-    id: &'static str,
+    id: impl Into<iced::widget::Id>,
     typed: impl Fn(String) -> M + 'a,
     entered: M,
 ) -> Element<'a, M> {
+    entry(colors, hint, value, secret, id, typed, entered)
+        .width(Length::Fixed(FIELD))
+        .into()
+}
+
+/// The same field as wide as the space it is in, for a name in a dialog or a path in a header bar.
+pub fn wide_field<'a, M: Clone + 'a>(
+    colors: Colors,
+    hint: &'a str,
+    value: &'a str,
+    id: impl Into<iced::widget::Id>,
+    typed: impl Fn(String) -> M + 'a,
+    entered: M,
+) -> Element<'a, M> {
+    entry(colors, hint, value, false, id, typed, entered)
+        .width(Fill)
+        .into()
+}
+
+fn entry<'a, M: Clone + 'a>(
+    colors: Colors,
+    hint: &'a str,
+    value: &'a str,
+    secret: bool,
+    id: impl Into<iced::widget::Id>,
+    typed: impl Fn(String) -> M + 'a,
+    entered: M,
+) -> text_input::TextInput<'a, M> {
     text_input(hint, value)
         .id(id)
         .secure(secret)
@@ -482,7 +524,6 @@ pub fn field<'a, M: Clone + 'a>(
         .on_submit(entered)
         .size(TEXT_SIZE)
         .padding([6, 8])
-        .width(Length::Fixed(FIELD))
         .style(move |_: &Theme, status| {
             let (edge, width) = match status {
                 text_input::Status::Focused { .. } => (colors.accent, 2.0),
@@ -504,7 +545,6 @@ pub fn field<'a, M: Clone + 'a>(
                 },
             }
         })
-        .into()
 }
 
 /// The nine accent colours, each a square of itself, the one in use ringed. Pressing one sends
@@ -550,8 +590,319 @@ pub fn swatches<'a, M: Clone + 'a>(
 }
 
 /// The operation that puts the cursor in a field.
-pub fn focus<M: Send + 'static>(id: &'static str) -> iced::Task<M> {
+pub fn focus<M: Send + 'static>(id: impl Into<iced::widget::Id>) -> iced::Task<M> {
     iced::widget::operation::focus(id)
+}
+
+/// A button filled with the red of what cannot be undone, for the one button of a dialog that
+/// deletes. Without a press it is dimmed like any other button that cannot be pressed.
+pub fn destructive<'a, M: Clone + 'a>(
+    colors: Colors,
+    label: &'a str,
+    press: Option<M>,
+) -> Element<'a, M> {
+    let mut pressable =
+        button(text(label).size(TEXT_SIZE))
+            .padding([5, 14])
+            .style(move |_: &Theme, status| {
+                let (background, text_color) = match status {
+                    button::Status::Disabled => (colors.track, colors.dim),
+                    button::Status::Hovered | button::Status::Pressed => (
+                        Color {
+                            a: 0.85,
+                            ..colors.error
+                        },
+                        Color::WHITE,
+                    ),
+                    button::Status::Active => (colors.error, Color::WHITE),
+                };
+                button::Style {
+                    background: Some(background.into()),
+                    text_color,
+                    border: Border {
+                        color: background,
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..button::Style::default()
+                }
+            });
+    if let Some(press) = press {
+        pressable = pressable.on_press(press);
+    }
+    pressable.into()
+}
+
+/// A button in a header bar: a symbolic icon with nothing around it until the pointer is over it.
+/// Without a press the icon is dimmed.
+pub fn tool<'a, M: Clone + 'a>(colors: Colors, icon: &str, press: Option<M>) -> Element<'a, M> {
+    let colour = if press.is_some() {
+        colors.text
+    } else {
+        colors.dim
+    };
+    let mut pressable = button(crate::icons::symbolic(colour, icon, 16.0))
+        .padding(7)
+        .style(move |_: &Theme, status| button::Style {
+            background: Some(
+                match status {
+                    button::Status::Hovered | button::Status::Pressed => colors.hover,
+                    _ => Color::TRANSPARENT,
+                }
+                .into(),
+            ),
+            text_color: colour,
+            border: Border {
+                radius: 4.0.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        });
+    if let Some(press) = press {
+        pressable = pressable.on_press(press);
+    }
+    pressable.into()
+}
+
+/// A part of the window that says where a press lands before whatever is under the pointer
+/// handles it: a press of any button over `content` sends `at` with the pointer's place in the
+/// window first.
+pub fn pointed<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    at: impl Fn(Point) -> M + 'a,
+) -> Element<'a, M> {
+    crate::pointed::Pointed::new(content, at).into()
+}
+
+/// One row of a menu.
+#[derive(Debug, Clone)]
+pub enum Item<M> {
+    /// Something to do: its words, what pressing it sends, which dims it when there is nothing,
+    /// and for a row that is on or off, whether it is on.
+    Do {
+        /// The words on the row.
+        label: String,
+        /// What pressing it sends.
+        press: Option<M>,
+        /// Whether a row that is on or off is on.
+        ticked: Option<bool>,
+    },
+    /// The line between two groups of rows.
+    Line,
+}
+
+impl<M> Item<M> {
+    /// A row that does something.
+    pub fn new(label: impl Into<String>, press: Option<M>) -> Self {
+        Self::Do {
+            label: label.into(),
+            press,
+            ticked: None,
+        }
+    }
+
+    /// A row that is on or off.
+    pub fn ticked(label: impl Into<String>, on: bool, press: M) -> Self {
+        Self::Do {
+            label: label.into(),
+            press: Some(press),
+            ticked: Some(on),
+        }
+    }
+}
+
+/// How wide a menu of these rows is: as wide as its longest row, with room for the mark and the
+/// padding, within [`MENU_WIDTHS`].
+#[must_use]
+pub fn menu_width<M>(items: &[Item<M>]) -> f32 {
+    let longest = items
+        .iter()
+        .map(|item| match item {
+            Item::Do { label, .. } => label.chars().count(),
+            Item::Line => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    #[allow(clippy::cast_precision_loss)]
+    let words = longest as f32 * MENU_CHARACTER;
+    (words + 20.0 + 16.0 + GAP + 2.0 * MENU_PAD + 2.0).clamp(MENU_WIDTHS.0, MENU_WIDTHS.1)
+}
+
+/// How tall a menu of these rows is, to put it where it fits.
+#[must_use]
+pub fn menu_height<M>(items: &[Item<M>]) -> f32 {
+    items
+        .iter()
+        .map(|item| match item {
+            Item::Do { .. } => MENU_ROW,
+            Item::Line => MENU_LINE,
+        })
+        .sum::<f32>()
+        + 2.0 * MENU_PAD
+        + 2.0
+}
+
+/// A menu: its rows in a box with a border and a soft shadow under it, the way the shell's menus
+/// and a GTK popover look. A row on or off has the mark at its right while it is on.
+#[must_use]
+pub fn menu<'a, M: Clone + 'a>(colors: Colors, items: Vec<Item<M>>) -> Element<'a, M> {
+    let width = menu_width(&items);
+    let mut rows = column![].width(Fill);
+    for item in items {
+        match item {
+            Item::Line => {
+                rows = rows.push(
+                    container(hairline(colors))
+                        .height(Length::Fixed(MENU_LINE))
+                        .center_y(Length::Fixed(MENU_LINE)),
+                );
+            }
+            Item::Do {
+                label,
+                press,
+                ticked,
+            } => {
+                let colour = if press.is_some() {
+                    colors.text
+                } else {
+                    colors.dim
+                };
+                let mark: Element<'a, M> = if ticked == Some(true) {
+                    crate::icons::symbolic(colour, "object-select-symbolic", 16.0)
+                } else {
+                    space().width(16.0).height(16.0).into()
+                };
+                let mut pressable = button(
+                    container(
+                        row![
+                            text(label)
+                                .size(TEXT_SIZE)
+                                .color(colour)
+                                .wrapping(text::Wrapping::None)
+                                .width(Fill),
+                            mark
+                        ]
+                        .align_y(Center)
+                        .spacing(GAP),
+                    )
+                    .center_y(Fill),
+                )
+                .width(Fill)
+                .height(Length::Fixed(MENU_ROW))
+                .padding([0, 10])
+                .style(move |_: &Theme, status| button::Style {
+                    background: Some(
+                        match status {
+                            button::Status::Hovered | button::Status::Pressed => colors.hover,
+                            _ => Color::TRANSPARENT,
+                        }
+                        .into(),
+                    ),
+                    text_color: colour,
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                });
+                if let Some(press) = press {
+                    pressable = pressable.on_press(press);
+                }
+                rows = rows.push(pressable);
+            }
+        }
+    }
+    container(rows)
+        .width(Length::Fixed(width))
+        .padding(MENU_PAD)
+        .style(move |_: &Theme| raised(colors, colors.header))
+        .into()
+}
+
+/// A dialog: its title in bold, what it says, and its buttons at the bottom right, in a box of its
+/// own in the middle of the window. The window behind it is dimmed with [`shade`].
+#[must_use]
+pub fn dialog<'a, M: 'a>(
+    colors: Colors,
+    title: String,
+    body: Vec<Element<'a, M>>,
+    buttons: Vec<Element<'a, M>>,
+) -> Element<'a, M> {
+    let mut inside = column![text(title).size(TEXT_SIZE).font(BOLD).color(colors.text)]
+        .spacing(12)
+        .width(Fill);
+    for part in body {
+        inside = inside.push(part);
+    }
+    let mut foot = row![space().width(Fill)].spacing(8).align_y(Center);
+    for pressable in buttons {
+        foot = foot.push(pressable);
+    }
+    container(inside.push(container(foot).padding([6, 0])))
+        .width(Length::Fixed(DIALOG_WIDTH))
+        .padding(PAD)
+        .style(move |_: &Theme| raised(colors, colors.page))
+        .into()
+}
+
+/// The gray a dialog dims the window behind it with.
+#[must_use]
+pub fn shade<'a, M: 'a>() -> Element<'a, M> {
+    container(space().width(Fill).height(Fill))
+        .width(Fill)
+        .height(Fill)
+        .style(|_: &Theme| {
+            fill(Color {
+                a: 0.35,
+                ..Color::BLACK
+            })
+        })
+        .into()
+}
+
+/// A short line at the bottom of a window that says what just happened, with a button for what
+/// can follow it, the way a GNOME app says a file went into the trash with Undo beside it.
+pub fn toast<'a, M: Clone + 'a>(
+    colors: Colors,
+    said: String,
+    action: Option<(&'a str, M)>,
+) -> Element<'a, M> {
+    let mut inside = row![text(said).size(TEXT_SIZE).color(colors.text)]
+        .spacing(GAP)
+        .align_y(Center);
+    if let Some((label, press)) = action {
+        inside = inside.push(action_button(colors, label, press));
+    }
+    container(inside)
+        .padding([8, 14])
+        .style(move |_: &Theme| raised(colors, colors.header))
+        .into()
+}
+
+fn action_button<'a, M: Clone + 'a>(colors: Colors, label: &'a str, press: M) -> Element<'a, M> {
+    action(colors, label, Some(press))
+}
+
+/// A box that stands over the window: a menu, a dialog or a toast, with a border and the soft
+/// shadow the design rules allow under windows and menus.
+fn raised(colors: Colors, background: Color) -> container::Style {
+    container::Style {
+        background: Some(background.into()),
+        border: Border {
+            color: colors.edge,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        shadow: Shadow {
+            color: Color {
+                a: 0.35,
+                ..Color::BLACK
+            },
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: 10.0,
+        },
+        ..container::Style::default()
+    }
 }
 
 /// A container filled with one colour and nothing else.

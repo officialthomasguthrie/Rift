@@ -37,6 +37,17 @@ pub fn of_app<'a, Message: 'a>(text: Color, name: Option<&str>, size: f32) -> El
     picture(text, &path, size)
 }
 
+/// The drawing of a file or a folder at this size, the first of `names` a theme has, the one that
+/// fits best first, in its own colours, or a symbolic one painted in `text` when no theme has it
+/// in colour.
+#[must_use]
+pub fn of_file<'a, Message: 'a>(text: Color, names: &[String], size: f32) -> Element<'a, Message> {
+    match librift::icons::file(names) {
+        Some(path) => picture(text, &path, size),
+        None => space().width(size).height(size).into(),
+    }
+}
+
 /// An icon file at this size: a symbolic drawing painted in `text`, any other in its own colours.
 fn picture<'a, Message: 'a>(text: Color, path: &Path, size: f32) -> Element<'a, Message> {
     let colour = path.to_string_lossy().contains("symbolic").then_some(text);
