@@ -287,17 +287,7 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
             ui::open_window(state, location, None)
         }
         Act::Close => window::close(id),
-        Act::Reload => {
-            let now = state
-                .windows
-                .get(&id)
-                .map(|browser| ui::stamp(state, &browser.location))
-                .unwrap_or_default();
-            if let Some(browser) = state.windows.get_mut(&id) {
-                browser.stamp = now;
-            }
-            ui::read(state, id)
-        }
+        Act::Reload => reload(state, id),
         Act::Location => location(state, id),
         Act::Undo(number) => undo(state, id, number),
         Act::Stop(number) => {
@@ -307,6 +297,19 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
             Task::none()
         }
     }
+}
+
+/// Read what the window shows again now, whether anything in it has changed or not.
+fn reload(state: &mut Files, id: window::Id) -> Task<Message> {
+    let now = state
+        .windows
+        .get(&id)
+        .map(|browser| ui::stamp(state, &browser.location))
+        .unwrap_or_default();
+    if let Some(browser) = state.windows.get_mut(&id) {
+        browser.stamp = now;
+    }
+    ui::read(state, id)
 }
 
 /// Where each selected row lies, which in the trash is its path in the trash it is in.
