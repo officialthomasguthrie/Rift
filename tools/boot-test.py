@@ -328,10 +328,12 @@ DOCK_MENU_PAD = 8
 DOCK_MENU_ROW = 28
 # the apps the dock keeps when the owner has said nothing, in their order, from crates/librift/src/dock.rs
 DOCK_KEPT = ["firefox", "com.mitchellh.ghostty", "dev.zed.Zed", "dev.rift.Settings"]
-# how far a dock that does not reach the sides stands off its edge, and how tall the dock is with its
-# large icons, from crates/lens/src/dock.rs and crates/librift/src/dock.rs
+# how far a dock that does not reach the sides stands off its edge, how tall the dock is with its
+# large icons, and how tall the line a hidden dock leaves at the bottom edge is, from
+# crates/lens/src/dock.rs and crates/librift/src/dock.rs
 DOCK_OFF_EDGE = 8
 DOCK_LARGE = 60
+DOCK_HIDDEN = 2
 # the files the dock keeps its apps and its settings in, and the ones Do not disturb, the apps that
 # have sent a notification and the ones whose banners stay off live in, from crates/librift/src
 DOCK_FILE = "~/.config/rift/dock"
@@ -390,7 +392,7 @@ STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
               "recording", "screen-reader", "keyboard", "layout", "dock-position", "dock-extend",
-              "dock-icons")
+              "dock-icons", "dock-hide", "dock-hidden")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -476,8 +478,8 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "screen-reader", "on-screen-keyboard", "layouts", "console-keymap", "mice", "touchpads",
                  "primary-button", "mouse-speed", "mouse-acceleration", "mouse-natural-scrolling",
                  "touchpad-speed", "tap-to-click", "touchpad-natural-scrolling", "disable-while-typing",
-                 "edge-scrolling", "pinned", "dock-position", "dock-extend", "dock-icons",
-                 "do-not-disturb", "notifiers", "problem")
+                 "edge-scrolling", "pinned", "dock-position", "dock-extend", "dock-icons", "dock-hide",
+                 "do-not-disturb", "notifiers", "owner-user", "owner-name", "owner-password", "problem")
 # the time zone the Date and time page sets and puts back, with what date calls it at either time of
 # year. a drive where no zone was ever chosen is in UTC
 SETTINGS_ZONE = ("Pacific/Auckland", ("NZST", "NZDT"))
@@ -624,6 +626,15 @@ BUILDS = [
 # the owner's password from nix/profiles/base.nix, and one that is not it
 PASSWORD = "rift"
 WRONG_PASSWORD = "wrongpassword"
+# the owner's account and the name every drive starts with, from crates/librift/src/owner.rs, where
+# vault keeps the hash of a password the owner chose, and the name and the password the Owner page
+# gives the owner for a while. the name is longer than the image's, so the lock screen draws a wider
+# line for it, and the password is letters and digits, which the monitor types as key codes
+OWNER_USER = "rift"
+OWNER_NAME = "Rift owner"
+OWNER_PASSWORD_FILE = "/var/lib/rift/owner/password"
+OWNER_NEW_NAME = "Samantha Taylor-Brooks"
+OWNER_NEW_PASSWORD = "riverstone42"
 # the passphrase the test gives the clone's persist, not the first drive's
 CLONE_PASSPHRASE = "clone-test-5213"
 # gpt partition types from the discoverable partitions specification: the esp, /usr on x86-64 and
@@ -1184,6 +1195,29 @@ def luminance(px):
     return (px[0] + px[1] + px[2]) / 3
 
 
+def lock_name_width(width, height, rgb, colors=DARK_COLORS):
+    """How wide the owner's name is on the lock screen in a screendump, in pixels: the columns with
+    text in them in the band above the field where crates/horizon-lock/src/draw.rs draws the name,
+    between 32 and 12 of its pixels over the field's ring at scale 1. 0 when there is no field or no
+    text there."""
+    top = None
+    for y in range(height // 4, height * 3 // 4):
+        row = y * width * 3
+        if sum(1 for x in range(0, width, 2) if near(rgb[row + x * 3:row + x * 3 + 3], colors.lock_field, 2)) >= 50:
+            top = y
+            break
+    if top is None:
+        return 0
+    left, right = width, -1
+    ground = luminance(colors.lock)
+    for y in range(max(0, top - LOCK_RING - 32), max(0, top - LOCK_RING - 12)):
+        row = y * width * 3
+        for x in range(width):
+            if abs(luminance(rgb[row + x * 3:row + x * 3 + 3]) - ground) > 40:
+                left, right = min(left, x), max(right, x)
+    return right - left + 1 if right >= left else 0
+
+
 def most_common(rgb, width, left, right, top, bottom):
     """The colour that covers most of a rectangle of the screendump, and the share of it it covers."""
     counts = collections.Counter()
@@ -1643,6 +1677,77 @@ def main():
                     fail(f"horizon does not have the layouts {names} after the reboot")
             ok(f"the boot after the layouts were chosen has {wanted}" + (" in localed and horizon" if names else ""))
 
+        def change_owner(name, current, new):
+            """Give the owner a name and a password on the Owner page, and wait for the page to say
+            Vault has both."""
+            run("rift-settings --page owner", "the Owner page")
+            if not waited(30, lambda: page_state("the Owner page").get("page") == "owner"):
+                fail("rift-settings --page owner did not show that page")
+            if not waited(30, lambda: page_state("the owner on the page").get("owner-user") == OWNER_USER):
+                fail(f"the Owner page says owner-user {page_state('the owner again').get('owner-user')!r}")
+            run(f"rift-settings --set owner-name {name}", f"the owner's name set to {name}")
+            if not waited(60, lambda: page_state("the owner's name").get("owner-name") == name):
+                fail(f"the Owner page says {page_state('the owner once more')} after it set the name {name!r}")
+            password_word = "image" if new == PASSWORD else "own"
+            run(f"rift-settings --set owner-password {current} {new}", "the owner's password")
+            if not waited(60, lambda: page_state("the owner's password").get("owner-password") == password_word):
+                fail(f"the Owner page says {page_state('the owner once more')} after it set a password, expected "
+                     f"owner-password {password_word}")
+            ok(f"the Owner page named the owner {name!r} and gave them {'the image' if new == PASSWORD else 'a new'} "
+               "password")
+
+        def owner_session():
+            """The session greetd opened, which logind locks."""
+            _, told = run("for s in (loginctl list-sessions --no-legend | string trim | string split -f1 ' '); "
+                          "if test (loginctl show-session $s -p Service --value) = greetd; echo session=$s; end; end",
+                          "the session greetd opened")
+            found = re.search(r"session=(\S+)", without_console(told))
+            if not found:
+                fail(f"logind lists no session from greetd: {without_console(told).strip()[-300:]!r}")
+            return found.group(1)
+
+        def owner_hint(session_id, wanted, what):
+            """Wait up to twenty seconds for logind's LockedHint on the session to say wanted."""
+            if not waited(20, lambda: re.search(rf"^{wanted}$", without_console(run(
+                    f"loginctl show-session {session_id} -p LockedHint --value", "the locked hint")[1]), re.M)):
+                fail(f"logind does not say LockedHint={wanted} for session {session_id} {what}")
+
+        def owner_types(text, what):
+            """Type a line on the vm's keyboard through the monitor, one key at a time."""
+            keys = [[letter] for letter in text] + [["ret"]]
+            try:
+                qmp(args.qmp, *({"execute": "send-key", "arguments": {
+                    "keys": [{"type": "qcode", "data": code} for code in held]}} for held in keys))
+            except (OSError, RuntimeError) as e:
+                fail(f"typing {what}: {e}")
+
+        def owner_kept(name, password, other):
+            """Check the boot that follows has the name and the password the page chose before it:
+            getent gives the name, the lock screen reads it, refuses the other password and opens
+            with this one."""
+            _, told = run(f"getent passwd {OWNER_USER} | cut -d: -f5", "the owner's name after the reboot")
+            said = (without_console(told).strip().splitlines() or [""])[-1].strip()
+            if said != name:
+                fail(f"getent names the owner {said!r} after the reboot, and the page chose {name!r} before it")
+            session_id = owner_session()
+            status, told = run(f"loginctl lock-session {session_id}", "the lock screen after the reboot")
+            if status != 0:
+                fail(f"loginctl lock-session {session_id} exited with {status}: {without_console(told).strip()!r}")
+            owner_hint(session_id, "yes", "with the lock screen up after the reboot")
+            _, told = run("journalctl -b -t lock -o cat --no-pager | grep 'locking the screen for' | tail -n 1",
+                          "the name the lock screen read")
+            if f"locking the screen for {name}" not in without_console(told):
+                fail(f"the lock screen after the reboot says {without_console(told).strip()[-200:]!r}, expected {name!r}")
+            time.sleep(1)
+            owner_types(other, "a password that is not the owner's")
+            # pam holds a wrong password for about two seconds before the screen says so
+            time.sleep(5)
+            owner_hint(session_id, "yes", "after a password that is not the owner's")
+            owner_types(password, "the owner's password")
+            owner_hint(session_id, "no", "after the owner's password")
+            ok(f"the boot after the owner was named {name!r} has the name in getent and on the lock screen, which "
+               f"refused {other!r} and opened with {password!r}")
+
         def next_boot(style):
             """Reboot, and check the splash of the boot that follows is the style that was chosen."""
             png = f"{stem}-{style}{extension}"
@@ -1669,18 +1774,23 @@ def main():
         set_style("graphical")
         choose_zone(SETTINGS_ZONE[0])
         change_layouts(f"add-layout {layout_added}", f"us,{layout_added}")
+        change_owner(OWNER_NEW_NAME, PASSWORD, OWNER_NEW_PASSWORD)
         next_boot("graphical")
         unlock()
         zone_kept(*SETTINGS_ZONE)
         open_settings()
         layouts_kept(f"us,{layout_added}", ["English (US)", layout_added_name])
+        owner_kept(OWNER_NEW_NAME, OWNER_NEW_PASSWORD, PASSWORD)
         set_style("text")
         choose_zone("UTC")
         change_layouts(f"remove-layout {layout_added}", "us")
+        change_owner(OWNER_NAME, OWNER_NEW_PASSWORD, PASSWORD)
         next_boot("text")
         unlock()
         zone_kept("UTC", ("UTC",))
         layouts_kept("us")
+        open_settings()
+        owner_kept(OWNER_NAME, PASSWORD, OWNER_NEW_PASSWORD)
         reboot_action("shutdown")
         power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
@@ -5171,7 +5281,7 @@ def main():
                     if key == "pinned-app":
                         word, _, name = value.strip().partition(" ")
                         kept_apps.append((word, name.strip()))
-                    elif key in ("pinned", "dock-position", "dock-extend", "dock-icons"):
+                    elif key in ("pinned", "dock-position", "dock-extend", "dock-icons", "dock-hide"):
                         dock_settings[key] = value.strip()
                 return (kept_apps, dock_settings) if "pinned" in dock_settings else None
 
@@ -5313,6 +5423,44 @@ def main():
                f"along the top with the Applications menu at {menu_placed[:4]} over it, {placed_middle} in the "
                f"middle off the edge and {placed_large} with large icons, each where the screendump has it, "
                f"then back at {full_dock}")
+
+            # hiding. the dock keeps nothing of the screen then and is a line along the bottom edge; the
+            # pointer pushed against that edge brings it out over the windows, it goes again a moment
+            # after the pointer has left it, and with the setting off it is back to stay
+            placed_hidden = dock_set("dock-hide", "on",
+                                     lambda found: found[:4] == (0, screen_down - DOCK_HIDDEN, screen_across, DOCK_HIDDEN)
+                                     and found[4] == 0, f"{stem}-dock-hidden{extension}")
+            if bar_state("the shell with the dock hidden").get("dock-hidden") != "yes":
+                fail(f"lens --state says dock-hidden {bar_state('the shell again').get('dock-hidden')!r} with the "
+                     f"dock at {placed_hidden}")
+            placed_out_wanted = (0, screen_down - DOCK_HEIGHT, screen_across, DOCK_HEIGHT, 0)
+            point(args.qmp, size, (width // 2, height))
+            placed_out = wait_for(20, lambda: next((found for found in [dock_layer("the dock with the pointer at the edge")]
+                                                    if found == placed_out_wanted), None))
+            if not placed_out:
+                fail(f"with the pointer at the bottom edge horizon has the dock at "
+                     f"{dock_layer('the dock at the edge again')}, expected {placed_out_wanted}")
+            if bar_state("the shell with the dock out").get("dock-hidden") != "no":
+                fail(f"lens --state says dock-hidden {bar_state('the shell again').get('dock-hidden')!r} with the "
+                     "pointer at the bottom edge")
+            # the windows have the room the dock stood in, so the rows over it are a window's; only the
+            # dock's own rectangle is looked at
+            out_drawn = wait_for(20, lambda: next((found for found in [dock_drawn(placed_out, "dock-out")]
+                                                   if found[4][0] > 0.4), None))
+            if not out_drawn:
+                shown = dock_drawn(placed_out, "dock-out")
+                write_png(f"{stem}-dock-out{extension}", *shown[:3])
+                fail(f"with the pointer at the bottom edge the screendump does not have the dock at {placed_out}: its "
+                     f"gray covers {shown[4][0]} of it, see {stem}-dock-out{extension}")
+            write_png(f"{stem}-dock-out{extension}", *out_drawn[:3])
+            point(args.qmp, size, away)
+            if not wait_for(20, lambda: dock_layer("the dock after the pointer left it") == placed_hidden):
+                fail(f"a moment after the pointer left the dock horizon has it at "
+                     f"{dock_layer('the dock after the pointer left it again')}, expected {placed_hidden}")
+            dock_set("dock-hide", "off", lambda found: found == full_dock, f"{stem}-dock-stays{extension}")
+            ok(f"the Dock page's hiding put the dock at {placed_hidden} keeping nothing of the screen, the pointer "
+               f"at the bottom edge brought it out at {placed_out[:4]} over the windows and it went again when the "
+               f"pointer left, and with hiding off it is back at {full_dock}")
 
             # the Notifications page. Do not disturb is one line of the owner's that the page and the
             # clock menu's switch both write: from the page it keeps a notification off the screen and
@@ -5646,6 +5794,112 @@ def main():
                f"turned recent files off and on with dconf following, says the firewall is on as nftables.service is "
                f"active, gave {PRIVACY_APP} back the network rift net took, and gives fwupd's {privacy_id}")
 
+            # the Owner page. Vault keeps the owner's own name and password on persist and puts them into
+            # the password files at once and at every boot, so the page names who getent has, a new name
+            # from it is in getent and on the lock screen, and a new password from it unlocks the lock
+            # screen where the image's no longer does. then both go back to the image's
+            def owner_page(what):
+                """What the Owner page says once Vault has answered, and the problem it shows."""
+                said = settings_state(what)
+                return {key: said[key] for key in ("owner-user", "owner-name", "owner-password", "problem")
+                        if key in said}
+
+            def owner_getent(what):
+                """The full name getent gives the owner's account."""
+                _, told = run(f"getent passwd {OWNER_USER} | cut -d: -f5", what)
+                return (without_console(told).strip().splitlines() or [""])[-1].strip()
+
+            def owner_locked_for(what):
+                """The name the lock screen last said it locked the screen for."""
+                _, told = run("journalctl -b -t lock -o cat --no-pager | grep 'locking the screen for' | tail -n 1",
+                              what)
+                found = re.search(r"locking the screen for (.+?)\s*$", without_console(told), re.M)
+                return found.group(1) if found else None
+
+            def owner_lock(name, png, what):
+                """Lock the session, wait for the lock screen to be up and to have read this name, and
+                say how wide it draws the name."""
+                point(args.qmp, size, (round(width / 3), round(height * 3 / 4)))
+                status, told = run(f"loginctl lock-session {session}", f"loginctl lock-session {what}")
+                if status != 0:
+                    fail(f"loginctl lock-session {session} exited with {status}: {without_console(told).strip()!r}")
+                look(f"the lock screen {what}", png, 30, lock=False, journals=("lock", "horizon"))
+                locked_hint("yes", f"with the lock screen up {what}")
+                if not wait_for(10, lambda: owner_locked_for(f"the name the lock screen read {what}") == name):
+                    fail(f"the lock screen {what} says it locked the screen for "
+                         f"{owner_locked_for('the name the lock screen read again')!r}, expected {name!r}")
+                wide, tall, pixels = screendump(args.qmp, work, "owner-lock")
+                return lock_name_width(wide, tall, pixels)
+
+            def owner_is(name, password_word, what):
+                """Whether the page and getent both have this name, and the page says the password
+                is the image's or the owner's own."""
+                said = owner_page(f"the page for {what}")
+                return (said.get("owner-name") == name and said.get("owner-password") == password_word
+                        and owner_getent(f"getent for {what}") == name)
+
+            run("rift-settings --page owner", "the Owner page")
+            if not wait_for(30, lambda: settings_state("the Owner page").get("page") == "owner"):
+                fail("rift-settings --page owner did not show that page")
+            owner_before = wait_for(30, lambda: next((said for said in [owner_page("the Owner page as it comes up")]
+                                                      if said.get("owner-user")), None))
+            if not owner_before:
+                fail("the Owner page says nothing about the owner, and Vault is there to ask")
+            getent_before = owner_getent("the owner's name in getent")
+            if (owner_before.get("owner-user"), owner_before.get("owner-name"), owner_before.get("owner-password")) \
+                    != (OWNER_USER, getent_before, "image") or getent_before != OWNER_NAME:
+                fail(f"the Owner page says {owner_before}, and getent names the owner {getent_before!r}, expected "
+                     f"{OWNER_USER} called {OWNER_NAME} with the image's password")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{SETTINGS_APP} on the Owner page", f"{stem}-settings-owner{extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            owner_width_before = owner_lock(OWNER_NAME, f"{stem}-owner-lock{extension}", "with the image's name")
+            type_line(PASSWORD, "the image's password")
+            locked_hint("no", "after the image's password on the lock screen with the image's name")
+            # a current password that is not the owner's changes nothing
+            run(f"rift-settings --set owner-password {WRONG_PASSWORD} {OWNER_NEW_PASSWORD}",
+                "a new password with a wrong current one")
+            if not wait_for(20, lambda: owner_page("the page after a wrong current password").get("problem")
+                            == "The current password is incorrect."):
+                fail(f"after a wrong current password the Owner page says {owner_page('the page again')}")
+            if owner_page("the password after a wrong current one").get("owner-password") != "image":
+                fail("a wrong current password changed the owner's password")
+            run(f"rift-settings --set owner-name {OWNER_NEW_NAME}", "a new name on the Owner page")
+            if not wait_for(30, lambda: owner_is(OWNER_NEW_NAME, "image", "the new name")):
+                fail(f"after the page set the name {OWNER_NEW_NAME!r} it says {owner_page('the page again')} and getent "
+                     f"{owner_getent('getent again')!r}")
+            run(f"rift-settings --set owner-password {PASSWORD} {OWNER_NEW_PASSWORD}", "a new password on the Owner page")
+            if not wait_for(30, lambda: owner_is(OWNER_NEW_NAME, "own", "the new password")):
+                fail(f"after the page set a new password it says {owner_page('the page again')}")
+            status, told = run(f"sudo cat {OWNER_PASSWORD_FILE}; sudo grep '^{OWNER_USER}:' /etc/shadow | cut -d: -f2",
+                               "the hash kept on persist and the one in the shadow file")
+            owner_hashes = without_console(told).split()
+            if status != 0 or len(owner_hashes) != 2 or owner_hashes[0] != owner_hashes[1] \
+                    or not owner_hashes[0].startswith("$y$"):
+                fail(f"{OWNER_PASSWORD_FILE} and the shadow file hold {owner_hashes}, expected one yescrypt hash in both")
+            owner_width_after = owner_lock(OWNER_NEW_NAME, f"{stem}-owner-lock-new{extension}", "with the new name")
+            if owner_width_after <= owner_width_before + 20:
+                fail(f"the lock screen draws {OWNER_NEW_NAME!r} {owner_width_after} pixels wide and {OWNER_NAME!r} "
+                     f"{owner_width_before}, see {stem}-owner-lock-new{extension}")
+            type_line(PASSWORD, "the image's password, which is no longer the owner's")
+            look("the lock screen refusing the image's password", f"{stem}-owner-lock-refused{extension}", 30,
+                 lock=True, journals=("lock", "horizon"))
+            locked_hint("yes", "after the image's password")
+            type_line(OWNER_NEW_PASSWORD, "the owner's new password")
+            locked_hint("no", "after the owner's new password")
+            # and both back to the image's, which the rest of the test and the drive's next boots have
+            run(f"rift-settings --set owner-name {OWNER_NAME}", "the image's name again")
+            if not wait_for(30, lambda: owner_is(OWNER_NAME, "own", "the image's name again")):
+                fail(f"after the page set the name back it says {owner_page('the page again')}")
+            run(f"rift-settings --set owner-password {OWNER_NEW_PASSWORD} {PASSWORD}", "the image's password again")
+            if not wait_for(30, lambda: owner_is(OWNER_NAME, "image", "the image's password again")):
+                fail(f"after the page set the password back it says {owner_page('the page again')}")
+            ok(f"the Owner page names {OWNER_USER} {OWNER_NAME!r} as getent does, refused a wrong current password, "
+               f"set {OWNER_NEW_NAME!r} with getent following and the lock screen drawing it {owner_width_after} "
+               f"pixels wide where the image's name was {owner_width_before}, and a new password that unlocked the "
+               f"lock screen where the image's was refused, the same yescrypt hash on persist and in the shadow file; "
+               f"then both back to the image's")
+
             # the About page, which reads os-release and asks Orbit about this machine
             run("rift-settings --page about", "the About page")
             if not wait_for(30, lambda: settings_state("the About page").get("page") == "about"):
@@ -5653,10 +5907,6 @@ def main():
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             look(f"{SETTINGS_APP} on the About page", f"{stem}-settings-about{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
-            # every page has a row in the sidebar, so the shape of the whole app is there from the start
-            run("rift-settings --page owner", "the owner page")
-            if not wait_for(20, lambda: settings_state("the owner page").get("page") == "owner"):
-                fail("rift-settings --page owner did not show that page")
             run("rift-settings --page appearance", "the Appearance page again")
             status, output = run("rift-settings --page nowhere", "a page that is not one")
             if status == 0 or "there is no page called nowhere" not in without_console(output):
