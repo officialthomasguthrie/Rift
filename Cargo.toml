@@ -11,6 +11,7 @@ members = [
   "crates/rift-flash",
   "crates/rift-flash-app",
   "crates/settings",
+  "crates/rift-ui",
   "crates/liftoff-splash",
   "crates/liftoff-style",
   "crates/horizon",
@@ -29,6 +30,7 @@ authors = ["Thomas Guthrie"]
 
 [workspace.dependencies]
 librift = { path = "crates/librift" }
+rift-ui = { path = "crates/rift-ui" }
 
 # shared by the horizon crates
 anyhow = "1.0.104"

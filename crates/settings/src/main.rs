@@ -17,7 +17,6 @@ mod control;
 mod datetime;
 mod displays;
 mod dock;
-mod icons;
 mod keyboard;
 mod net;
 mod notifications;
@@ -30,17 +29,17 @@ mod privacy;
 mod region;
 mod search;
 mod sound;
-mod theme;
 mod ui;
 mod updates;
 mod watch;
-mod widgets;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use control::Command;
 use page::Page;
+// the colours, the rows and the icons, which Welcome draws with too
+use rift_ui::{icons, theme, widgets};
 
 const USAGE: &str = "Usage: rift-settings [--page <name>] [--screenshot <png>]\n       rift-settings [--set <name> <value> | --state]\n       rift-settings --set scale <screen> <1 or 2>";
 

@@ -4393,6 +4393,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rift-ui"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "librift",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4670,6 +4678,7 @@ dependencies = [
  "iced",
  "image",
  "librift",
+ "rift-ui",
 ]
 
 [[package]]

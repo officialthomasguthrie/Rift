@@ -1,6 +1,6 @@
-//! The app's colours: one table for the dark theme and one for the light one, neutral grays with
+//! The apps' colours: one table for the dark theme and one for the light one, neutral grays with
 //! the owner's accent. They are the window colours the GTK apps of the session draw with, so
-//! Settings sits beside them without standing out.
+//! Rift's own apps sit beside them without standing out.
 
 use iced::Color;
 use librift::appearance::{Accent, Theme};

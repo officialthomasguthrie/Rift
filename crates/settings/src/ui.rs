@@ -32,6 +32,7 @@ use crate::control::{self, Command};
 use crate::net::Joining;
 use crate::page::Page;
 use crate::theme::{Colors, colors};
+pub use crate::widgets::fill;
 use crate::widgets::{BOLD, FONT, TEXT_SIZE, scroll};
 use crate::{
     about, accessibility, ai, appearance, apps, backups, bluetooth, datetime, displays, dock,
@@ -71,7 +72,7 @@ pub struct Settings {
     /// so Vault is the one that reads and writes it.
     pub boot: Option<Result<Style, String>>,
     /// The wallpapers to choose from: the photographs Rift ships, then the flat colours.
-    pub choices: Vec<appearance::Choice>,
+    pub choices: Vec<librift::wallpaper::Choice>,
     /// What Orbit says about this machine, once it has answered.
     pub host: Option<Result<Host, String>>,
     /// What `NetworkManager` says about the cable and the wireless networks, once it has answered
@@ -388,7 +389,7 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         look: Look::read(),
         greeting: librift::appearance::greeting(),
         boot: None,
-        choices: appearance::choices(),
+        choices: librift::wallpaper::choices(),
         zones: librift::clock::installed(),
         layouts: librift::keyboard::installed(),
         pointer: Pointer::read(),
@@ -1202,12 +1203,4 @@ fn page(state: &Settings, look: Colors) -> Element<'_, Message> {
     )
     .height(Fill)
     .into()
-}
-
-/// A container filled with one colour and nothing else.
-pub fn fill(colour: Color) -> container::Style {
-    container::Style {
-        background: Some(colour.into()),
-        ..container::Style::default()
-    }
 }

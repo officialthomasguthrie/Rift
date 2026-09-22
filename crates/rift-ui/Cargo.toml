@@ -1,0 +1,20 @@
+[package]
+name = "rift-ui"
+description = "The parts Rift's own apps are drawn from: the colours, the rows, the switches and the icons"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# the accents and the dark and light themes, and where an icon is
+librift = { workspace = true }
+
+# the same iced the apps draw with. svg draws the symbolic icons, each in one colour, and the image
+# widget an app's own icon when it ships as png
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "thread-pool", "wayland", "svg", "image-without-codecs", "advanced"] }
+
+[lints]
+workspace = true

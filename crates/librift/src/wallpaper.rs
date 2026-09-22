@@ -140,6 +140,57 @@ pub fn shipped_in(folder: &Path) -> Vec<Shipped> {
     found
 }
 
+/// One wallpaper the Appearance pages offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    /// The wallpaper itself.
+    pub wallpaper: Wallpaper,
+    /// What it shows, or the name of the colour.
+    pub title: String,
+    /// Who took the photograph, when it is one.
+    pub credit: String,
+    /// The word `rift wallpaper set` and the control sockets take for it.
+    pub word: String,
+}
+
+impl Choice {
+    /// Whether a word names this one: its short name, or the setting itself.
+    #[must_use]
+    pub fn names(&self, word: &str) -> bool {
+        let word = word.trim();
+        word.eq_ignore_ascii_case(&self.word) || word == self.wallpaper.setting()
+    }
+}
+
+/// The wallpapers to choose from: the photographs Rift ships, then the flat colours.
+#[must_use]
+pub fn choices() -> Vec<Choice> {
+    choices_in(Path::new(SHIPPED))
+}
+
+/// The same, with the photographs in a folder of their own.
+#[must_use]
+pub fn choices_in(folder: &Path) -> Vec<Choice> {
+    let mut choices: Vec<Choice> = shipped_in(folder)
+        .into_iter()
+        .map(|photo| Choice {
+            wallpaper: Wallpaper::Picture(photo.path),
+            title: photo.title,
+            credit: photo.credit,
+            word: photo.name,
+        })
+        .collect();
+    for (colour, name) in GRAYS {
+        choices.push(Choice {
+            wallpaper: Wallpaper::Color(colour.to_string()),
+            title: name.to_string(),
+            credit: String::new(),
+            word: colour.to_string(),
+        });
+    }
+    choices
+}
+
 /// What `rift wallpaper set` and Settings take, as a wallpaper: a colour, the name of a photograph
 /// Rift ships, or a JPEG or PNG picture by its path, relative to `cwd` or full.
 ///
@@ -233,6 +284,24 @@ fn is_picture(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_flat_colours_are_in_the_list_after_the_photographs() {
+        // a folder with no photographs gives the colours alone
+        let choices = choices_in(&scratch("choices"));
+        assert_eq!(choices.len(), GRAYS.len());
+        for (at, (colour, name)) in GRAYS.iter().enumerate() {
+            assert_eq!(
+                choices[at].wallpaper,
+                Wallpaper::Color((*colour).to_string())
+            );
+            assert_eq!(choices[at].title, *name);
+            assert!(choices[at].credit.is_empty());
+            assert!(choices[at].names(colour));
+            assert!(choices[at].names(&format!(" {colour} ")));
+            assert!(!choices[at].names("earthset"));
+        }
+    }
 
     /// A folder of its own under the system's temporary folder, empty.
     fn scratch(name: &str) -> PathBuf {

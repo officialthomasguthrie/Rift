@@ -16,6 +16,8 @@ path = "src/main.rs"
 # the theme, the accent and the wallpaper the Appearance page writes, what About reads off the
 # system bus from Orbit, and the model manifest the AI page lists
 librift = { workspace = true, features = ["bus", "models"] }
+# the colours, the rows, the switches and the icons every page is drawn with
+rift-ui = { workspace = true }
 
 # a normal window, drawn in software like the shell so no gpu driver is needed. svg draws the
 # symbolic icons of the sidebar, each in one colour, and the image widget the logo mark on the
