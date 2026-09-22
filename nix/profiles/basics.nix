@@ -58,6 +58,9 @@ in
     simple-scan
     # xdg-open and xdg-mime, which apps call to hand a file or a link to the app that owns it
     xdg-utils
+    # the terminal glib starts an app with Terminal=true in, when a file is handed to one: helix or
+    # neovim as the app for text. it runs the terminal the list below names
+    xdg-terminal-exec
     # the screen recorder the key runs. it reads the screen over wlr-screencopy, the protocol the
     # screenshot key uses, and encodes with ffmpeg on the processor, so a machine with no video
     # encoder of its own records all the same
@@ -232,7 +235,14 @@ in
   # alone until now, so an emoji in a page or a message was an empty box
   fonts.packages = [ pkgs.noto-fonts-color-emoji ];
 
-  # what opens a file the owner picks in another app
+  # the terminal xdg-terminal-exec runs, the one the session has
+  environment.etc."xdg/xdg-terminals.list".text = ''
+    com.mitchellh.ghostty.desktop
+  '';
+
+  # what opens a file the owner picks in another app. the kinds are the ones Settings' Apps page
+  # lists, with the same types, in crates/librift/src/defaults.rs; a choice made there goes into the
+  # owner's own list, which is read before this one
   xdg.mime.defaultApplications =
     let
       pictures = [
@@ -284,6 +294,25 @@ in
         "application/x-bzip2"
         "application/x-7z-compressed"
       ];
+      # plain text and source code, with every kind of source the editors in the image say they
+      # open, so zed opens all of them and not helix or neovim in a terminal
+      text = [
+        "text/plain"
+        "text/markdown"
+        "text/x-c"
+        "text/x-csrc"
+        "text/x-chdr"
+        "text/x-c++"
+        "text/x-c++src"
+        "text/x-c++hdr"
+        "text/x-java"
+        "text/x-makefile"
+        "text/x-pascal"
+        "text/x-tcl"
+        "text/x-tex"
+        "text/x-moc"
+        "application/x-shellscript"
+      ];
       # a page, and a link an app hands over. the guide is a page like any other, so this is what
       # opens it
       web = [
@@ -299,5 +328,6 @@ in
     // opens "org.gnome.Showtime.desktop" video
     // opens "org.gnome.Decibels.desktop" sound
     // opens "org.gnome.FileRoller.desktop" archives
+    // opens "dev.zed.Zed.desktop" text
     // opens "firefox.desktop" web;
 }
