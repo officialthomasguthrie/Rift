@@ -506,7 +506,9 @@ jobs:
           truncate -s 128M locked.img
           printf 'rift-locked' > locked.txt
           mkdir -p private && printf 'the beach house\n' > private/holiday.txt
-          cryptsetup=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#cryptsetup)/bin/cryptsetup
+          # the package has several outputs, so the command itself is asked for by name: sudo needs
+          # the whole path, since it does not take the PATH a nix shell sets
+          cryptsetup=$(nix shell --inputs-from . nixpkgs#cryptsetup -c sh -c 'command -v cryptsetup')
           "$cryptsetup" luksFormat --type luks2 --label LOCKED --pbkdf pbkdf2 \
             --pbkdf-force-iterations 1000 --batch-mode locked.img locked.txt
           sudo "$cryptsetup" open --key-file locked.txt locked.img rift-locked-test
