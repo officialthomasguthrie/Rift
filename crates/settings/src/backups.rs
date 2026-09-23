@@ -313,9 +313,10 @@ const ON_THIS_DRIVE: &str = "Snapshots sit beside your home folder on this drive
 const CHOOSING: &str = "Choosing the disk is sudo vault target <folder> from a terminal, which \
                         prints the password of the backups once. Vault mounts that disk itself \
                         whenever it is plugged in.";
-/// How a file comes back today.
-const RESTORING: &str = "Putting a file back is not in Settings yet. rift snapshot restore copies \
-                         a file back from a snapshot, and rift backup restore from a backup.";
+/// Where a file comes back from a snapshot, and how one comes back from a backup.
+const RESTORING: &str = "Timeline in Files shows a folder as it was at any of these snapshots and \
+                         puts a file back. A file from a backup is rift backup restore, from a \
+                         terminal.";
 
 #[cfg(test)]
 mod tests {
