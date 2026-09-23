@@ -110,6 +110,11 @@ pub fn state(browser: &Browser) -> Vec<String> {
             .map_or("none", crate::dialogs::Dialog::word)
     ));
     if let Some(dialog) = &browser.dialog {
+        if let crate::dialogs::Dialog::Properties(facts) = dialog {
+            for (label, said) in facts.rows() {
+                lines.push(format!("property {} {said}", label.to_lowercase()));
+            }
+        }
         if let Some(typed) = dialog.typed() {
             lines.push(format!("dialog-name {typed}"));
         }
@@ -161,18 +166,21 @@ pub fn view<'a>(
             }
             .to_string(),
         )
+    } else if files.options.grid {
+        crate::grid::view(files, id, browser, look)
     } else {
         rows(files, id, browser, look)
     };
     let area = mouse_area(container(body).width(Fill).height(Fill))
         .on_press(Message::Blank(id))
         .on_right_press(Message::BlankMenu(id));
-    column![
-        heads(files, id, browser, look),
-        hairline(look),
-        pointed(area, move |point| Message::At(id, point)),
-    ]
-    .into()
+    let pointing = pointed(area, move |point| Message::At(id, point));
+    // the grid has no columns, so it has no headings over it either; the main menu puts it in
+    // whichever order the headings would
+    if files.options.grid {
+        return pointing;
+    }
+    column![heads(files, id, browser, look), hairline(look), pointing,].into()
 }
 
 /// A sentence in the middle of the list, for a folder with nothing to show.
@@ -398,7 +406,7 @@ fn dim<'a>(look: Colors, said: String, width: f32) -> Element<'a, Message> {
 
 /// Where a folder is, the way the trash's column says it: Home, a path under home without it in
 /// front, or the whole path.
-fn where_words(files: &Files, folder: &Path) -> String {
+pub fn where_words(files: &Files, folder: &Path) -> String {
     let Some(home) = files.places.first().map(|place| place.path.as_path()) else {
         return folder.display().to_string();
     };
@@ -411,7 +419,7 @@ fn where_words(files: &Files, folder: &Path) -> String {
 
 /// The icons that can draw a row, the one that fits best first: a place's own folder, any folder,
 /// a link to nothing, or the kind of a file.
-fn icon_names(files: &Files, folder: Option<&Path>, entry: &Entry) -> Vec<String> {
+pub fn icon_names(files: &Files, folder: Option<&Path>, entry: &Entry) -> Vec<String> {
     match entry.kind {
         Kind::Folder => {
             let place = folder.and_then(|folder| {

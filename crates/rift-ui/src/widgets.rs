@@ -508,6 +508,21 @@ pub fn wide_field<'a, M: Clone + 'a>(
         .into()
 }
 
+/// The same wide field with what is typed hidden, for a passphrase.
+#[must_use]
+pub fn wide_secret<'a, M: Clone + 'a>(
+    colors: Colors,
+    hint: &'a str,
+    value: &'a str,
+    id: impl Into<iced::widget::Id>,
+    typed: impl Fn(String) -> M + 'a,
+    entered: M,
+) -> Element<'a, M> {
+    entry(colors, hint, value, true, id, typed, entered)
+        .width(Fill)
+        .into()
+}
+
 fn entry<'a, M: Clone + 'a>(
     colors: Colors,
     hint: &'a str,

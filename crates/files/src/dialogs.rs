@@ -1,18 +1,20 @@
 //! The dialogs: a name for a new folder, a new name for a file, the question before a name is
-//! replaced, and the question before anything is deleted for good. Each stands in the middle of its
-//! window with the rest of the window dimmed behind it, the way GNOME's dialogs do: a title, one
-//! sentence or a field, and the answers along the bottom.
+//! replaced, the question before anything is deleted for good, what is known about what is
+//! selected, and the passphrase of a locked disk. Each stands in the middle of its window with the
+//! rest of the window dimmed behind it, the way GNOME's dialogs do: a title, one sentence or a
+//! field, and the answers along the bottom.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iced::widget::text;
-use iced::{Element, window};
+use iced::widget::{column, text};
+use iced::{Element, Fill, window};
 use librift::files::check_name;
 use rift_ui::theme::Colors;
-use rift_ui::widgets::{TEXT_SIZE, action, destructive, dialog, primary, wide_field};
+use rift_ui::widgets::{TEXT_SIZE, action, destructive, dialog, fact, primary, wide_field};
 
+use crate::props::Facts;
 use crate::ui::Message;
 
 /// A dialog that is open.
@@ -52,6 +54,21 @@ pub enum Dialog {
     },
     /// Empty the trash.
     Empty,
+    /// What is known about what is selected.
+    Properties(Box<Facts>),
+    /// The passphrase of a locked disk, asked for before it is unlocked.
+    Unlock {
+        /// What names the disk on the bus.
+        drive: String,
+        /// What the sidebar calls it.
+        name: String,
+        /// What is typed, which is never printed anywhere.
+        secret: String,
+        /// Why the last try did not open it.
+        problem: Option<String>,
+        /// Whether udisks is being asked at the moment.
+        working: bool,
+    },
     /// A copy, a move or a file brought back from a moment whose name is already taken in the
     /// folder it is going to.
     Replace {
@@ -92,6 +109,8 @@ impl Dialog {
             } => "no-trash",
             Self::Forget { .. } => "forget",
             Self::Empty => "empty",
+            Self::Properties(_) => "properties",
+            Self::Unlock { .. } => "unlock",
             Self::Replace { .. } => "replace",
         }
     }
@@ -105,16 +124,25 @@ impl Dialog {
         }
     }
 
-    /// Change what is typed in its field.
+    /// Change what is typed in its field. A passphrase is kept apart from the names, since
+    /// `--state` prints what is typed in a field and a passphrase belongs nowhere but the dialog.
     pub fn type_in(&mut self, typed: String) {
-        if let Self::NewFolder { name } | Self::Rename { name, .. } = self {
-            *name = typed;
+        match self {
+            Self::NewFolder { name } | Self::Rename { name, .. } => *name = typed,
+            Self::Unlock {
+                secret, problem, ..
+            } => {
+                *secret = typed;
+                *problem = None;
+            }
+            _ => {}
         }
     }
 
-    /// What is wrong with the name typed, as the line under the field: `folder` is the window's
-    /// folder, and a rename looks in the folder the file itself is in. Nothing for a dialog with
-    /// no field, and nothing for an empty name, which only dims the button.
+    /// What is wrong with what was typed, as the line under the field: `folder` is the window's
+    /// folder, and a rename looks in the folder the file itself is in. For a passphrase it is what
+    /// udisks said. Nothing for a dialog with no field, and nothing for an empty name, which only
+    /// dims the button.
     #[must_use]
     pub fn problem(&self, folder: &Path) -> Option<String> {
         let (name, from, folder) = match self {
@@ -122,6 +150,7 @@ impl Dialog {
             Self::Rename {
                 name, from, inside, ..
             } => (name, Some(from.as_os_str()), inside.as_path()),
+            Self::Unlock { problem, .. } => return problem.clone(),
             _ => return None,
         };
         name_problem(folder, name, from)
@@ -130,6 +159,12 @@ impl Dialog {
     /// Whether its default button can be pressed.
     #[must_use]
     pub fn ready(&self, folder: &Path) -> bool {
+        if let Self::Unlock {
+            secret, working, ..
+        } = self
+        {
+            return !secret.is_empty() && !working;
+        }
         match self.typed() {
             Some(name) => check_name(name).is_ok() && self.problem(folder).is_none(),
             None => true,
@@ -154,6 +189,9 @@ pub fn name_problem(folder: &Path, name: &str, from: Option<&OsStr>) -> Option<S
         .is_ok()
         .then(|| format!("Something called {name} is already here."))
 }
+
+/// What the dialog for a locked disk says over its field.
+const WHY_LOCKED: &str = "This disk is encrypted. Rift can see it and cannot read it yet.";
 
 /// The id of the field of the dialog in window `number`. Each window has its own, since an
 /// operation on a field reaches every window.
@@ -229,6 +267,21 @@ pub fn view<'a>(
                 destructive(look, "Delete", ready),
             )
         }
+        Dialog::Properties(facts) => properties(look, id, facts),
+        Dialog::Unlock {
+            name,
+            secret,
+            problem,
+            working,
+            ..
+        } => unlocking(
+            look,
+            id,
+            number,
+            (name, secret, problem.as_deref(), *working),
+            cancel,
+            ready,
+        ),
         Dialog::Replace {
             into,
             putting,
@@ -256,6 +309,58 @@ pub fn view<'a>(
             vec![cancel, destructive(look, "Empty trash", ready)],
         ),
     }
+}
+
+/// What is known about what is selected, a row for each fact.
+fn properties<'a>(look: Colors, id: window::Id, facts: &Facts) -> Element<'a, Message> {
+    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+    for (label, said) in facts.rows() {
+        rows.push(fact(look, label, said));
+    }
+    dialog(
+        look,
+        "Properties".to_string(),
+        vec![column(rows).width(Fill).into()],
+        vec![primary(look, "Close", Some(Message::Cancel(id)))],
+    )
+}
+
+/// The passphrase of a locked disk: one sentence about what the disk is, the field, and the line
+/// under it when the last passphrase did not open it.
+fn unlocking<'a>(
+    look: Colors,
+    id: window::Id,
+    number: usize,
+    disk: (&'a str, &'a str, Option<&'a str>, bool),
+    cancel: Element<'a, Message>,
+    ready: Option<Message>,
+) -> Element<'a, Message> {
+    let (name, secret, problem, working) = disk;
+    let field = rift_ui::widgets::wide_secret(
+        look,
+        "Passphrase",
+        secret,
+        field_id(number),
+        move |typed| Message::Typed(id, typed),
+        Message::Confirm(id),
+    );
+    let under: Element<'a, Message> = match problem {
+        Some(why) => text(why).size(TEXT_SIZE).color(look.error).into(),
+        None => text(" ").size(TEXT_SIZE).into(),
+    };
+    dialog(
+        look,
+        format!("Unlock {name}"),
+        vec![
+            text(WHY_LOCKED).size(TEXT_SIZE).color(look.text).into(),
+            field,
+            under,
+        ],
+        vec![
+            cancel,
+            primary(look, if working { "Unlocking" } else { "Unlock" }, ready),
+        ],
+    )
 }
 
 /// The question before a name in the folder is replaced. Keeping both is the default answer, the

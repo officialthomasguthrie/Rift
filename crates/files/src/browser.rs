@@ -501,7 +501,8 @@ impl Browser {
 }
 
 /// A count of rows from a length in them, never less than none.
-fn to_row(rows: f32) -> usize {
+#[must_use]
+pub fn to_row(rows: f32) -> usize {
     if rows.is_finite() && rows > 0.0 {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let whole = rows.floor() as usize;

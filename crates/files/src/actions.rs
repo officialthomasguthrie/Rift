@@ -227,37 +227,7 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
             }
             Task::none()
         }
-        Act::Restore => {
-            let files = chosen_files(state, id);
-            if files.is_empty() {
-                return Task::none();
-            }
-            ui::start_job(state, Some(id), Work::Restore(files))
-        }
-        Act::Forget => {
-            if let Some(browser) = state.windows.get_mut(&id)
-                && browser.location == Location::Trash
-            {
-                let chosen = browser.chosen();
-                let files: Vec<PathBuf> = chosen
-                    .iter()
-                    .map(|entry| PathBuf::from(&entry.name))
-                    .collect();
-                let labels = chosen.iter().map(|entry| entry.label.clone()).collect();
-                if !files.is_empty() {
-                    browser.dialog = Some(Dialog::Forget { files, labels });
-                }
-            }
-            Task::none()
-        }
-        Act::Empty => {
-            if let Some(browser) = state.windows.get_mut(&id)
-                && state.trash_full
-            {
-                browser.dialog = Some(Dialog::Empty);
-            }
-            Task::none()
-        }
+        Act::Restore | Act::Forget | Act::Empty => trash_act(state, id, &act),
         Act::Mount(drive) => disk(state, id, &drive, Doing::Mount),
         Act::Eject(drive) => disk(state, id, &drive, Doing::Eject),
         Act::Timeline => timeline_of(state, id),
@@ -265,6 +235,16 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
         Act::Now => now(state, id),
         Act::Bring => bring(state, id),
         Act::Search => open_search(state, id),
+        Act::Grid(grid) => {
+            if state.options.grid == grid {
+                return Task::none();
+            }
+            state.options.grid = grid;
+            let shown = rearrange(state);
+            Task::batch([shown, crate::thumbs::want(state, id)])
+        }
+        Act::Properties => properties(state, id),
+        Act::Unlock(drive) => ask_passphrase(state, id, &drive),
         Act::SelectAll => {
             if let Some(browser) = state.windows.get_mut(&id) {
                 browser.select_all();
@@ -300,6 +280,44 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
         Act::Stop(number) => {
             if let Some(job) = state.jobs.iter().find(|job| job.number == number) {
                 job.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Task::none()
+        }
+    }
+}
+
+/// The three that are about the trash: put back what is selected there, delete it for good after
+/// the question, and empty the whole trash after the question.
+fn trash_act(state: &mut Files, id: window::Id, act: &Act) -> Task<Message> {
+    match act {
+        Act::Restore => {
+            let files = chosen_files(state, id);
+            if files.is_empty() {
+                return Task::none();
+            }
+            ui::start_job(state, Some(id), Work::Restore(files))
+        }
+        Act::Forget => {
+            if let Some(browser) = state.windows.get_mut(&id)
+                && browser.location == Location::Trash
+            {
+                let chosen = browser.chosen();
+                let files: Vec<PathBuf> = chosen
+                    .iter()
+                    .map(|entry| PathBuf::from(&entry.name))
+                    .collect();
+                let labels = chosen.iter().map(|entry| entry.label.clone()).collect();
+                if !files.is_empty() {
+                    browser.dialog = Some(Dialog::Forget { files, labels });
+                }
+            }
+            Task::none()
+        }
+        _ => {
+            if let Some(browser) = state.windows.get_mut(&id)
+                && state.trash_full
+            {
+                browser.dialog = Some(Dialog::Empty);
             }
             Task::none()
         }
@@ -991,6 +1009,11 @@ pub fn confirm(state: &mut Files, id: window::Id) -> Task<Message> {
     {
         return Task::none();
     }
+    // the passphrase keeps its dialog: it stays up while udisks is asked, and again with the
+    // sentence in it when the passphrase does not open the disk
+    if matches!(dialog, Dialog::Unlock { .. }) {
+        return unlock(state, id);
+    }
     browser.dialog = None;
     match dialog {
         Dialog::NewFolder { name } => {
@@ -1028,6 +1051,7 @@ pub fn confirm(state: &mut Files, id: window::Id) -> Task<Message> {
                 .collect();
             ui::start_job(state, Some(id), Work::Empty(roots))
         }
+        Dialog::Properties(_) | Dialog::Unlock { .. } => Task::none(),
         // its default button keeps both, which is what the job does when nothing is replaced
         Dialog::Replace {
             from,
@@ -1071,7 +1095,7 @@ fn reread_selecting(state: &mut Files, id: window::Id, name: OsString) -> Task<M
 }
 
 /// Select what was waiting to be selected once the folder was read, and scroll to it.
-pub fn select_waiting(browser: &mut Browser) -> Task<Message> {
+pub fn select_waiting(browser: &mut Browser, grid: bool) -> Task<Message> {
     if browser.select_after.is_empty() {
         return Task::none();
     }
@@ -1088,12 +1112,17 @@ pub fn select_waiting(browser: &mut Browser) -> Task<Message> {
         browser.toggle(at);
     }
     browser.cursor = Some(browser.rows[first].name.clone());
-    scroll_to(browser, first)
+    scroll_to(browser, first, grid)
 }
 
-/// Scroll the list so a row is on screen, when it is not.
-fn scroll_to(browser: &Browser, at: usize) -> Task<Message> {
-    match browser.scroll_for(at, ROW) {
+/// Scroll the list or the grid so a row is on screen, when it is not.
+fn scroll_to(browser: &Browser, at: usize, grid: bool) -> Task<Message> {
+    let where_to = if grid {
+        crate::grid::scroll_for(browser, at)
+    } else {
+        browser.scroll_for(at, ROW)
+    };
+    match where_to {
         Some(y) => operation::scroll_to(
             list_id(browser.number),
             AbsoluteOffset {
@@ -1120,20 +1149,34 @@ pub fn key(
     }
     browser.menu = None;
     let trash = browser.location == Location::Trash;
-    match keys::press(key, modifiers, trash) {
+    let grid = state.options.grid;
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    let across = crate::grid::across(browser.size.width);
+    let stepped = |browser: &mut Browser, by: isize, extend: bool| match browser.step(by, extend) {
+        Some(at) => scroll_to(browser, at, grid),
+        None => Task::none(),
+    };
+    match keys::press(key, modifiers, trash, grid) {
         Some(Press::Act(act)) => self::act(state, id, act),
-        Some(Press::Step(by, extend)) => match browser.step(by, extend) {
-            Some(at) => scroll_to(browser, at),
-            None => Task::none(),
-        },
+        Some(Press::Step(by, extend)) => {
+            let task = stepped(browser, by, extend);
+            Task::batch([task, crate::thumbs::want(state, id)])
+        }
+        Some(Press::Line(lines, extend)) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let by = lines * across as isize;
+            let task = stepped(browser, by, extend);
+            Task::batch([task, crate::thumbs::want(state, id)])
+        }
         Some(Press::Page(pages, extend)) => {
-            let rows = (browser.viewport / ROW).floor().max(1.0);
-            #[allow(clippy::cast_possible_truncation)]
-            let by = pages * rows as isize;
-            match browser.step(by, extend) {
-                Some(at) => scroll_to(browser, at),
-                None => Task::none(),
-            }
+            let tall = if grid { crate::grid::TALL } else { ROW };
+            let rows = (browser.viewport / tall).floor().max(1.0);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let by = pages * rows as isize * if grid { across as isize } else { 1 };
+            let task = stepped(browser, by, extend);
+            Task::batch([task, crate::thumbs::want(state, id)])
         }
         Some(Press::Back) => ui::travel(state, id, Browser::go_back),
         Some(Press::Forward) => ui::travel(state, id, Browser::go_forward),
@@ -1287,6 +1330,8 @@ pub fn set(state: &mut Files, name: &str, value: &str) -> Task<Message> {
         ("activate", Some(at)) => Message::Twice(id, at),
         ("select-none", _) => Message::Blank(id),
         ("menu", _) => return set_menu(state, id, value),
+        ("view", _) => return act(state, id, Act::Grid(value == "grid")),
+        ("unlock", _) => return by_name(state, id, value, Doing::Unlock),
         ("search", _) => return search_for(state, id, value, false),
         ("meaning", _) => return search_for(state, id, value, true),
         ("new-folder" | "rename", _) => return typed_dialog(state, id, name, value),
@@ -1365,6 +1410,7 @@ fn named_act(word: &str, value: &str) -> Option<Act> {
         "later" => Act::Step { earlier: false },
         "now" => Act::Now,
         "bring" => Act::Bring,
+        "properties" => Act::Properties,
         _ => return None,
     })
 }
@@ -1383,6 +1429,8 @@ fn search_for(state: &mut Files, id: window::Id, words: &str, meaning: bool) -> 
 /// What a press on a disk in the sidebar starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Doing {
+    /// Ask for its passphrase, for a disk that is locked.
+    Unlock,
     /// Mount it and go there.
     Mount,
     /// Unmount it.
@@ -1405,7 +1453,8 @@ fn disk(state: &mut Files, id: window::Id, drive: &str, doing: Doing) -> Task<Me
     let (sender, receiver) = oneshot::channel();
     thread::spawn(move || {
         let done = match doing {
-            Doing::Mount => drives::mount(&name).map(Some),
+            // a locked disk is unlocked from its dialog, where the passphrase is typed
+            Doing::Unlock | Doing::Mount => drives::mount(&name).map(Some),
             Doing::Unmount => drives::unmount(&name).map(|()| None),
             Doing::Eject => drives::eject(&name).map(|()| None),
         };
@@ -1440,6 +1489,131 @@ pub fn disk_done(
         (Ok(_), None) => {}
     }
     Task::batch(tasks)
+}
+
+/// What is known about what is selected, in a dialog. What takes a moment to work out, the size
+/// of a folder and how many pixels across a picture is, is worked out on a thread and fills itself
+/// in when it comes.
+fn properties(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(browser) = state.windows.get(&id) else {
+        return Task::none();
+    };
+    let Some(facts) = crate::props::facts(state, browser) else {
+        return Task::none();
+    };
+    let measuring = crate::props::measure(id, &facts);
+    if let Some(browser) = state.windows.get_mut(&id) {
+        browser.menu = None;
+        browser.dialog = Some(Dialog::Properties(Box::new(facts)));
+    }
+    measuring
+}
+
+/// What the Properties dialog was waiting to know.
+pub fn measured(
+    state: &mut Files,
+    id: window::Id,
+    size: String,
+    pixels: Option<(u32, u32)>,
+) -> Task<Message> {
+    if let Some(browser) = state.windows.get_mut(&id)
+        && let Some(Dialog::Properties(facts)) = browser.dialog.as_mut()
+    {
+        facts.size = Some(size);
+        facts.pixels = pixels;
+    }
+    Task::none()
+}
+
+/// The dialog that asks for the passphrase of a locked disk.
+fn ask_passphrase(state: &mut Files, id: window::Id, drive: &str) -> Task<Message> {
+    let Some(volume) = state.drive(drive) else {
+        return Task::none();
+    };
+    if !volume.locked {
+        return Task::none();
+    }
+    let name = volume.name.clone();
+    let number = state.windows.get(&id).map_or(1, |browser| browser.number);
+    if let Some(browser) = state.windows.get_mut(&id) {
+        browser.menu = None;
+        browser.dialog = Some(Dialog::Unlock {
+            drive: drive.to_string(),
+            name,
+            secret: String::new(),
+            problem: None,
+            working: false,
+        });
+    }
+    crate::widgets::focus(field_id(number))
+}
+
+/// Unlock a disk with the passphrase that was typed and mount what comes out of it, on a thread of
+/// its own: both calls go to udisks and each takes as long as the disk does.
+fn unlock(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    let Some(Dialog::Unlock {
+        drive,
+        secret,
+        working,
+        ..
+    }) = browser.dialog.as_mut()
+    else {
+        return Task::none();
+    };
+    if *working || secret.is_empty() {
+        return Task::none();
+    }
+    *working = true;
+    let (drive, secret) = (drive.clone(), secret.clone());
+    let named = drive.clone();
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let done = drives::unlock(&drive, &secret).and_then(|inside| drives::mount(&inside));
+        let _ = sender.send(Message::Unlocked(id, drive, Box::new(done)));
+    });
+    Task::perform(receiver, move |said| {
+        said.unwrap_or_else(|_| {
+            Message::Unlocked(
+                id,
+                named.clone(),
+                Box::new(Err("The disk service said nothing.".to_string())),
+            )
+        })
+    })
+}
+
+/// A locked disk was unlocked and what came out of it mounted, or it was not: a passphrase that
+/// does not open it leaves the dialog up with the sentence in it, so it can be typed again.
+pub fn unlocked(
+    state: &mut Files,
+    id: window::Id,
+    drive: &str,
+    done: Result<PathBuf, String>,
+) -> Task<Message> {
+    state.working.retain(|busy| busy != drive);
+    match done {
+        Ok(mount) => {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.dialog = None;
+            }
+            Task::batch([look_at_disks(), ui::go(state, id, Location::Folder(mount))])
+        }
+        Err(why) => {
+            if let Some(browser) = state.windows.get_mut(&id)
+                && let Some(Dialog::Unlock {
+                    problem, working, ..
+                }) = browser.dialog.as_mut()
+            {
+                *problem = Some(why);
+                *working = false;
+                return Task::none();
+            }
+            toast(state, id, why, None)
+        }
+    }
 }
 
 /// Ask udisks what is there now, on a thread of its own.
@@ -1481,6 +1655,7 @@ fn by_name(state: &mut Files, id: window::Id, name: &str, doing: Doing) -> Task<
     };
     let (drive_id, mount) = (drive.id.clone(), drive.mount.clone());
     match (doing, mount) {
+        (Doing::Unlock, _) => ask_passphrase(state, id, &drive_id),
         (Doing::Mount, Some(mount)) => ui::go(state, id, Location::Folder(mount)),
         _ => disk(state, id, &drive_id, doing),
     }

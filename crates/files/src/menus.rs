@@ -3,7 +3,7 @@
 //! button, and moves in from an edge it would run over.
 
 use iced::{Point, Size, window};
-use librift::files::Kind;
+use librift::files::{Kind, Sort};
 use rift_ui::widgets::{Item, menu_height, menu_width};
 
 use crate::browser::{Browser, Location};
@@ -113,6 +113,22 @@ pub fn items(files: &Files, browser: &Browser, id: window::Id, menu: &Menu) -> V
             {
                 items.push(Item::new("Timeline", act(Act::Timeline)));
             }
+            items.push(Item::Line);
+            items.push(Item::ticked(
+                "Grid",
+                files.options.grid,
+                Message::Do(id, Act::Grid(!files.options.grid)),
+            ));
+            // the headings put the list in order; the grid has none, so the order is here instead
+            if files.options.grid {
+                for sort in Sort::ALL {
+                    items.push(Item::ticked(
+                        sort.label(),
+                        files.options.sort == sort,
+                        Message::Do(id, Act::Sort(sort)),
+                    ));
+                }
+            }
             items.extend([
                 Item::Line,
                 hidden,
@@ -188,6 +204,8 @@ fn selection(browser: &Browser, id: window::Id, menu: &Menu) -> Vec<Item<Message
     }
     items.push(Item::Line);
     items.push(Item::new("Move to trash", act(Act::Trash)));
+    items.push(Item::Line);
+    items.push(Item::new("Properties", act(Act::Properties)));
     items
 }
 

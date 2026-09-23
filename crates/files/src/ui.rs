@@ -26,8 +26,9 @@ use crate::browser::{Browser, Location};
 use crate::control::{self, Command};
 use crate::jobs::{self, Job, Step};
 use crate::theme::{Colors, colors};
+use crate::thumbs::Thumbs;
 use crate::widgets::{FONT, TEXT_SIZE};
-use crate::{actions, find, list, view};
+use crate::{actions, find, list, thumbs, view};
 
 /// What the windows call themselves: the name of the desktop entry, which the dock, the compositor
 /// and the boot test all know them by.
@@ -78,6 +79,8 @@ pub struct Files {
     pub options: Options,
     /// The kinds of file.
     pub types: Arc<mime::Database>,
+    /// The small pictures of files the grid draws, and the programs that make them.
+    pub thumbs: Thumbs,
     /// Home and the folders the sidebar lists.
     pub places: Vec<Place>,
     /// The disks a person plugged in, as udisks last said.
@@ -174,6 +177,12 @@ pub enum Act {
     Bring,
     /// Search this folder and what is under it: the field in the header bar opens.
     Search,
+    /// Show the folder as a grid of pictures, or as a list of rows.
+    Grid(bool),
+    /// What is known about what is selected.
+    Properties,
+    /// Ask for the passphrase of this locked disk.
+    Unlock(String),
 }
 
 /// What a press, a key, a line on the socket or a job asks for.
@@ -273,6 +282,13 @@ pub enum Message {
         String,
         Box<Result<Option<PathBuf>, String>>,
     ),
+    /// The picture of a file, when one was made or found, and nothing when there is none to have.
+    Thumb(PathBuf, Option<i64>, Option<PathBuf>),
+    /// What the Properties dialog was waiting to know: how big it is, and how many pixels across a
+    /// picture is.
+    Measured(window::Id, String, Option<(u32, u32)>),
+    /// A locked disk was unlocked and what came out of it mounted, or it was not.
+    Unlocked(window::Id, String, Box<Result<PathBuf, String>>),
 }
 
 /// Run until the last window is closed and no job is running.
@@ -347,6 +363,7 @@ fn boot(start: &Start) -> (Files, Task<Message>) {
         look: Look::read(),
         options: Options::read(),
         types: Arc::new(mime::Database::load()),
+        thumbs: Thumbs::load(),
         places: places::places(),
         drives: Vec::new(),
         moments: Vec::new(),
@@ -600,6 +617,8 @@ impl Files {
             format!("windows {}", self.windows.len()),
             format!("trash {}", if self.trash_full { "full" } else { "empty" }),
             format!("hidden {}", if self.options.hidden { "on" } else { "off" }),
+            format!("view {}", if self.options.grid { "grid" } else { "list" }),
+            format!("thumbnails {}", self.thumbs.count()),
             format!(
                 "sort {}{}",
                 self.options.sort.word(),
@@ -667,13 +686,16 @@ fn handle(state: &mut Files, message: Message) -> Task<Message> {
         | Message::Unhover(..)
         | Message::Blank(_)
         | Message::At(..)
-        | Message::Scrolled(..)
-        | Message::Resized(..)
         | Message::Modifiers(_)
         | Message::Focused(_)
         | Message::Opened(_) => {
             pointer(state, &message);
             Task::none()
+        }
+        // what is on screen has changed, so the pictures of the tiles there are asked for
+        Message::Scrolled(id, _) | Message::Resized(id, _) => {
+            pointer(state, &message);
+            thumbs::want(state, id)
         }
         Message::BlankMenu(id) => actions::blank_menu(state, id),
         Message::Go(id, location) => go(state, id, location),
@@ -758,6 +780,9 @@ fn answered(state: &mut Files, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::Thumb(path, modified, picture) => thumbs::thumb(state, path, modified, picture),
+        Message::Measured(id, size, pixels) => actions::measured(state, id, size, pixels),
+        Message::Unlocked(id, drive, done) => actions::unlocked(state, id, &drive, *done),
         Message::Pasted(id, text) => actions::pasted(state, id, text.as_deref()),
         Message::Said(command) => said(state, command),
         Message::Shot(shot) => {
@@ -829,7 +854,7 @@ fn trash_read(state: &mut Files, id: window::Id, trashed: Vec<Trashed>) -> Task<
     let shown = match state.windows.get_mut(&id) {
         Some(browser) if browser.location == Location::Trash && browser.searching().is_none() => {
             browser.show_trash(trashed, &types, options);
-            actions::select_waiting(browser)
+            actions::select_waiting(browser, options.grid)
         }
         _ => Task::none(),
     };
@@ -905,7 +930,7 @@ fn arrived(
     let shown = match found {
         Ok(entries) => {
             browser.show(entries, options);
-            actions::select_waiting(browser)
+            actions::select_waiting(browser, options.grid)
         }
         Err(why) => {
             browser.read.clear();
@@ -915,7 +940,7 @@ fn arrived(
             Task::none()
         }
     };
-    Task::batch([shown, shoot(state)])
+    Task::batch([shown, thumbs::want(state, id), shoot(state)])
 }
 
 /// What udisks says is plugged in now. A drive coming or going takes its own trash with it, so a

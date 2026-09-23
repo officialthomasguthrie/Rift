@@ -23,6 +23,13 @@ let
 in
 {
   environment.systemPackages = [
+    # the program that makes the small picture of a file for the grid in files. the freedesktop
+    # thumbnailers are named by .thumbnailer files under share/thumbnailers, which the system links
+    # into its own share; gdk-pixbuf's covers png, jpeg, gif, bmp, tiff and the icon formats, and
+    # papers, which is in basics.nix, covers pdf, djvu and comic books. gdk-pixbuf is in the image
+    # already, since every gtk app carries it, so this adds its commands and nothing more
+    pkgs.gdk-pixbuf
+
     (pkgs.makeDesktopItem {
       name = "dev.rift.Files";
       desktopName = "Files";

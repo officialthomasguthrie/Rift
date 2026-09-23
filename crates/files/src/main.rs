@@ -2,7 +2,8 @@
 //! what is in the folder in a list, and the trash; files open with the apps that open their kind.
 //!
 //! The header bar searches the folder and what is under it, by name as it is typed and by meaning
-//! on Enter, and the Timeline shows the folder as it was at one of Vault's snapshots of home.
+//! on Enter, and the Timeline shows the folder as it was at one of Vault's snapshots of home. A
+//! folder is shown as a list of rows or as a grid of the pictures of its files.
 //!
 //! `rift-files` opens a window on home, and `rift-files <folder>` one on that folder, or on the
 //! folder of a file with the file selected; with Files running, it asks that one for the window.
@@ -14,10 +15,13 @@ mod browser;
 mod control;
 mod dialogs;
 mod find;
+mod grid;
 mod jobs;
 mod keys;
 mod list;
 mod menus;
+mod props;
+mod thumbs;
 mod timeline;
 mod ui;
 mod view;

@@ -527,7 +527,7 @@ fn under(browser: &Browser, mount: &Path) -> bool {
 
 /// One disk in the sidebar: a press mounts it, or opens it when it is mounted already, and the
 /// button at its right end unmounts it and ejects it, so the stick can be pulled out. A locked
-/// disk is dimmed: Rift can see it and cannot open it yet.
+/// disk says so, and a press on it asks for its passphrase.
 fn drive_row<'a>(
     state: &Files,
     id: window::Id,
@@ -545,9 +545,10 @@ fn drive_row<'a>(
     } else {
         drive.name.clone()
     };
-    let press = (!drive.locked && !busy).then(|| match &drive.mount {
-        Some(mount) => Message::Go(id, Location::Folder(mount.clone())),
-        None => Message::Do(id, Act::Mount(drive.id.clone())),
+    let press = (!busy).then(|| match (&drive.mount, drive.locked) {
+        (_, true) => Message::Do(id, Act::Unlock(drive.id.clone())),
+        (Some(mount), _) => Message::Go(id, Location::Folder(mount.clone())),
+        (None, _) => Message::Do(id, Act::Mount(drive.id.clone())),
     });
     let row = side_row_with(look, drive.icon, name, here, press, EJECT);
     if !drive.mounted() {

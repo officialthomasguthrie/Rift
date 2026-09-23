@@ -14,6 +14,8 @@ pub enum Press {
     Act(Act),
     /// Move through the list this many rows, extending the selection when Shift is down.
     Step(isize, bool),
+    /// Move this many rows of tiles in the grid, which is that many rows across.
+    Line(isize, bool),
     /// Move through the list this many screenfuls.
     Page(isize, bool),
     /// Back through the history.
@@ -26,10 +28,10 @@ pub enum Press {
     Home,
 }
 
-/// What a key pressed with these modifiers asks for, in the trash or in a folder. Nothing for a
-/// key the file manager leaves alone.
+/// What a key pressed with these modifiers asks for, in the trash or in a folder, in the list or
+/// in the grid. Nothing for a key the file manager leaves alone.
 #[must_use]
-pub fn press(key: &Key, modifiers: Modifiers, trash: bool) -> Option<Press> {
+pub fn press(key: &Key, modifiers: Modifiers, trash: bool, grid: bool) -> Option<Press> {
     let shift = modifiers.shift();
     let command = modifiers.control();
     let alt = modifiers.alt();
@@ -39,6 +41,11 @@ pub fn press(key: &Key, modifiers: Modifiers, trash: bool) -> Option<Press> {
         Key::Named(Named::ArrowLeft) if alt => Some(Press::Back),
         Key::Named(Named::ArrowRight) if alt => Some(Press::Forward),
         Key::Named(Named::Home) if alt => Some(Press::Home),
+        // in the grid the arrows walk the tiles, along a row and down the rows
+        Key::Named(Named::ArrowLeft) if grid => Some(Press::Step(-1, shift)),
+        Key::Named(Named::ArrowRight) if grid => Some(Press::Step(1, shift)),
+        Key::Named(Named::ArrowDown) if grid => Some(Press::Line(1, shift)),
+        Key::Named(Named::ArrowUp) if grid => Some(Press::Line(-1, shift)),
         Key::Named(Named::ArrowDown) => Some(Press::Step(1, shift)),
         Key::Named(Named::ArrowUp) => Some(Press::Step(-1, shift)),
         Key::Named(Named::Home) => Some(Press::Step(isize::MIN, shift)),
@@ -52,14 +59,16 @@ pub fn press(key: &Key, modifiers: Modifiers, trash: bool) -> Option<Press> {
         Key::Named(Named::Delete) if trash => Some(Press::Act(Act::Forget)),
         Key::Named(Named::Delete) if shift => Some(Press::Act(Act::Delete)),
         Key::Named(Named::Delete) => Some(Press::Act(Act::Trash)),
-        Key::Character(letter) if command => shortcut(letter, shift, trash),
+        Key::Character(letter) if command => shortcut(letter, shift, trash, grid),
         _ => None,
     }
 }
 
 /// The shortcuts with Ctrl.
-fn shortcut(letter: &str, shift: bool, trash: bool) -> Option<Press> {
+fn shortcut(letter: &str, shift: bool, trash: bool, grid: bool) -> Option<Press> {
     let act = match (letter.to_ascii_lowercase().as_str(), shift) {
+        ("g", _) => Act::Grid(!grid),
+        ("i", _) => Act::Properties,
         ("n", true) if !trash => Act::NewFolder,
         ("n", false) => Act::NewWindow,
         ("a", _) => Act::SelectAll,
@@ -88,54 +97,75 @@ mod tests {
     fn the_keys_a_file_manager_answers() {
         let none = Modifiers::empty();
         assert_eq!(
-            press(&named(Named::ArrowDown), none, false),
+            press(&named(Named::ArrowDown), none, false, false),
             Some(Press::Step(1, false))
         );
         assert_eq!(
-            press(&named(Named::ArrowUp), Modifiers::SHIFT, false),
+            press(&named(Named::ArrowUp), Modifiers::SHIFT, false, false),
             Some(Press::Step(-1, true))
         );
         assert_eq!(
-            press(&named(Named::ArrowUp), Modifiers::ALT, false),
+            press(&named(Named::ArrowUp), Modifiers::ALT, false, false),
             Some(Press::Up)
         );
         assert_eq!(
-            press(&named(Named::Enter), none, false),
+            press(&named(Named::Enter), none, false, false),
             Some(Press::Act(Act::Open))
         );
         assert_eq!(
-            press(&named(Named::Delete), none, false),
+            press(&named(Named::Delete), none, false, false),
             Some(Press::Act(Act::Trash))
         );
         assert_eq!(
-            press(&named(Named::Delete), Modifiers::SHIFT, false),
+            press(&named(Named::Delete), Modifiers::SHIFT, false, false),
             Some(Press::Act(Act::Delete))
         );
         // in the trash, Delete is for good, and there is nothing to rename
         assert_eq!(
-            press(&named(Named::Delete), none, true),
+            press(&named(Named::Delete), none, true, false),
             Some(Press::Act(Act::Forget))
         );
-        assert_eq!(press(&named(Named::F2), none, true), None);
+        assert_eq!(press(&named(Named::F2), none, true, false), None);
         let ctrl = Modifiers::CTRL;
         let letter = |c: &str| Key::Character(c.into());
         assert_eq!(
-            press(&letter("c"), ctrl, false),
+            press(&letter("c"), ctrl, false, false),
             Some(Press::Act(Act::Copy))
         );
         assert_eq!(
-            press(&letter("V"), ctrl, false),
+            press(&letter("V"), ctrl, false, false),
             Some(Press::Act(Act::Paste))
         );
         assert_eq!(
-            press(&letter("n"), ctrl | Modifiers::SHIFT, false),
+            press(&letter("n"), ctrl | Modifiers::SHIFT, false, false),
             Some(Press::Act(Act::NewFolder))
         );
         assert_eq!(
-            press(&letter("n"), ctrl, false),
+            press(&letter("n"), ctrl, false, false),
             Some(Press::Act(Act::NewWindow))
         );
-        assert_eq!(press(&letter("c"), ctrl, true), None);
-        assert_eq!(press(&letter("c"), none, false), None);
+        assert_eq!(press(&letter("c"), ctrl, true, false), None);
+        assert_eq!(press(&letter("c"), none, false, false), None);
+        // in the grid the arrows walk the tiles, and Ctrl and G goes back to the list
+        assert_eq!(
+            press(&named(Named::ArrowRight), none, false, true),
+            Some(Press::Step(1, false))
+        );
+        assert_eq!(
+            press(&named(Named::ArrowDown), none, false, true),
+            Some(Press::Line(1, false))
+        );
+        assert_eq!(
+            press(&letter("g"), ctrl, false, true),
+            Some(Press::Act(Act::Grid(false)))
+        );
+        assert_eq!(
+            press(&letter("g"), ctrl, false, false),
+            Some(Press::Act(Act::Grid(true)))
+        );
+        assert_eq!(
+            press(&letter("i"), ctrl, false, false),
+            Some(Press::Act(Act::Properties))
+        );
     }
 }
