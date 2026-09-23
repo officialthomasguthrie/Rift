@@ -3011,10 +3011,28 @@ def main():
                 fail(f"the part of horizon's config says {part.strip()[-300:]!r} for {DARK_GRAY}")
             ok(f"rift wallpaper set {DARK_GRAY} made the desktop flat gray at once")
 
+            def wait_for(seconds, ready):
+                """Poll until ready() answers something, or give up and answer what it last said."""
+                until = time.monotonic() + seconds
+                while True:
+                    found = ready()
+                    if found or time.monotonic() > until:
+                        return found
+                    time.sleep(2)
+
+            def shot(png, name="dock"):
+                """A screendump written as it is, with no checks: a picture for a person to look at."""
+                width, height, rgb = screendump(args.qmp, work, name)
+                write_png(png, width, height, rgb)
+                print(f"\nboot-test: wrote {png}", flush=True)
+
             # 5c. the Applications menu with the app list in it. Mod+Space runs `lens --menu`, and
             # the list under the field is every desktop entry the session has, in its section
             run("lens --menu", "the Applications menu")
-            state = bar_state("the state with the menu open")
+            # the shell reads the line on its socket and opens the menu a moment later
+            state = wait_for(20, lambda: next(
+                (said for said in [bar_state("the state with the menu open")]
+                 if said.get("menu") == "open"), None)) or bar_state("the state without the menu")
             if state.get("menu") != "open":
                 # the line reached the shell, since the state query is answered on the same socket,
                 # so either the shell never read it or the menu opened and was dismissed at once.
@@ -3114,21 +3132,6 @@ def main():
                     if fits(items) or time.monotonic() > until:
                         return items
                     time.sleep(2)
-
-            def wait_for(seconds, ready):
-                """Poll until ready() answers something, or give up and answer what it last said."""
-                until = time.monotonic() + seconds
-                while True:
-                    found = ready()
-                    if found or time.monotonic() > until:
-                        return found
-                    time.sleep(2)
-
-            def shot(png, name="dock"):
-                """A screendump written as it is, with no checks: a picture for a person to look at."""
-                width, height, rgb = screendump(args.qmp, work, name)
-                write_png(png, width, height, rgb)
-                print(f"\nboot-test: wrote {png}", flush=True)
 
             items = dock_when("what the dock lists", 20, lambda items: list(items) == DOCK_KEPT
                               and not any(windows for windows, _ in items.values()))
