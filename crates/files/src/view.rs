@@ -311,13 +311,18 @@ fn at_the_same_time(location: &Location, folder: PathBuf) -> Location {
 }
 
 /// How far the first row of the list is from the top of the window: further down when a bar stands
-/// over it.
+/// over it, and further up in the grid, which has no headings over it.
 #[must_use]
 pub fn list_top(state: &Files, browser: &Browser) -> f32 {
-    if bar_words(state, browser).is_some() {
-        LIST_TOP + BAR + 1.0
+    let top = if state.options.grid {
+        HEADER + 1.0
     } else {
         LIST_TOP
+    };
+    if bar_words(state, browser).is_some() {
+        top + BAR + 1.0
+    } else {
+        top
     }
 }
 

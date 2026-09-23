@@ -1571,7 +1571,14 @@ fn unlock(state: &mut Files, id: window::Id) -> Task<Message> {
     let named = drive.clone();
     let (sender, receiver) = oneshot::channel();
     thread::spawn(move || {
-        let done = drives::unlock(&drive, &secret).and_then(|inside| drives::mount(&inside));
+        // udisks may still be reading the file system that came out of it when it answers, so a
+        // mount that finds nothing there yet is tried once more
+        let done = drives::unlock(&drive, &secret).and_then(|inside| {
+            drives::mount(&inside).or_else(|_| {
+                thread::sleep(Duration::from_millis(500));
+                drives::mount(&inside)
+            })
+        });
         let _ = sender.send(Message::Unlocked(id, drive, Box::new(done)));
     });
     Task::perform(receiver, move |said| {
@@ -1673,14 +1680,24 @@ fn set_menu(state: &mut Files, id: window::Id, word: &str) -> Task<Message> {
         .windows
         .get(&id)
         .map_or(0.0, |browser| crate::view::list_top(state, browser));
+    let grid = state.options.grid;
     let at = state.windows.get(&id).map(|browser| {
         let chosen = browser
             .cursor
             .as_ref()
             .and_then(|name| browser.position(name))
             .unwrap_or(0);
+        // in the grid a row is a row of tiles, so the one a tile is in is where the menu opens
+        let (which, tall) = if grid {
+            (
+                chosen / crate::grid::across(browser.size.width),
+                crate::grid::TALL,
+            )
+        } else {
+            (chosen, ROW)
+        };
         #[allow(clippy::cast_precision_loss)]
-        let row = (chosen as f32 + 0.5) * ROW - browser.scroll;
+        let row = (which as f32 + 0.5) * tall - browser.scroll;
         Point::new(crate::view::SIDEBAR + 240.0, top + row.max(0.0))
     });
     open_menu(state, id, which, at);
