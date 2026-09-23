@@ -97,10 +97,19 @@ fn read_note(line: &str) -> Option<(u32, Option<String>)> {
 
 /// Whether the process with this id is still the program the note was written for. The kernel cuts
 /// the name it keeps to fifteen characters and a wrapper runs under a name of its own, so the whole
-/// command line is what is read: it holds the path the program was started from.
+/// command line is what is read: it holds the path the program was started from. Nothing at all is
+/// read for a process that is gone, and the note for it is thrown away.
 fn runs(pid: u32, program: &str) -> bool {
-    fs::read(format!("/proc/{pid}/cmdline"))
-        .is_ok_and(|line| String::from_utf8_lossy(&line).contains(program))
+    fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|line| is_program(&line, program))
+}
+
+/// Whether a command line is the program's. An empty one belongs to a process part way through
+/// starting another program in its own place, which is what the wrapper of a program in the store
+/// does and what the screen reader does to itself when it is started with --replace; it is still
+/// that process, so it counts, and the note it was written for is kept rather than thrown away on
+/// the one read that lands in the moment between the two.
+fn is_program(line: &[u8], program: &str) -> bool {
+    line.is_empty() || String::from_utf8_lossy(line).contains(program)
 }
 
 #[cfg(test)]
@@ -126,6 +135,19 @@ mod tests {
         assert_eq!(Tool::Recorder.signal(), "-INT");
         assert_eq!(Tool::Reader.signal(), "-TERM");
         assert_eq!(Tool::Keyboard.signal(), "-TERM");
+    }
+
+    #[test]
+    fn a_process_starting_another_in_its_own_place_is_still_itself() {
+        assert!(is_program(
+            b"/nix/store/hash-orca-50.2/bin/orca\0--replace\0",
+            "orca"
+        ));
+        assert!(is_program(b"orca\0", "orca"));
+        // between the two programs the kernel has no command line to give, and the process is
+        // still there
+        assert!(is_program(b"", "orca"));
+        assert!(!is_program(b"wvkbd-mobintl\0-H\0", "orca"));
     }
 
     #[test]
