@@ -5554,9 +5554,13 @@ def main():
                 if bar_state(f"the shell after {what}").get(setting) != value:
                     fail(f"after {what} lens --state says {setting} "
                          f"{bar_state(f'the shell after {what} again').get(setting)!r}")
-                page_said = (dock_page(f"the page after {what}") or ([], {}))[1]
-                if page_said.get(setting) != value:
-                    fail(f"after {what} the Dock page says {page_said}")
+                # the page follows the same file the shell does, a moment behind it
+                page_said = wait_for(20, lambda: next(
+                    (said for said in [(dock_page(f"the page after {what}") or ([], {}))[1]]
+                     if said.get(setting) == value), None))
+                if not page_said:
+                    said_again = (dock_page(f"the page after {what} again") or ([], {}))[1]
+                    fail(f"after {what} the Dock page says {said_again}")
                 written = without_console(run(f"cat {DOCK_OPTIONS}", f"the dock's settings after {what}")[1])
                 if f"{setting} {value}" not in written.splitlines():
                     fail(f"after {what} {DOCK_OPTIONS} says {written.strip()[-200:]!r}")
