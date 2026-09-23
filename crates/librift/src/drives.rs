@@ -205,6 +205,25 @@ mod asking {
         Ok(listed(&objects, own_disk().as_deref()))
     }
 
+    /// The object a block names, when it names one at all.
+    fn named(properties: &Interfaces, interface: &str, key: &str) -> Option<String> {
+        let path = object(properties, interface, key);
+        (!path.is_empty() && path != "/").then_some(path)
+    }
+
+    /// The disk a block is on: its own, or, when it has none, the disk the volume it came out of
+    /// is on. udisks gives the cleartext device of an unlocked disk no drive of its own, and
+    /// without this the file system that came out of a locked disk would be listed nowhere.
+    fn drive_of(objects: &Objects, properties: &Interfaces) -> String {
+        if let Some(drive) = named(properties, BLOCK, "Drive") {
+            return drive;
+        }
+        named(properties, BLOCK, "CryptoBackingDevice")
+            .and_then(|backing| objects.get(&OwnedObjectPath::try_from(backing.as_str()).ok()?))
+            .and_then(|backing| named(backing, BLOCK, "Drive"))
+            .unwrap_or_default()
+    }
+
     /// What the sidebar lists, out of everything udisks knows.
     fn listed(objects: &Objects, own: Option<&Path>) -> Vec<Volume> {
         let ours = own.and_then(|disk| {
@@ -222,7 +241,7 @@ mod asking {
         let mut found: Vec<Volume> = objects
             .iter()
             .filter_map(|(path, properties)| {
-                let drive = object(properties, BLOCK, "Drive");
+                let drive = drive_of(objects, properties);
                 let disk = objects.get(&OwnedObjectPath::try_from(drive.as_str()).ok()?)?;
                 let volume = one(path.as_str(), properties, disk, &drive)?;
                 let mine = ours.as_ref() == Some(&drive);
@@ -357,8 +376,8 @@ mod asking {
             .map_err(|e| refusal(e, "unmount"))
     }
 
-    /// Unmount everything on the disk this volume is on, then eject it or switch it off, so the
-    /// stick can be pulled out.
+    /// Unmount everything on the disk this volume is on, lock whatever was unlocked on it, then
+    /// eject it or switch it off, so the stick can be pulled out.
     ///
     /// # Errors
     ///
@@ -371,12 +390,22 @@ mod asking {
                 &OwnedObjectPath::try_from(id)
                     .map_err(|_| "That disk is not there.".to_string())?,
             )
-            .map(|properties| object(properties, BLOCK, "Drive"))
+            .map(|properties| drive_of(&objects, properties))
             .filter(|drive| !drive.is_empty())
             .ok_or_else(|| "That disk is not there.".to_string())?;
+        let on_disk = |properties: &Interfaces| drive_of(&objects, properties) == drive;
         for (path, properties) in &objects {
-            if object(properties, BLOCK, "Drive") == drive && mount_of(properties).is_some() {
+            if on_disk(properties) && mount_of(properties).is_some() {
                 unmount_on(&connection, path.as_str())?;
+            }
+        }
+        // an encrypted volume that is open holds its disk, so it is shut before the disk goes
+        for (path, properties) in &objects {
+            if on_disk(properties) && named(properties, ENCRYPTED, "CleartextDevice").is_some() {
+                let options: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+                on(&connection, path.as_str(), ENCRYPTED)?
+                    .call::<_, _, ()>("Lock", &(options,))
+                    .map_err(|e| refusal(e, "close"))?;
             }
         }
         let disk = objects
@@ -492,6 +521,95 @@ mod asking {
                 path_of_str(&format!("/org/freedesktop/UDisks2/block_devices/{name}")),
                 object_of(&[(BLOCK, &block), (FILESYSTEM, &points)]),
             );
+        }
+
+        /// A locked disk that has been unlocked: the volume itself, which udisks says is
+        /// encrypted, and the file system that came out of it, which has no drive of its own.
+        fn unlocked(objects: &mut Objects, name: &str, mounted: &str) {
+            let drive = format!("/org/freedesktop/UDisks2/drives/{name}");
+            objects.insert(
+                path_of_str(&drive),
+                object_of(&[(
+                    DRIVE,
+                    &[
+                        ("Removable", value(true)),
+                        ("ConnectionBus", value("usb".to_string())),
+                        ("Ejectable", value(true)),
+                        ("CanPowerOff", value(true)),
+                        ("Vendor", value("QEMU".to_string())),
+                        ("Model", value("HARDDISK".to_string())),
+                    ],
+                )]),
+            );
+            let volume = format!("/org/freedesktop/UDisks2/block_devices/{name}");
+            objects.insert(
+                path_of_str(&volume),
+                object_of(&[
+                    (
+                        BLOCK,
+                        &[
+                            ("IdLabel", value("LOCKED".to_string())),
+                            ("IdType", value("crypto_LUKS".to_string())),
+                            ("Size", value(64u64 * 1024 * 1024)),
+                            ("HintIgnore", value(false)),
+                            ("Drive", value(path_of_str(&drive))),
+                            ("Device", value(format!("/dev/{name}\0").into_bytes())),
+                        ],
+                    ),
+                    (
+                        ENCRYPTED,
+                        &[(
+                            "CleartextDevice",
+                            value(path_of_str("/org/freedesktop/UDisks2/block_devices/dm_2d0")),
+                        )],
+                    ),
+                ]),
+            );
+            objects.insert(
+                path_of_str("/org/freedesktop/UDisks2/block_devices/dm_2d0"),
+                object_of(&[
+                    (
+                        BLOCK,
+                        &[
+                            ("IdLabel", value("PRIVATE".to_string())),
+                            ("IdType", value("ext4".to_string())),
+                            ("Size", value(63u64 * 1024 * 1024)),
+                            ("HintIgnore", value(false)),
+                            // the cleartext device is on no drive udisks knows
+                            ("Drive", value(path_of_str("/"))),
+                            ("CryptoBackingDevice", value(path_of_str(&volume))),
+                            ("Device", value(b"/dev/dm-0\0".to_vec())),
+                        ],
+                    ),
+                    (
+                        FILESYSTEM,
+                        &[(
+                            "MountPoints",
+                            value(vec![format!("{mounted}\0").into_bytes()]),
+                        )],
+                    ),
+                ]),
+            );
+        }
+
+        #[test]
+        fn what_came_out_of_a_locked_disk_is_a_row_like_any_other() {
+            let mut objects = Objects::new();
+            disk(&mut objects, "sda", true, "EXCHANGE", None);
+            unlocked(&mut objects, "sdc", "/run/media/rift/PRIVATE");
+            let ours = listed(&objects, Some(Path::new("/dev/sda")));
+            let names: Vec<&str> = ours.iter().map(|volume| volume.name.as_str()).collect();
+            // the locked volume is gone from the list, the file system in it is there instead
+            assert_eq!(names, ["PRIVATE"]);
+            assert_eq!(ours[0].device, "/dev/dm-0");
+            assert_eq!(
+                ours[0].mount.as_deref(),
+                Some(Path::new("/run/media/rift/PRIVATE"))
+            );
+            // and it carries the disk it came out of, so it can be unmounted and ejected
+            assert_eq!(ours[0].drive, "/org/freedesktop/UDisks2/drives/sdc");
+            assert!(ours[0].eject && !ours[0].locked);
+            assert_eq!(ours[0].icon, "drive-removable-media-symbolic");
         }
 
         #[test]

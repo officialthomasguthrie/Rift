@@ -110,6 +110,20 @@ pub fn places() -> Vec<Place> {
     places
 }
 
+/// The drive's own exchange partition as a place, when the drive has one and the system has
+/// mounted it. It is a folder like the others, not a disk to mount and eject, and the sidebar and
+/// the Applications menu both list it after the folders of home.
+#[must_use]
+pub fn exchange() -> Option<Place> {
+    crate::drives::exchange().map(|path| Place {
+        word: "exchange",
+        name: crate::drives::EXCHANGE_NAME.to_string(),
+        path,
+        icon: "drive-harddisk-symbolic",
+        colour: "drive-harddisk",
+    })
+}
+
 /// The folders a `user-dirs.dirs` names, whether they are there or not. A folder named as home
 /// itself is left out, and so is one named twice. With no file, the five usual folders in home.
 #[must_use]

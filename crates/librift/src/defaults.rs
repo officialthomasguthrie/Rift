@@ -212,6 +212,19 @@ pub fn entry_id(desktop: &str) -> &str {
     desktop.strip_suffix(".desktop").unwrap_or(desktop)
 }
 
+/// The kind a folder is, which the app that opens folders says it opens.
+pub const FOLDER: &str = "inode/directory";
+
+/// The app that opens a folder, which is the file manager: the default for [`FOLDER`], found the
+/// way xdg-mime finds one. The shell opens a place with it. `None` when there is no such app.
+#[must_use]
+pub fn manager(apps: &[App]) -> Option<App> {
+    let desktop = Found::read().default_for(FOLDER, apps)?;
+    apps.iter()
+        .find(|app| app.id == entry_id(&desktop))
+        .cloned()
+}
+
 /// The lists and the caches as they are now, read once and asked about every type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Found {

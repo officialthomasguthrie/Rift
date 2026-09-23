@@ -449,6 +449,19 @@ pub fn launch(app: &App, files: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
+/// Start an app with these words after its own command, and let it go: the shell opens a place in
+/// the file manager this way, since the trash is no file to make an address of and a folder needs
+/// none.
+///
+/// # Errors
+///
+/// When the program cannot be started.
+pub fn launch_with(app: &App, words: &[String]) -> Result<(), String> {
+    let mut command = app.exec.clone();
+    command.extend(words.iter().cloned());
+    start(&app.id, &app.name, &command, None)
+}
+
 /// Run a command as an app in a scope of its own named after `id`, in `folder` when one is given,
 /// and let it go. [`launch`] starts every app this way.
 ///

@@ -14,10 +14,11 @@ pub const LIST: &str = ".config/rift/dock";
 /// Where the rest of the dock's settings live, under home.
 pub const OPTIONS: &str = ".config/rift/dock-options";
 
-/// The apps the dock keeps until the owner has a list of their own: the browser, the terminal, the
-/// editor and Settings, the four of the image a person opens first.
-pub const KEPT: [&str; 4] = [
+/// The apps the dock keeps until the owner has a list of their own: the browser, the file manager,
+/// the terminal, the editor and Settings, the five of the image a person opens first.
+pub const KEPT: [&str; 5] = [
     "firefox",
+    "dev.rift.Files",
     "com.mitchellh.ghostty",
     "dev.zed.Zed",
     "dev.rift.Settings",
