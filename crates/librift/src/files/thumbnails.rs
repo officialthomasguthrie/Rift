@@ -122,8 +122,8 @@ impl Makers {
     }
 
     /// Make the picture of a file and say where it went. It is written beside the place it belongs
-    /// under a name of its own and moved there once it is whole, so a picture half written is
-    /// never read.
+    /// under a name of its own, has the address of the file and the file's time written into it,
+    /// and is moved there once it is whole, so a picture half written is never read.
     ///
     /// # Errors
     ///
@@ -155,6 +155,20 @@ impl Makers {
             let _ = fs::remove_file(&being_made);
             return Err(format!("{program} made no picture of {}.", path.display()));
         }
+        // the programs write a picture and nothing else: gdk-pixbuf's writes how wide and tall the
+        // picture is, and the specification leaves the address and the time to whoever keeps the
+        // cache, which is this
+        let whole = fs::read(&being_made)
+            .ok()
+            .and_then(|png| with_keys(&png, &super::uri(path), modified_of(path)?));
+        let Some(whole) = whole else {
+            let _ = fs::remove_file(&being_made);
+            return Err(format!("{program} made no png of {}.", path.display()));
+        };
+        fs::write(&being_made, whole).map_err(|e| {
+            let _ = fs::remove_file(&being_made);
+            format!("Could not keep the picture of {}: {e}", path.display())
+        })?;
         own_only(&being_made);
         fs::rename(&being_made, &place).map_err(|e| {
             let _ = fs::remove_file(&being_made);
@@ -272,6 +286,97 @@ pub fn keys(png: &[u8]) -> HashMap<String, String> {
         at = to + 4;
     }
     found
+}
+
+/// When a file was last changed, in seconds, which is what a picture of it carries.
+fn modified_of(path: &Path) -> Option<i64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+}
+
+/// The same png with the address of the file and the time it was last changed written into it,
+/// after the header, and any it already carried taken out. Nothing when it is not a png.
+#[must_use]
+pub fn with_keys(png: &[u8], uri: &str, modified: i64) -> Option<Vec<u8>> {
+    if !png.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return None;
+    }
+    let mut out = png.get(..8)?.to_vec();
+    let mut first = true;
+    let mut at = 8;
+    while at + 12 <= png.len() {
+        let length = u32::from_be_bytes(png.get(at..at + 4)?.try_into().ok()?) as usize;
+        let kind = png.get(at + 4..at + 8)?;
+        let end = at.checked_add(12)?.checked_add(length)?;
+        if end > png.len() {
+            return None;
+        }
+        // ours take the place of any the program wrote, so there is one of each
+        let named = |name: &[u8]| {
+            kind == b"tEXt"
+                && png[at + 8..]
+                    .iter()
+                    .take_while(|byte| **byte != 0)
+                    .eq(name.iter())
+        };
+        if !named(b"Thumb::URI") && !named(b"Thumb::MTime") {
+            out.extend_from_slice(&png[at..end]);
+        }
+        if first {
+            out.extend_from_slice(&chunk(*b"tEXt", &text_of("Thumb::URI", uri)));
+            out.extend_from_slice(&chunk(
+                *b"tEXt",
+                &text_of("Thumb::MTime", &modified.to_string()),
+            ));
+            first = false;
+        }
+        if kind == b"IEND" {
+            return Some(out);
+        }
+        at = end;
+    }
+    None
+}
+
+/// The body of a `tEXt` chunk: the key, nothing, and what it says.
+fn text_of(key: &str, value: &str) -> Vec<u8> {
+    let mut body = key.as_bytes().to_vec();
+    body.push(0);
+    body.extend_from_slice(value.as_bytes());
+    body
+}
+
+/// One png chunk: how long it is, what it is, what it holds, and the check of the last two.
+fn chunk(kind: [u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut out = u32::try_from(body.len())
+        .unwrap_or_default()
+        .to_be_bytes()
+        .to_vec();
+    out.extend_from_slice(&kind);
+    out.extend_from_slice(body);
+    out.extend_from_slice(&check(&out[4..]).to_be_bytes());
+    out
+}
+
+/// The check every png chunk ends with.
+fn check(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }
 
 /// The md5 of some bytes, which is what names a picture in the cache. It is the name the
@@ -464,6 +569,38 @@ mod tests {
             ]
         );
         assert_eq!(Maker::parse("[Thumbnailer Entry]\nExec=picture %o\n"), None);
+    }
+
+    #[test]
+    fn the_address_and_the_time_are_written_into_the_picture() {
+        // what a thumbnailer writes: a png with the size of the picture in it and nothing else
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&chunk(*b"IHDR", &[0; 13]));
+        png.extend_from_slice(&chunk(*b"tEXt", &text_of("Thumb::Image::Width", "1920")));
+        png.extend_from_slice(&chunk(
+            *b"tEXt",
+            &text_of("Thumb::URI", "file:///the/old/one"),
+        ));
+        png.extend_from_slice(&chunk(*b"IDAT", b"a picture"));
+        png.extend_from_slice(&chunk(*b"IEND", b""));
+        let whole = with_keys(&png, "file:///home/rift/a.png", 1_700_000_000).expect("a png");
+        let held = keys(&whole);
+        assert_eq!(
+            held.get("Thumb::URI").map(String::as_str),
+            Some("file:///home/rift/a.png"),
+            "the one the program wrote is gone and ours is there"
+        );
+        assert_eq!(
+            held.get("Thumb::MTime").map(String::as_str),
+            Some("1700000000")
+        );
+        assert_eq!(
+            held.get("Thumb::Image::Width").map(String::as_str),
+            Some("1920"),
+            "what the program wrote about the picture is kept"
+        );
+        assert!(whole.ends_with(&chunk(*b"IEND", b"")));
+        assert_eq!(with_keys(b"not a png", "file:///a", 1), None);
     }
 
     #[test]
