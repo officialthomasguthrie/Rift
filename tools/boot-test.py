@@ -340,8 +340,13 @@ DOCK_GAP = 4
 DOCK_MENU_WIDTH = 240
 DOCK_MENU_PAD = 8
 DOCK_MENU_ROW = 28
+# a workspace button at the right end, the gap between two of them, and the space between the apps,
+# the places and the workspaces
+DOCK_SPACE = 24
+DOCK_SPACE_GAP = 4
+DOCK_BETWEEN = 12
 # the apps the dock keeps when the owner has said nothing, in their order, from crates/librift/src/dock.rs
-DOCK_KEPT = ["firefox", "com.mitchellh.ghostty", "dev.zed.Zed", "dev.rift.Settings"]
+DOCK_KEPT = ["firefox", "dev.rift.Files", "com.mitchellh.ghostty", "dev.zed.Zed", "dev.rift.Settings"]
 # how far a dock that does not reach the sides stands off its edge, how tall the dock is with its
 # large icons, and how tall the line a hidden dock leaves at the bottom edge is, from
 # crates/lens/src/dock.rs and crates/librift/src/dock.rs
@@ -448,7 +453,7 @@ STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
               "recording", "screen-reader", "keyboard", "layout", "dock-position", "dock-extend",
-              "dock-icons", "dock-hide", "dock-hidden")
+              "dock-icons", "dock-hide", "dock-hidden", "dock-places", "places")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -6676,6 +6681,214 @@ def main():
             if without_console(files_unit).strip().splitlines()[-1:] == ["active"]:
                 fail("xdg-open's unit is still active after the last window of Files closed")
             ok("the last window of Files closed, and with it the app and the xdg-open that started it")
+
+            # 5r. the shell. Files is one of the apps the dock keeps, so it is there from the first
+            # boot; the trash and a mounted disk stand at the right end of the dock while there is
+            # something to open, a press opens either in Files and a disk's own menu ejects it; the
+            # places are in a section of their own over the apps in the Applications menu, and
+            # pressing one opens it in Files; and the name every file manager answers to on the
+            # session bus, org.freedesktop.FileManager1, shows a file in the folder it is in, which
+            # is what the portal's OpenDirectory and a browser's Show in folder ask for. Files is
+            # not running here, so the first call has to start it
+            def shell_state(what):
+                """What lens says, with the places at the right end of the dock as a list of keys."""
+                said = bar_state(what)
+                said["dock-place-keys"] = [word.split(":", 1)[0]
+                                           for word in (said.get("dock-places") or "").split()]
+                return said
+
+            def shell_until(seconds, ready, what):
+                """The shell's state once it fits, or what it was when the wait ran out."""
+                until = time.monotonic() + seconds
+                while True:
+                    said = shell_state(what)
+                    if ready(said) or time.monotonic() > until:
+                        return said
+                    time.sleep(2)
+
+            def shell_place_left(key, said):
+                """Where the left edge of a place at the right end of the dock is, in the shell's
+                own pixels: the workspaces stand at the very right, the places before them."""
+                keys = said["dock-place-keys"]
+                spaces = len((said.get("workspaces") or "").split())
+                wide = spaces * DOCK_SPACE + max(spaces - 1, 0) * DOCK_SPACE_GAP
+                places = len(keys) * DOCK_ITEM + (len(keys) - 1) * DOCK_GAP
+                first = shell_logical - DOCK_PAD - wide - DOCK_BETWEEN - places
+                return first + keys.index(key) * (DOCK_ITEM + DOCK_GAP)
+
+            def shell_place_point(key, said):
+                """Where the middle of that place is on screen."""
+                left = shell_place_left(key, said) + DOCK_ITEM / 2
+                return round(left * shell_scale), round(shell_height - shell_dock / 2)
+
+            def shell_place_menu(key, said, row, rows):
+                """Where the middle of a row of the menu a right click on a place opens is. The menu
+                stands on the dock with its left edge where the place is, moved left when it would
+                run off the screen."""
+                left = min(shell_place_left(key, said), shell_logical - DOCK_MENU_WIDTH)
+                top = shell_height - shell_dock - (2 * DOCK_MENU_PAD + rows * DOCK_MENU_ROW) * shell_scale
+                return (round((left + DOCK_MENU_WIDTH / 2) * shell_scale),
+                        round(top + (DOCK_MENU_PAD + (row + 0.5) * DOCK_MENU_ROW) * shell_scale))
+
+            def shell_menu_row(row):
+                """Where the middle of a row of the Applications menu is on screen. The menu hangs
+                under the bar with its left edge a margin in, the field at the top of it."""
+                middle = (MENU_PAD + MENU_WIDTH / 2) * shell_scale
+                down = (MENU_PAD + FIELD_SIZE[1] + MENU_GAP + (row + 0.5) * ROW_HEIGHT) * shell_scale
+                return round(middle), round(shell_bar + down)
+
+            shell_width, shell_height, shell_rgb = screendump(args.qmp, work, "shell")
+            shell_size = (shell_width, shell_height)
+            shell_bar, shell_dock = bar_and_dock(shell_width, shell_height,
+                                                 bar_gray_rows(shell_width, shell_height, shell_rgb))
+            shell_scale = shell_dock / DOCK_HEIGHT if shell_dock else 1
+            shell_logical = shell_width / shell_scale
+
+            # the bus starts Files for the call, since nothing of ours is running: ShowItems opens
+            # the folder the file is in with the file selected, which is what a browser's Show in
+            # folder does
+            shell_document = f"{files_documents}/{FILES_NOTE}"
+            shell_call = ("busctl --user call org.freedesktop.FileManager1 /org/freedesktop/FileManager1 "
+                          "org.freedesktop.FileManager1")
+            run(f"printf 'Minutes of the meeting\\n' > {shell_document}", "the file the bus call names")
+
+            def shell_show(method, what):
+                """One call to FileManager1 on the session bus. A call that starts Files is tried
+                again: a cold start in a virtual machine can take longer than the bus waits for the
+                app to take the name, and the app is running by the second try."""
+                for attempt in (1, 2):
+                    status, output = run(f"{shell_call} {method} ass 1 file://{shell_document} ''",
+                                         f"{what}, try {attempt}")
+                    if status == 0:
+                        return
+                    print(f"\nboot-test: the {method} call exited with {status}: "
+                          f"{without_console(output).strip()[-300:]!r}", flush=True)
+                    time.sleep(20)
+                _, journal = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"the {method} call on the session bus did not go through; the user manager's "
+                     f"log said {without_console(journal).strip()[-800:]!r}"[:2400])
+
+            shell_show("ShowItems", "ShowItems on the session bus, with Files not running")
+            files_until(120, lambda lines: files_value(lines, "location") == files_documents
+                        and f"selected {FILES_NOTE}" in lines, f"{FILES_NOTE} shown in its folder")
+            point(args.qmp, shell_size, (shell_width - round(60 * shell_scale),
+                                         shell_height - shell_dock - round(60 * shell_scale)))
+            look(f"{FILES_APP} on the file the bus asked for", f"{stem}-files-shown{extension}", 120,
+                 apps=[FILES_APP], journals=("horizon",), settle=3)
+            ok(f"a ShowItems call on the session bus started Files and showed {FILES_NOTE} in "
+               f"{files_documents}, selected")
+
+            # and ShowItemProperties opens a window with what is known about the file over it
+            shell_show("ShowItemProperties", "ShowItemProperties on the session bus")
+            shell_facts = files_until(120, lambda lines: files_value(lines, "dialog") == "properties"
+                                      and files_value(lines, "property name") == FILES_NOTE,
+                                      f"what is known about {FILES_NOTE}")
+            if files_value(shell_facts, "property where") != "Documents":
+                fail(f"Properties says {FILES_NOTE} is in "
+                     f"{files_value(shell_facts, 'property where')!r}, expected Documents")
+            files_set("escape", "now", "Close")
+            files_until(30, lambda lines: files_value(lines, "dialog") == "none", "the dialog closed")
+            files_set("close", "now", "the window ShowItemProperties opened")
+            files_until(30, lambda lines: files_value(lines, "windows") == "1", "one window again")
+            ok("ShowItemProperties opened what is known about the same file")
+
+            # the dock keeps Files, so it is in it with the window that is open
+            shell_said = shell_until(30, lambda said: "dev.rift.Files:1" in (said.get("dock") or ""),
+                                     "Files in the dock with its window")
+            if "dev.rift.Files:1" not in (shell_said.get("dock") or ""):
+                fail(f"the dock says {shell_said.get('dock')!r}, expected Files with one window")
+            ok(f"the dock lists {shell_said.get('dock')}")
+
+            # the trash stands at the right end while there is something in it
+            files_select(FILES_NOTE)
+            files_set("trash", "now", "Move to trash")
+            files_until(30, lambda lines: files_value(lines, "trash") == "full", f"{FILES_NOTE} in the trash")
+            shell_said = shell_until(30, lambda said: "trash" in said["dock-place-keys"],
+                                     "the trash at the right end of the dock")
+            if "trash" not in shell_said["dock-place-keys"]:
+                fail(f"the dock's places are {shell_said.get('dock-places')!r}, expected the trash in them")
+            if args.locked and DRIVE_INSIDE_MOUNT not in shell_said["dock-place-keys"]:
+                fail(f"the dock's places are {shell_said.get('dock-places')!r}, expected the disk "
+                     f"that was unlocked, mounted at {DRIVE_INSIDE_MOUNT}")
+            shot(f"{stem}-dock-places{extension}", "dock-places")
+            # and a press on it opens the trash in Files
+            click(args.qmp, shell_size, shell_place_point("trash", shell_said))
+            files_until(60, lambda lines: files_value(lines, "location") == "trash"
+                        and f"row file {FILES_NOTE}" in lines, "the trash open in Files")
+            ok(f"the trash stood at the right end of the dock with {FILES_NOTE} in it, and a press "
+               "opened it in Files")
+            # emptying it takes the place away again, since there is nothing left to open
+            files_set("empty", "now", "Empty trash")
+            files_until(30, lambda lines: files_value(lines, "dialog") == "empty", "the question")
+            files_set("confirm", "now", "Empty trash")
+            files_until(60, lambda lines: files_value(lines, "trash") == "empty", "an empty trash")
+            shell_said = shell_until(30, lambda said: "trash" not in said["dock-place-keys"],
+                                     "the dock without the trash")
+            if "trash" in shell_said["dock-place-keys"]:
+                fail(f"the dock still has the trash in it after it was emptied: {shell_said.get('dock-places')!r}")
+            files_set("close", "now", "the window on the trash")
+            files_until(30, lambda lines: files_value(lines, "windows") == "1", "one window again")
+            ok("emptying the trash took its place in the dock away")
+
+            if args.locked:
+                # the disk that was unlocked in 5q is mounted, so it is a place too: a press opens
+                # it, and Eject in its own menu unmounts it, closes it and switches it off
+                shell_said = shell_state("the dock with the disk in it")
+                click(args.qmp, shell_size, shell_place_point(DRIVE_INSIDE_MOUNT, shell_said))
+                files_until(60, lambda lines: files_value(lines, "location") == DRIVE_INSIDE_MOUNT
+                            and files_value(lines, "ready") == "yes", f"{DRIVE_INSIDE} open in Files")
+                files_set("close", "now", "the window on the disk")
+                files_until(30, lambda lines: files_value(lines, "windows") == "1", "one window again")
+                click(args.qmp, shell_size, shell_place_point(DRIVE_INSIDE_MOUNT, shell_said), button="right")
+                shell_item = wait_for(20, lambda: bar_state("the state with the place's menu open").get("item"))
+                if not shell_item or not shell_item.startswith(f"{DRIVE_INSIDE_MOUNT} "):
+                    fail(f"a right click on the disk in the dock says item {shell_item!r}")
+                shell_rows = int(shell_item.split()[-1])
+                if shell_rows != 2:
+                    fail(f"the menu of the disk has {shell_rows} rows, expected Open and Eject")
+                shot(f"{stem}-dock-place-menu{extension}", "dock-place-menu")
+                click(args.qmp, shell_size, shell_place_menu(DRIVE_INSIDE_MOUNT, shell_said, 1, shell_rows))
+                shell_said = shell_until(180, lambda said: DRIVE_INSIDE_MOUNT not in said["dock-place-keys"],
+                                         "the dock after the disk was ejected")
+                if DRIVE_INSIDE_MOUNT in shell_said["dock-place-keys"]:
+                    fail(f"the disk is still in the dock after Eject: {shell_said.get('dock-places')!r}")
+                _, shell_mounted = run(f"findmnt --noheadings --output TARGET {DRIVE_INSIDE_MOUNT}; "
+                                       "lsblk --noheadings --output NAME,TYPE | grep crypt; true",
+                                       "what is left of the disk that was ejected")
+                if DRIVE_INSIDE_MOUNT in without_console(shell_mounted):
+                    fail(f"{DRIVE_INSIDE_MOUNT} is still mounted after Eject in the dock")
+                ok("the disk that was unlocked stood in the dock, a press opened it in Files, and "
+                   "Eject in its menu unmounted it and shut it")
+
+            # the places in the Applications menu, over the apps, and a press opens one in Files
+            run("lens --menu", "the Applications menu with the places in it")
+            shell_said = shell_until(20, lambda said: said.get("menu") == "open"
+                                     and "home" in (said.get("places") or "").split(), "the menu open")
+            shell_places = (shell_said.get("places") or "").split()
+            if "home" not in shell_places or "documents" not in shell_places:
+                fail(f"the Applications menu lists the places {shell_places}, expected home and the "
+                     "folders of it")
+            # the drive of this test has an exchange partition, which 5o found mounted
+            if "exchange" not in shell_places:
+                fail(f"the Applications menu lists the places {shell_places}, expected the drive's "
+                     f"own exchange partition, mounted at {DRIVE_EXCHANGE}, with them")
+            look("the Applications menu with the places over the apps", f"{stem}-menu-places{extension}",
+                 20, menu=True, rows=int(shell_said.get("rows") or 0), journals=("lens",))
+            # the first row is the name of the section and the second is home
+            click(args.qmp, shell_size, shell_menu_row(1))
+            files_until(120, lambda lines: files_value(lines, "windows") == "2"
+                        and files_value(lines, "location") == files_home, "home open in Files")
+            if bar_state("the state after the place was pressed").get("menu") != "closed":
+                fail("the Applications menu is still open after a place was pressed")
+            ok(f"the Applications menu lists {len(shell_places)} places over the apps, and a press "
+               "on home opened it in Files")
+
+            files_set("close", "now", "the window on home")
+            files_until(30, lambda lines: files_value(lines, "windows") == "1", "one window left")
+            files_set("close", "now", "the last window")
+            if not wait_for(60, lambda: not app_windows(FILES_APP_ID, "Files' windows at the end")):
+                fail("Files' windows did not close")
+            ok("the shell opens every place there is in Files, and Files closed again")
 
             # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again
