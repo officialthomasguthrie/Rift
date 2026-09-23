@@ -1,7 +1,7 @@
 //! The dock: the apps that stay in it, then the ones that are running, each with its own icon, a
-//! mark per open window and the focused one marked out, and at the right the workspaces. What it
-//! lists comes from the desktop entries and from Horizon's event stream, and a click goes back to
-//! Horizon. It stands along the bottom of the screen from one side to the other with 32 pixel
+//! mark per open window and the focused one marked out, and at the right the places and the
+//! workspaces. What it lists comes from the desktop entries and from Horizon's event stream, and a
+//! click goes back to Horizon. It stands along the bottom of the screen from one side to the other with 32 pixel
 //! icons, or where the owner put it on the Dock page: along the top, only as wide as what it holds
 //! in the middle of its edge, with bigger icons. Along the bottom it can hide until the pointer
 //! reaches the edge of the screen, leaving a line two pixels tall there.
@@ -11,6 +11,7 @@ use std::time::Duration;
 use iced::widget::{button, column, container, mouse_area, row, space, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme, window};
 use librift::dock::{Edge, Options, Size};
+use librift::drives::Volume;
 
 use crate::bar;
 use crate::horizon::{self, Open, Space};
@@ -137,6 +138,72 @@ impl Item {
     }
 }
 
+/// What names the trash in the dock and in the state, and what the file manager is given to open
+/// it: its own address, the one every desktop uses for it.
+pub const TRASH: &str = "trash";
+/// The address of the trash.
+pub const TRASH_PLACE: &str = "trash:///";
+
+/// A place at the right end of the dock: the trash while there is something in it, and a disk
+/// while it is mounted. A press opens it in the file manager, and a right click on a disk offers
+/// to eject it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    /// What names it in the state and in a press: `trash`, or where the disk is mounted.
+    pub key: String,
+    /// What its menu calls it: Trash, or the name of the disk.
+    pub name: String,
+    /// The symbolic icon it is drawn with.
+    pub icon: &'static str,
+    /// What the file manager is given to open.
+    pub address: String,
+    /// The disk on the bus, when it is one: what an eject is asked of.
+    pub drive: Option<String>,
+}
+
+impl Place {
+    /// What a right click on it offers: opening it, and ejecting a disk. The trash is emptied in
+    /// the file manager, where what is in it can be seen first, so there is nothing to offer.
+    #[must_use]
+    pub fn rows(&self) -> Vec<Row> {
+        let mut rows = vec![Row::Open];
+        if self.drive.is_some() {
+            rows.push(Row::Eject);
+        }
+        rows
+    }
+}
+
+/// The places at the right end of the dock: the trash while it has something in it, then every
+/// disk that is mounted, in the order udisks lists them. Both are there while there is something
+/// to open and gone when there is not, the way the running apps are.
+#[must_use]
+pub fn places(trash: bool, drives: &[Volume]) -> Vec<Place> {
+    let mut places: Vec<Place> = Vec::new();
+    if trash {
+        places.push(Place {
+            key: TRASH.to_string(),
+            name: "Trash".to_string(),
+            icon: "user-trash-full-symbolic",
+            address: TRASH_PLACE.to_string(),
+            drive: None,
+        });
+    }
+    for volume in drives {
+        let Some(mount) = volume.mount.as_ref() else {
+            continue;
+        };
+        places.push(Place {
+            key: mount.display().to_string(),
+            name: volume.name.clone(),
+            icon: volume.icon,
+            address: mount.display().to_string(),
+            drive: Some(volume.id.clone()),
+        });
+    }
+    places
+}
+
 /// What a row of the menu a right click opens does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
@@ -148,6 +215,10 @@ pub enum Row {
     Pin(bool),
     /// Close every window the app has.
     Close,
+    /// Open a place in the file manager.
+    Open,
+    /// Unmount a disk and eject it, so it can be pulled out.
+    Eject,
 }
 
 impl Row {
@@ -166,6 +237,8 @@ impl Row {
             Self::Pin(true) => "Unpin".to_string(),
             Self::Pin(false) => "Pin to dock".to_string(),
             Self::Close => "Close".to_string(),
+            Self::Open => "Open".to_string(),
+            Self::Eject => "Eject".to_string(),
         }
     }
 }
@@ -201,6 +274,12 @@ pub struct Dock {
     pub open: Open,
     /// One item per app, the pinned ones first.
     pub items: Vec<Item>,
+    /// Whether there is anything in the owner's trash.
+    pub trash: bool,
+    /// The disks that are mounted, as udisks last said.
+    pub drives: Vec<Volume>,
+    /// The places at the right end, from those two.
+    pub places: Vec<Place>,
     /// The menu a right click opened, when there is one.
     pub menu: Option<Menu>,
     /// Whether it is hidden now, which only a dock whose settings say it hides ever is.
@@ -222,6 +301,9 @@ impl Dock {
             pinned: librift::dock::pinned(),
             open: Open::default(),
             items: Vec::new(),
+            trash: false,
+            drives: Vec::new(),
+            places: Vec::new(),
             menu: None,
             hidden: options.hides(),
             pointer: false,
@@ -235,6 +317,24 @@ impl Dock {
     pub fn changed(&mut self, apps: &[App], open: Open) {
         self.open = open;
         self.build(apps);
+    }
+
+    /// Something went into the owner's trash, or the last thing came out of it.
+    pub fn trashed(&mut self, anything: bool) {
+        self.trash = anything;
+        self.places = places(self.trash, &self.drives);
+    }
+
+    /// udisks says these are the disks now, whether they are mounted and where.
+    pub fn plugged(&mut self, drives: Vec<Volume>) {
+        self.drives = drives.into_iter().filter(Volume::mounted).collect();
+        self.places = places(self.trash, &self.drives);
+    }
+
+    /// The place with this key.
+    #[must_use]
+    pub fn place(&self, key: &str) -> Option<&Place> {
+        self.places.iter().find(|place| place.key == key)
     }
 
     /// Keep this app in the dock, or stop keeping it, and write the list back so a restart of the
@@ -299,15 +399,36 @@ impl Dock {
     }
 
     /// How wide it is when it does not reach the sides: its padding and its border at each end,
-    /// the apps, and the workspaces after a space.
+    /// the apps, then the places and the workspaces, each after a space.
     #[must_use]
     pub fn width(&self) -> u32 {
-        let count = |length: usize| u32::try_from(length).unwrap_or(0);
-        let (items, spaces) = (count(self.items.len()), count(self.open.spaces.len()));
-        let apps = items * item(self.options.size) + items.saturating_sub(1) * GAP;
-        let workspaces = spaces * SPACE + spaces.saturating_sub(1) * SPACE_GAP;
-        let between = if items > 0 && spaces > 0 { BETWEEN } else { 0 };
-        2 * (u32::from(PAD) + LINE) + apps + between + workspaces
+        let gap = |before: u32, after: u32| if before > 0 && after > 0 { BETWEEN } else { 0 };
+        let (apps, places, workspaces) =
+            (self.apps_width(), self.places_width(), self.spaces_width());
+        2 * (u32::from(PAD) + LINE)
+            + apps
+            + gap(apps, places + workspaces)
+            + places
+            + gap(places, workspaces)
+            + workspaces
+    }
+
+    /// How wide the apps at the left are.
+    fn apps_width(&self) -> u32 {
+        let items = u32::try_from(self.items.len()).unwrap_or(0);
+        items * item(self.options.size) + items.saturating_sub(1) * GAP
+    }
+
+    /// How wide the places at the right are.
+    fn places_width(&self) -> u32 {
+        let places = u32::try_from(self.places.len()).unwrap_or(0);
+        places * item(self.options.size) + places.saturating_sub(1) * GAP
+    }
+
+    /// How wide the workspaces at the right end are.
+    fn spaces_width(&self) -> u32 {
+        let spaces = u32::try_from(self.open.spaces.len()).unwrap_or(0);
+        spaces * SPACE + spaces.saturating_sub(1) * SPACE_GAP
     }
 
     /// The item with this key.
@@ -316,23 +437,38 @@ impl Dock {
         self.items.iter().find(|item| item.key == key)
     }
 
-    /// Where the left edge of an item is, counted from the left edge of a screen this wide, which
-    /// is where the menu of a right click on it hangs. A dock that does not reach the sides stands
-    /// in the middle, inside its border.
+    /// Where the left edge of an item or a place is, counted from the left edge of a screen this
+    /// wide, which is where the menu of a right click on it hangs. A dock that does not reach the
+    /// sides stands in the middle, inside its border. The apps are counted from the left edge of
+    /// the dock and the places back from the right, where they are drawn.
     #[must_use]
     pub fn left_of(&self, key: &str, screen: u32) -> i32 {
+        // a dock that runs from side to side has no border at its ends, one in the middle of its
+        // edge is padded over its border
+        let (edges, left, right) = if self.options.extend {
+            (u32::from(PAD), 0, screen)
+        } else {
+            let start = screen.saturating_sub(self.width()) / 2;
+            (u32::from(PAD) + LINE, start, start + self.width())
+        };
+        let step = item(self.options.size) + GAP;
+        if let Some(at) = self.places.iter().position(|place| place.key == key) {
+            let workspaces = self.spaces_width();
+            let between = if workspaces > 0 { BETWEEN } else { 0 };
+            let from_right = right
+                .saturating_sub(edges)
+                .saturating_sub(workspaces + between)
+                .saturating_sub(self.places_width());
+            let at = u32::try_from(at).unwrap_or(0);
+            return i32::try_from(from_right + at * step).unwrap_or(0);
+        }
         let at = self
             .items
             .iter()
             .position(|item| item.key == key)
             .unwrap_or(0);
         let at = u32::try_from(at).unwrap_or(0);
-        let start = if self.options.extend {
-            0
-        } else {
-            screen.saturating_sub(self.width()) / 2 + LINE
-        };
-        i32::try_from(start + u32::from(PAD) + at * (item(self.options.size) + GAP)).unwrap_or(0)
+        i32::try_from(left + edges + at * step).unwrap_or(0)
     }
 
     /// One `key value` line for `lens --state`: what the dock lists, each with how many windows
@@ -345,6 +481,17 @@ impl Dock {
                 let star = if item.is_focused() { "*" } else { "" };
                 format!("{}:{}{star}", item.key, item.windows.len())
             })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// One `key value` line for the places at the right end: what each one is called and what
+    /// pressing it opens.
+    #[must_use]
+    pub fn places_line(&self) -> String {
+        self.places
+            .iter()
+            .map(|place| format!("{}:{}", place.key, place.address))
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -427,6 +574,10 @@ pub fn view(look: Palette, dock: &Dock) -> Element<'_, Message> {
     for item in &dock.items {
         apps = apps.push(item_view(look, item, size));
     }
+    let mut places = row![].spacing(GAP).align_y(iced::Center);
+    for place in &dock.places {
+        places = places.push(place_view(look, place, size));
+    }
     let mut spaces = row![].spacing(SPACE_GAP).align_y(iced::Center);
     for workspace in &dock.open.spaces {
         spaces = spaces.push(space_view(look, *workspace));
@@ -438,8 +589,15 @@ pub fn view(look: Palette, dock: &Dock) -> Element<'_, Message> {
     };
     if !dock.options.extend {
         let mut inside = row![apps].align_y(iced::Center).height(Length::Fill);
-        if !dock.items.is_empty() && !dock.open.spaces.is_empty() {
+        let right = !dock.places.is_empty() || !dock.open.spaces.is_empty();
+        if !dock.items.is_empty() && right {
             inside = inside.push(space().width(BETWEEN));
+        }
+        if !dock.places.is_empty() {
+            inside = inside.push(places);
+            if !dock.open.spaces.is_empty() {
+                inside = inside.push(space().width(BETWEEN));
+            }
         }
         // the border is drawn over the edge of the padding, so the padding takes it in and what is
         // inside stands in the middle of the width worked out for it
@@ -463,15 +621,20 @@ pub fn view(look: Palette, dock: &Dock) -> Element<'_, Message> {
             ..container::Style::default()
         }
     });
-    let content = container(
-        row![apps, space().width(Length::Fill), spaces]
-            .align_y(iced::Center)
-            .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(dock.height() - LINE)
-    .padding([0, PAD])
-    .style(background);
+    let mut inside = row![apps, space().width(Length::Fill)]
+        .align_y(iced::Center)
+        .height(Length::Fill);
+    if !dock.places.is_empty() {
+        inside = inside.push(places);
+        if !dock.open.spaces.is_empty() {
+            inside = inside.push(space().width(BETWEEN));
+        }
+    }
+    let content = container(inside.push(spaces))
+        .width(Length::Fill)
+        .height(dock.height() - LINE)
+        .padding([0, PAD])
+        .style(background);
     match dock.options.edge {
         Edge::Bottom => column![hairline, content].into(),
         Edge::Top => column![content, hairline].into(),
@@ -539,6 +702,35 @@ fn item_view(look: Palette, item: &Item, size: Size) -> Element<'static, Message
     mouse_area(pressed)
         .on_middle_press(Message::DockNew(item.key.clone()))
         .on_right_press(Message::DockMenu(item.key.clone()))
+        .into()
+}
+
+/// One place: its symbolic icon, drawn the size an app's icon is drawn, with the room the marks
+/// under an app take left empty so every icon in the dock stands on the same line. A left click
+/// opens it in the file manager, a right click opens its menu.
+fn place_view(look: Palette, place: &Place, size: Size) -> Element<'static, Message> {
+    let whole = self::item(size);
+    #[allow(clippy::cast_precision_loss)]
+    let icon = size.icon() as f32;
+    let body = column![
+        icons::symbolic(look.text, place.icon, icon),
+        space().height(ICON_GAP + DOT + MARK),
+    ]
+    .align_x(iced::Center);
+    let inside = container(body)
+        .width(whole)
+        .height(whole)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .clip(true);
+    let pressed = button(inside)
+        .width(whole)
+        .height(whole)
+        .padding(0)
+        .on_press(Message::Dock(place.key.clone()))
+        .style(move |_: &Theme, status| fill(look, false, status));
+    mouse_area(pressed)
+        .on_right_press(Message::DockMenu(place.key.clone()))
         .into()
 }
 
@@ -850,6 +1042,9 @@ mod tests {
             pinned: kept(),
             open: Open::default(),
             items: Vec::new(),
+            trash: false,
+            drives: Vec::new(),
+            places: Vec::new(),
             menu: None,
             hidden: false,
             pointer: false,
@@ -875,6 +1070,87 @@ mod tests {
     }
 
     #[test]
+    fn the_trash_and_the_mounted_disks_stand_at_the_right_end() {
+        let stick = Volume {
+            id: "/org/freedesktop/UDisks2/block_devices/sdb1".to_string(),
+            name: "STICK".to_string(),
+            device: "/dev/sdb1".to_string(),
+            fs: "exfat".to_string(),
+            size: 64 * 1024 * 1024,
+            mount: Some(std::path::PathBuf::from("/run/media/rift/STICK")),
+            locked: false,
+            drive: "/org/freedesktop/UDisks2/drives/sdb".to_string(),
+            eject: true,
+            icon: "drive-removable-media-symbolic",
+        };
+        let plugged_in = Volume {
+            name: "OTHER".to_string(),
+            mount: None,
+            ..stick.clone()
+        };
+        let open = Open {
+            spaces: vec![
+                Space {
+                    idx: 1,
+                    active: true,
+                },
+                Space {
+                    idx: 2,
+                    active: false,
+                },
+            ],
+            ..Open::default()
+        };
+        let mut dock = Dock {
+            id: window::Id::unique(),
+            options: Options::default(),
+            pinned: kept(),
+            open: Open::default(),
+            items: Vec::new(),
+            trash: false,
+            drives: Vec::new(),
+            places: Vec::new(),
+            menu: None,
+            hidden: false,
+            pointer: false,
+            left: 0,
+        };
+        dock.changed(&apps(), open);
+        // a disk that is there and not mounted is nothing to open, so it is not a place
+        dock.plugged(vec![stick, plugged_in]);
+        let mount = "/run/media/rift/STICK";
+        assert_eq!(dock.places_line(), format!("{mount}:{mount}"));
+        // and the trash is there while there is something in it
+        dock.trashed(true);
+        assert_eq!(
+            dock.places_line(),
+            format!("trash:trash:/// {mount}:{mount}")
+        );
+        dock.trashed(false);
+        assert_eq!(dock.places_line(), format!("{mount}:{mount}"));
+        dock.trashed(true);
+        // a right click offers to open either, and to eject the disk
+        assert_eq!(dock.place(TRASH).map(Place::rows), Some(vec![Row::Open]));
+        assert_eq!(
+            dock.place(mount).map(Place::rows),
+            Some(vec![Row::Open, Row::Eject])
+        );
+        // they stand at the right end, the workspaces after them
+        let step = i32::try_from(item(Size::Small) + GAP).unwrap();
+        let workspaces = 2 * 24 + 4;
+        let places = 2 * i32::try_from(item(Size::Small)).unwrap() + i32::try_from(GAP).unwrap();
+        let first = 1280 - i32::from(PAD) - workspaces - i32::try_from(BETWEEN).unwrap() - places;
+        assert_eq!(dock.left_of(TRASH, 1280), first);
+        assert_eq!(dock.left_of(mount, 1280), first + step);
+        // a dock only as wide as what it holds takes them in as well
+        dock.options.extend = false;
+        assert_eq!(
+            dock.width(),
+            2 * (6 + 1) + 2 * 40 + 4 + 12 + (2 * 40 + 4) + 12 + (2 * 24 + 4)
+        );
+    }
+
+    #[test]
     fn pinning_an_app_adds_it_at_the_end_and_unpinning_takes_it_out() {
         let known = apps();
         let mut dock = Dock {
@@ -883,6 +1159,9 @@ mod tests {
             pinned: kept(),
             open: Open::default(),
             items: Vec::new(),
+            trash: false,
+            drives: Vec::new(),
+            places: Vec::new(),
             menu: None,
             hidden: false,
             pointer: false,
@@ -909,6 +1188,9 @@ mod tests {
             pinned: kept(),
             open: Open::default(),
             items: Vec::new(),
+            trash: false,
+            drives: Vec::new(),
+            places: Vec::new(),
             menu: None,
             hidden: true,
             pointer: false,

@@ -20,6 +20,8 @@ use iced_layershell::settings::{LayerShellSettings, Settings};
 use librift::appearance;
 use librift::battery::Battery;
 use librift::dock::Edge;
+use librift::drives;
+use librift::files::places::{self, Place};
 use librift::notifications::{self, Sender};
 use librift::os::{self, Action};
 use librift::sound::{self, Side, Volume};
@@ -105,7 +107,7 @@ const JOIN_WAIT: Duration = Duration::from_secs(45);
 /// Where the dock's surface stands and how much of the screen it keeps, in the pixels the
 /// compositor places surfaces in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Place {
+pub struct Stand {
     anchor: Anchor,
     size: (u32, u32),
     margin: (i32, i32, i32, i32),
@@ -121,6 +123,9 @@ struct Lens {
     accent: appearance::Accent,
     look: Palette,
     apps: Vec<App>,
+    /// Home and the folders of it that are there, then the drive's own exchange partition, which
+    /// the Applications menu lists over the apps.
+    places: Vec<Place>,
     clock: String,
     /// Today, for the calendar.
     today: Option<Day>,
@@ -134,7 +139,7 @@ struct Lens {
     dialog: Option<Dialog>,
     dock: Dock,
     /// Where the dock's surface was last asked to stand.
-    placed: Place,
+    placed: Stand,
     /// The bar's own surface, once the compositor has opened it. It is the one surface the shell
     /// does not open itself, so it has no id until then.
     bar: Option<window::Id>,
@@ -226,6 +231,8 @@ pub enum Message {
     Move(isize),
     /// A click on a row of the app list: that app starts.
     Pick(usize),
+    /// A click on a place over the apps: it opens in the file manager.
+    PickPlace(usize),
     /// Escape: clear the field, or close the menu when it is already empty.
     Escape,
     /// Close the menu, whatever surface it is on.
@@ -252,10 +259,15 @@ pub enum Message {
     DockRow(dock::Row),
     /// A click on a workspace button.
     Space(u8),
+    /// Something went into the owner's trash, or the last thing came out of it.
+    Trashed(bool),
+    /// What udisks says the disks are now. It travels behind a pointer, being the biggest thing
+    /// after the network.
+    Drives(Vec<drives::Volume>),
     /// A click on the name of the keyboard layout in the bar: the next one.
     NextLayout,
     /// Open the dock's surface, standing here.
-    OpenDock(window::Id, Place),
+    OpenDock(window::Id, Stand),
     /// Stand the dock on these edges at this size.
     Shape(window::Id, Anchor, (u32, u32)),
     /// Stand the dock this far off its edges.
@@ -309,10 +321,10 @@ impl TryFrom<Message> for LayerShellCustomActionWithId {
                     id,
                 },
             )),
-            Message::OpenDock(id, place) => Ok(Self::new(
+            Message::OpenDock(id, stand) => Ok(Self::new(
                 None,
                 LayerShellCustomAction::NewLayerShell {
-                    settings: dock_surface(place),
+                    settings: dock_surface(stand),
                     id,
                 },
             )),
@@ -427,7 +439,7 @@ fn menu_surface(height: u32, top: i32) -> NewLayerShellSettings {
 /// the screen, so a window stands clear of it and nothing is ever hidden behind it; the compositor
 /// adds the gap to what it keeps. A dock that hides keeps nothing: the windows have the room, and
 /// the dock comes out over them. Hidden, it is a line along the bottom edge, as wide as it is.
-fn dock_place(dock: &Dock) -> Place {
+fn dock_place(dock: &Dock) -> Stand {
     let edge = match dock.options.edge {
         Edge::Bottom => Anchor::Bottom,
         Edge::Top => Anchor::Top,
@@ -440,7 +452,7 @@ fn dock_place(dock: &Dock) -> Place {
         } else {
             (Anchor::Bottom, scaled(dock.width()))
         };
-        return Place {
+        return Stand {
             anchor,
             size: (width, scaled(dock::HIDDEN)),
             margin: (0, 0, 0, 0),
@@ -448,7 +460,7 @@ fn dock_place(dock: &Dock) -> Place {
         };
     }
     if dock.options.extend {
-        return Place {
+        return Stand {
             anchor: edge | Anchor::Left | Anchor::Right,
             size: (0, scaled(dock.height())),
             margin: (0, 0, 0, 0),
@@ -456,7 +468,7 @@ fn dock_place(dock: &Dock) -> Place {
         };
     }
     let gap = margin(dock::OFF_EDGE);
-    Place {
+    Stand {
         anchor: edge,
         size: (scaled(dock.width()), scaled(dock.height())),
         margin: match dock.options.edge {
@@ -468,13 +480,13 @@ fn dock_place(dock: &Dock) -> Place {
 }
 
 /// The dock's surface, standing where `dock_place` says. A bar never takes the keyboard.
-fn dock_surface(place: Place) -> NewLayerShellSettings {
+fn dock_surface(stand: Stand) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some(place.size),
+        size: Some(stand.size),
         layer: Layer::Top,
-        anchor: place.anchor,
-        exclusive_zone: Some(place.zone),
-        margin: Some(place.margin),
+        anchor: stand.anchor,
+        exclusive_zone: Some(stand.zone),
+        margin: Some(stand.margin),
         keyboard_interactivity: KeyboardInteractivity::None,
         output_option: OutputOption::Active,
         events_transparent: false,
@@ -670,6 +682,7 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
         accent,
         look: crate::theme::palette(chosen, accent),
         apps,
+        places: Vec::new(),
         clock: now.line,
         today: now.today,
         first: clock::first_weekday(),
@@ -710,6 +723,8 @@ fn subscription(_: &Lens) -> Subscription<Message> {
         watch::bluetooth(),
         watch::sound(),
         watch::zone(),
+        watch::drives(),
+        watch::trash(),
         notice::serve(),
     ])
 }
@@ -865,6 +880,9 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             }
             submit(state)
         }
+        Message::PickPlace(at) => pick_place(state, at),
+        Message::Trashed(anything) => trashed(state, anything),
+        Message::Drives(found) => plugged(state, found),
         Message::Escape => escape(state),
         Message::Dismiss => close(state),
         Message::Done(result) => {
@@ -1540,10 +1558,15 @@ fn open(state: &mut Lens) -> Task<Message> {
         return Task::none();
     }
     // the entries are read again here, so an app installed since the session started is in the
-    // list without a restart. it is a walk of a few directories, once per opening
+    // list without a restart. it is a walk of a few directories, once per opening, and the places
+    // are read with them, since a folder of home can be made or taken away in the same way
     state.apps = launcher::load();
+    state.places = places::places()
+        .into_iter()
+        .chain(places::exchange())
+        .collect();
     let id = window::Id::unique();
-    let menu = Menu::new(id, &state.apps);
+    let menu = Menu::new(id, &state.apps, &state.places);
     let height = menu.height;
     state.menu = Some(menu);
     Task::done(Message::Open(id, height, menu_top(&state.dock)))
@@ -1583,6 +1606,10 @@ fn escape(state: &mut Lens) -> Task<Message> {
 /// it is, and the next of its windows when one of them is the one being used.
 fn dock_click(state: &mut Lens, key: &str) -> Task<Message> {
     let closing = close_item_menu(state);
+    if let Some(address) = state.dock.place(key).map(|place| place.address.clone()) {
+        open_place(state, &address);
+        return closing;
+    }
     let Some(item) = state.dock.item(key) else {
         return closing;
     };
@@ -1609,13 +1636,23 @@ fn dock_menu(state: &mut Lens, key: &str) -> Task<Message> {
     if same {
         return closing;
     }
-    let Some(rows) = state.dock.item(key).map(dock::Item::rows) else {
+    let rows = state
+        .dock
+        .item(key)
+        .map(dock::Item::rows)
+        .or_else(|| state.dock.place(key).map(dock::Place::rows));
+    let Some(rows) = rows else {
         return closing;
     };
     if rows.is_empty() {
         return closing;
     }
-    let left = state.dock.left_of(key, state.screen);
+    // the places stand at the right end, so a menu hanging from one would run off the screen
+    let widest = i32::try_from(state.screen.saturating_sub(dock::MENU_WIDTH)).unwrap_or(0);
+    let left = state
+        .dock
+        .left_of(key, state.screen)
+        .clamp(0, widest.max(0));
     let height = dock::menu_height(rows.len());
     let id = window::Id::unique();
     state.dock.menu = Some(dock::Menu {
@@ -1661,8 +1698,68 @@ fn dock_row(state: &mut Lens, row: &dock::Row) -> Task<Message> {
                 report(horizon::close(window));
             }
         }
+        dock::Row::Open => {
+            if let Some(address) = state.dock.place(&key).map(|place| place.address.clone()) {
+                open_place(state, &address);
+            }
+        }
+        dock::Row::Eject => {
+            let drive = state.dock.place(&key).and_then(|place| place.drive.clone());
+            if let Some(drive) = drive {
+                // unmounting writes out everything that was waiting, which takes as long as it
+                // takes, so the shell keeps drawing while udisks does it
+                return Task::batch([
+                    closing,
+                    off_thread(move || librift::drives::eject(&drive), Message::Acted),
+                ]);
+            }
+        }
     }
     closing
+}
+
+/// A click on a place over the apps in the Applications menu: it opens in the file manager and
+/// the menu closes, the way it does when a row starts an app.
+fn pick_place(state: &mut Lens, at: usize) -> Task<Message> {
+    let address = state
+        .menu
+        .as_ref()
+        .and_then(|menu| menu.places.get(at))
+        .map(|place| place.path.display().to_string());
+    if let Some(address) = address {
+        open_place(state, &address);
+    }
+    close(state)
+}
+
+/// Something went into the owner's trash, or the last thing came out of it: the dock keeps a
+/// place for the trash while there is something in it.
+fn trashed(state: &mut Lens, anything: bool) -> Task<Message> {
+    state.dock.trashed(anything);
+    Task::none()
+}
+
+/// udisks says these are the disks now. A disk that was ejected while its menu was open takes the
+/// menu with it.
+fn plugged(state: &mut Lens, found: Vec<drives::Volume>) -> Task<Message> {
+    state.dock.plugged(found);
+    let gone = state.dock.menu.as_ref().is_some_and(|menu| {
+        state.dock.place(&menu.key).is_none() && state.dock.item(&menu.key).is_none()
+    });
+    if gone {
+        return close_item_menu(state);
+    }
+    Task::none()
+}
+
+/// Open a place in the file manager: the app the image opens a folder with, started with the
+/// place after its own command, in a scope of its own like every other app the shell starts.
+fn open_place(state: &Lens, address: &str) {
+    let Some(app) = librift::defaults::manager(&state.apps) else {
+        eprintln!("lens: there is no app on this machine that opens a folder");
+        return;
+    };
+    report(librift::apps::launch_with(&app, &[address.to_string()]));
 }
 
 /// Close the menu a right click opened, when one is open. A dock that hides stayed out while it
@@ -1930,6 +2027,15 @@ fn remember(state: &Lens) {
             line("menu", "open");
             line("field", &menu.input);
             line("rows", &menu.results.shown().to_string());
+            line(
+                "places",
+                &menu
+                    .places
+                    .iter()
+                    .map(|place| place.word)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
             if let Some((text, wrong)) = menu.line() {
                 line(if wrong { "error" } else { "notice" }, text);
             }
@@ -1941,6 +2047,7 @@ fn remember(state: &Lens) {
         line(key, value);
     }
     line("dock-hidden", if state.dock.hidden { "yes" } else { "no" });
+    line("dock-places", &state.dock.places_line());
     line("workspaces", &state.dock.spaces_line());
     line("layout", state.layout.as_deref().unwrap_or("none"));
     if let Some(menu) = &state.dock.menu {

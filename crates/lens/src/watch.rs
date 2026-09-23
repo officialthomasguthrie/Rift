@@ -11,14 +11,19 @@ use std::thread;
 use std::time::Duration;
 
 use iced::Subscription;
+use librift::files::trash::Trash;
 use librift::sound::{Monitor, Side};
-use librift::{battery, bluetooth, bus, clock as zone, network, sound};
+use librift::{battery, bluetooth, bus, clock as zone, drives, network, sound};
 
 use crate::clock;
 use crate::ui::Message;
 
 /// How long to wait before starting `pw-mon` again when it went away.
 const RETRY: Duration = Duration::from_secs(5);
+
+/// How often the owner's trash is looked at. It is one directory read, and nothing on the bus
+/// says a file was thrown away.
+const TRASH_EVERY: Duration = Duration::from_secs(2);
 
 /// `NetworkManager`'s picture, now and after every change.
 pub fn network() -> Subscription<Message> {
@@ -70,6 +75,40 @@ pub fn zone() -> Subscription<Message> {
 pub fn sound() -> Subscription<Message> {
     Subscription::run_with("sound", |_| {
         follow(monitor, || Message::Sound(sound::volume(Side::Output)))
+    })
+}
+
+/// The disks a person plugged in, now and whenever udisks says one changed. Without udisks, which
+/// is every machine that is not a Rift drive, the watch is tried again and the list stays empty.
+pub fn drives() -> Subscription<Message> {
+    Subscription::run_with("drives", |_| {
+        follow(
+            |poke| listen(poke, |each| drives::watch(each)),
+            || Message::Drives(drives::volumes().unwrap_or_default()),
+        )
+    })
+}
+
+/// Whether there is anything in the owner's trash, looked at every couple of seconds. The dock
+/// keeps a place for the trash while there is something in it, and nothing on the bus says a file
+/// was thrown away, so this is a directory read and a message only when the answer changed.
+pub fn trash() -> Subscription<Message> {
+    Subscription::run_with("trash", |_| {
+        let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+        thread::spawn(move || {
+            let mut last = None;
+            loop {
+                let anything = Trash::home().is_some_and(|trash| trash.count() > 0);
+                if last != Some(anything) {
+                    if sender.unbounded_send(Message::Trashed(anything)).is_err() {
+                        return;
+                    }
+                    last = Some(anything);
+                }
+                thread::sleep(TRASH_EVERY);
+            }
+        });
+        receiver
     })
 }
 

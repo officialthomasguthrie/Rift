@@ -1,10 +1,11 @@
 //! The Applications menu: the surface that hangs under the Applications button. The field is at
-//! the top of it, and under the field the apps in their sections, or what the field matched,
-//! printed or answered.
+//! the top of it, and under the field the places and the apps in their sections, or what the field
+//! matched, printed or answered.
 
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Border, Color, Element, Font, Length, Shadow, Theme, window};
 use librift::apps::Category;
+use librift::files::places::Place;
 use librift::os::Action;
 
 use crate::bar;
@@ -53,17 +54,27 @@ const PLACEHOLDER: &str = "Type an app, a command or a question";
 /// A row of the list under the field.
 #[derive(Debug, Clone)]
 pub enum Row {
-    /// The name of a section, over the apps in it.
+    /// The name of a section, over the rows in it.
     Header(&'static str),
+    /// A folder, in the first section. A click opens it in the file manager.
+    Place(Place),
     /// An app, with its own icon at the left. Enter starts the one that is selected.
     App(App),
 }
 
-/// Every app in its section, the sections in the menu's order. A section with nothing in it has
-/// no header.
+/// The name of the section the places are in, over the app sections.
+pub const PLACES: &str = "Places";
+
+/// The places, then every app in its section, the sections in the menu's order. A section with
+/// nothing in it has no header.
 #[must_use]
-pub fn sections(apps: &[App]) -> Vec<Row> {
+pub fn sections(apps: &[App], places: &[Place]) -> Vec<Row> {
     let mut rows = Vec::new();
+    if let Some(first) = places.first() {
+        rows.push(Row::Header(PLACES));
+        rows.push(Row::Place(first.clone()));
+        rows.extend(places[1..].iter().cloned().map(Row::Place));
+    }
     for category in Category::ALL {
         let mut found = apps.iter().filter(|app| app.category == category);
         if let Some(first) = found.next() {
@@ -124,7 +135,7 @@ impl Results {
         };
         rows.iter().filter_map(|row| match row {
             Row::App(app) => Some(app),
-            Row::Header(_) => None,
+            Row::Header(_) | Row::Place(_) => None,
         })
     }
 }
@@ -149,15 +160,17 @@ pub struct Menu {
     pub notice: Option<String>,
     /// A command that changes something, waiting for a second Enter.
     pub pending: Option<Action>,
+    /// The places at the top of the list, as they were when the menu opened.
+    pub places: Vec<Place>,
     /// The height the surface has been told to be.
     pub height: u32,
 }
 
 impl Menu {
-    /// An open menu with an empty field and every app under it.
+    /// An open menu with an empty field, the places and every app under it.
     #[must_use]
-    pub fn new(id: window::Id, apps: &[App]) -> Self {
-        let results = Results::Apps(sections(apps));
+    pub fn new(id: window::Id, apps: &[App], places: &[Place]) -> Self {
+        let results = Results::Apps(sections(apps, places));
         Self {
             id,
             input: String::new(),
@@ -168,6 +181,7 @@ impl Menu {
             error: None,
             notice: None,
             pending: None,
+            places: places.to_vec(),
         }
     }
 
@@ -180,7 +194,7 @@ impl Menu {
         self.input = value;
         self.top = 0;
         if self.input.trim().is_empty() {
-            self.results = Results::Apps(sections(apps));
+            self.results = Results::Apps(sections(apps, &self.places));
             self.selected = None;
             return;
         }
@@ -364,10 +378,14 @@ fn list(look: Palette, menu: &Menu) -> Element<'_, Message> {
     match &menu.results {
         Results::None => {}
         Results::Apps(listed) => {
-            let mut at = 0;
+            let (mut at, mut place) = (0, 0);
             for row in listed {
                 match row {
                     Row::Header(name) => rows = rows.push(header(look, name)),
+                    Row::Place(where_it_is) => {
+                        rows = rows.push(place_row(look, where_it_is, place));
+                        place += 1;
+                    }
                     Row::App(app) => {
                         rows = rows.push(app_row(look, app, at, menu.selected == Some(at)));
                         at += 1;
@@ -427,6 +445,45 @@ fn header(look: Palette, name: &str) -> Element<'static, Message> {
     .align_y(iced::Center)
     .clip(true)
     .into()
+}
+
+/// One place in the list: its icon, its name, and a click opens it in the file manager. The
+/// arrows and Enter walk the apps, not the places, so a place is never the selected row.
+fn place_row(look: Palette, place: &Place, at: usize) -> Element<'static, Message> {
+    let body = row![
+        icons::draw(look.text, Some(place.icon), ICON),
+        text(place.name.clone())
+            .size(bar::TEXT_SIZE)
+            .color(look.text)
+            .wrapping(iced::widget::text::Wrapping::None)
+    ]
+    .spacing(ICON_GAP)
+    .align_y(iced::Center);
+    let inside = container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_y(iced::Center)
+        .clip(true);
+    button(inside)
+        .width(Length::Fill)
+        .height(ROW)
+        .padding([0, 4])
+        .on_press(Message::PickPlace(at))
+        .style(move |_: &Theme, status| button::Style {
+            background: match status {
+                button::Status::Hovered | button::Status::Pressed => Some(look.press.into()),
+                _ => None,
+            },
+            text_color: look.text,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 4.0.into(),
+            },
+            shadow: Shadow::default(),
+            snap: true,
+        })
+        .into()
 }
 
 /// One app in the list: its icon, its name, and a click starts it. The row Enter would take is
@@ -566,6 +623,7 @@ mod tests {
         rows.iter()
             .map(|row| match row {
                 Row::Header(name) => format!("[{name}]"),
+                Row::Place(place) => place.name.clone(),
                 Row::App(app) => app.name.clone(),
             })
             .collect()
@@ -600,7 +658,7 @@ mod tests {
 
     #[test]
     fn the_apps_come_in_their_sections() {
-        let rows = sections(&apps());
+        let rows = sections(&apps(), &[]);
         assert_eq!(
             names(&rows),
             [
@@ -617,13 +675,29 @@ mod tests {
         );
         // a section with nothing in it has no header
         assert!(!names(&rows).contains(&"[Office]".to_string()));
-        assert!(sections(&[]).is_empty());
+        assert!(sections(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn the_places_come_first_in_a_section_of_their_own() {
+        let home = Place {
+            word: "home",
+            name: "Home".to_string(),
+            path: std::path::PathBuf::from("/home/rift"),
+            icon: "user-home-symbolic",
+            colour: "user-home",
+        };
+        let rows = sections(&apps(), std::slice::from_ref(&home));
+        assert_eq!(names(&rows)[..3], ["[Places]", "Home", "[Accessories]"]);
+        // the arrows and Enter walk the apps, so a place is not one of them
+        let listed = Results::Apps(rows);
+        assert_eq!(listed.apps().count(), apps().len());
     }
 
     #[test]
     fn a_menu_with_nothing_typed_shows_the_apps_and_has_nothing_to_clear() {
         let known = apps();
-        let mut menu = Menu::new(window::Id::unique(), &known);
+        let mut menu = Menu::new(window::Id::unique(), &known, &[]);
         assert_eq!(menu.results.len(), 9);
         assert!(menu.selected_app().is_none(), "nothing is picked yet");
         assert!(!menu.has_anything());
@@ -641,7 +715,7 @@ mod tests {
     #[test]
     fn typing_filters_the_list_and_picks_the_best() {
         let known = apps();
-        let mut menu = Menu::new(window::Id::unique(), &known);
+        let mut menu = Menu::new(window::Id::unique(), &known, &[]);
         menu.typed(&known, "fi".into());
         assert_eq!(names(&rows_of(&menu)), ["Files", "Firefox"]);
         assert_eq!(
@@ -668,7 +742,7 @@ mod tests {
     #[test]
     fn up_and_down_walk_the_apps_and_wrap() {
         let known = apps();
-        let mut menu = Menu::new(window::Id::unique(), &known);
+        let mut menu = Menu::new(window::Id::unique(), &known, &[]);
         menu.step(1);
         assert_eq!(
             menu.selected_app().map(|app| app.name.as_str()),
@@ -695,7 +769,7 @@ mod tests {
         let many: Vec<App> = (0..40)
             .map(|at| app(&format!("App {at:02}"), Category::Accessories))
             .collect();
-        let mut menu = Menu::new(window::Id::unique(), &many);
+        let mut menu = Menu::new(window::Id::unique(), &many, &[]);
         assert_eq!(menu.results.len(), 41, "a header over forty apps");
         assert_eq!(menu.results.shown(), LIST_ROWS);
         assert_eq!(menu.wanted_height(), height(LIST_ROWS, false));
