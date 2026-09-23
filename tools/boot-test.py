@@ -5203,9 +5203,14 @@ def main():
                 if wait_for(60, lambda: access_agrees(reader, keyboard, what)):
                     return
                 shell = bar_state(f"the shell for {what} again")
+                # the notes in the runtime directory are where the page and the shell read it from,
+                # so they say whether the program went or the note did
+                _, notes = run("cat $XDG_RUNTIME_DIR/lens-reader $XDG_RUNTIME_DIR/lens-keyboard 2>/dev/null; "
+                               "or true", "the notes lens leaves")
                 fail(f"{what}: the Accessibility page says {access_page(f'the page for {what} again')}, lens "
-                     f"--state says {(shell.get('screen-reader'), shell.get('keyboard'))}, and pgrep finds "
-                     f"{running_now('orca', 'orca again')} and {running_now('wvkbd', 'wvkbd again')}, where "
+                     f"--state says {(shell.get('screen-reader'), shell.get('keyboard'))}, pgrep finds "
+                     f"{running_now('orca', 'orca again')} and {running_now('wvkbd', 'wvkbd again')}, and the "
+                     f"notes say {without_console(notes).strip()[-200:]!r}, where "
                      f"the screen reader should be {reader} and the keyboard {keyboard}")
 
             run("rift-settings --page accessibility", "the Accessibility page")
