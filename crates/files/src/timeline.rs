@@ -75,6 +75,24 @@ pub fn bringing(place: &Path, folder: &Path, names: &[OsString]) -> (Vec<PathBuf
     (from, taken)
 }
 
+/// The folder these names are all in, and their names inside it. A name is a path under the folder
+/// the window shows, since a row a search found can lie under it. `None` when they are not all in
+/// one folder, which is the one thing a restore cannot do in one go.
+#[must_use]
+pub fn in_one_folder(names: &[OsString]) -> Option<(PathBuf, Vec<OsString>)> {
+    let mut folder: Option<PathBuf> = None;
+    let mut inside = Vec::new();
+    for name in names {
+        let path = Path::new(name);
+        let under = path.parent().unwrap_or(Path::new("")).to_path_buf();
+        if folder.get_or_insert(under.clone()) != &under {
+            return None;
+        }
+        inside.push(path.file_name().unwrap_or(name.as_os_str()).to_owned());
+    }
+    Some((folder.unwrap_or_default(), inside))
+}
+
 /// What the button says: Restore for what is selected, and everything in the folder when nothing
 /// is.
 #[must_use]
@@ -126,6 +144,21 @@ mod tests {
         assert_eq!(step(&moments, "2026-09-20T08:00:00Z", true), None);
         assert_eq!(step(&moments, "2026-09-22T08:00:00Z", false), None);
         assert_eq!(step(&moments, "2026-09-19T08:00:00Z", true), None);
+    }
+
+    #[test]
+    fn the_rows_of_one_folder_go_back_at_a_time() {
+        let names = |names: &[&str]| names.iter().map(OsString::from).collect::<Vec<_>>();
+        let (folder, inside) =
+            in_one_folder(&names(&["notes.txt", "todo.txt"])).expect("one folder");
+        assert_eq!(folder, PathBuf::new());
+        assert_eq!(inside, names(&["notes.txt", "todo.txt"]));
+        let (folder, inside) =
+            in_one_folder(&names(&["Plans/one.txt", "Plans/two.txt"])).expect("one folder");
+        assert_eq!(folder, PathBuf::from("Plans"));
+        assert_eq!(inside, names(&["one.txt", "two.txt"]));
+        assert_eq!(in_one_folder(&names(&["one.txt", "Plans/two.txt"])), None);
+        assert_eq!(in_one_folder(&[]), Some((PathBuf::new(), Vec::new())));
     }
 
     #[test]

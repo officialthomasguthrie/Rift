@@ -815,6 +815,12 @@ fn bring(state: &mut Files, id: window::Id) -> Task<Message> {
         .iter()
         .map(|entry| entry.name.clone())
         .collect();
+    // a row a search found is named by its path under the folder, and a restore has one folder to
+    // put things back in, so the rows of one folder go back at a time
+    let Some((under, names)) = timeline::in_one_folder(&names) else {
+        return toast(state, id, MANY_FOLDERS.to_string(), None);
+    };
+    let (place, folder) = (place.join(&under), folder.join(&under));
     let (from, taken) = timeline::bringing(&place, &folder, &names);
     if from.is_empty() {
         return toast(
@@ -933,6 +939,9 @@ pub fn searched(
     Task::none()
 }
 
+/// What a selection spread over several folders says.
+const MANY_FOLDERS: &str =
+    "These are in different folders. Put back the ones in one folder at a time.";
 /// What a folder with no snapshots behind it says.
 const NO_TIMELINE: &str = "Only your home folder is snapshotted, so this folder has no Timeline.";
 /// What a drive with no snapshots yet says.
