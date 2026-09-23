@@ -416,6 +416,14 @@ FILES_FOLDERS = ["Documents", "Downloads", "Music", "Pictures", "Videos"]
 FILES_NOTE = "notes.txt"
 FILES_RENAMED = "minutes.txt"
 FILES_FOLDER = "Plans"
+# the Timeline and the search field: the file that changes between a snapshot and now, the one that
+# is deleted after it, the one under another folder a search by name finds, and the words the search
+# by meaning takes, which step 4c wrote ~/notes/bike.txt for
+FILES_DIARY = "diary.txt"
+FILES_RECEIPTS = "receipts.txt"
+FILES_UNDER = "diary of last year.txt"
+FILES_MEANING = "bicycle repair"
+FILES_FOUND = "notes/bike.txt"
 # the disks in Files' sidebar: the drive's own exchange partition and the stick --stick attaches
 DRIVE_EXCHANGE = "/exchange"
 DRIVE_LABEL = "STICK"
@@ -6428,6 +6436,113 @@ def main():
                 if DRIVE_MOUNT in without_console(drive_said):
                     fail(f"{DRIVE_MOUNT} is still mounted after {DRIVE_LABEL} was ejected")
                 ok(f"{DRIVE_LABEL} was unmounted and ejected from its row in the sidebar")
+
+            # 5p. the Timeline and the search field. vault takes a snapshot of home every hour, and a
+            # folder in the Timeline is that folder as it was at one of them: a file changed since is
+            # brought back by copying it out of the snapshot, so what is there now goes to the trash
+            # first and nothing is written over. then the field in the header bar: by name over the
+            # folder and what is under it as it is typed, and by meaning through the index of step 4c
+            def files_contents(path):
+                """What is in a file, or nothing when it cannot be read."""
+                status, said = run(f"cat {path}", f"what is in {path}")
+                return without_console(said) if status == 0 else ""
+
+            files_set("place", "documents", "Documents in the sidebar")
+            files_until(30, lambda lines: files_value(lines, "location") == files_documents
+                        and files_value(lines, "ready") == "yes", "Documents for the Timeline")
+            status, _ = run(f"printf 'First draft\\n' > ~/Documents/{FILES_DIARY}; "
+                            f"and printf 'Two coffees\\n' > ~/Documents/{FILES_RECEIPTS}",
+                            "the files the Timeline brings back")
+            if status != 0:
+                fail("the files for the Timeline could not be written")
+            status, files_took = run("rift snapshot take", "a snapshot of home for the Timeline")
+            files_taken = re.search(r"^Took snapshot (\S+Z)\.\s*$", without_console(files_took), re.M)
+            if status != 0 or not files_taken:
+                fail(f"rift snapshot take exited with {status}: {without_console(files_took).strip()[-300:]!r}")
+            files_moment = files_taken.group(1)
+            status, _ = run(f"printf 'Second draft\\n' > ~/Documents/{FILES_DIARY}; "
+                            f"and rm ~/Documents/{FILES_RECEIPTS}",
+                            "one file changed and one deleted since the snapshot")
+            if status != 0:
+                fail("the files could not be changed after the snapshot")
+            files_until(30, lambda lines: f"row file {FILES_RECEIPTS}" not in lines,
+                        f"{FILES_RECEIPTS} gone from the list")
+            # the snapshot keeps home's permissions, so the owner reads a folder in it as they do in home
+            files_snapshot = f"/persist/@snapshots/home/{files_moment}/{OWNER_USER}/Documents"
+            _, files_listed = run(f"ls -1 {files_snapshot} | cat", "the folder inside the snapshot")
+            if FILES_RECEIPTS not in without_console(files_listed):
+                fail(f"the owner cannot list {files_snapshot}: "
+                     f"{without_console(files_listed).strip()[-300:]!r}")
+
+            files_set("timeline", "now", "the Timeline")
+            files_until(60, lambda lines: files_value(lines, "moment") == files_moment
+                        and files_value(lines, "ready") == "yes"
+                        and f"row file {FILES_DIARY}" in lines and f"row file {FILES_RECEIPTS}" in lines,
+                        f"Documents as it was at {files_moment}")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            shot(f"{stem}-files-timeline{extension}", "files-timeline")
+            ok(f"Files shows Documents as it was at {files_moment}, with {FILES_RECEIPTS} still in it")
+
+            # the deleted file is nowhere now, so it comes back without a question
+            files_select(FILES_RECEIPTS)
+            files_set("bring", "now", "Restore, for the file that was deleted")
+            if not wait_for(60, lambda: "Two coffees"
+                            in files_contents(f"{files_home}/Documents/{FILES_RECEIPTS}")):
+                fail(f"{FILES_RECEIPTS} did not come back from {files_moment}")
+            # the changed one asks first, and Replace puts what is there in the trash
+            files_select(FILES_DIARY)
+            files_set("bring", "now", "Restore, for the file that changed")
+            files_until(30, lambda lines: files_value(lines, "dialog") == "replace",
+                        "the question before the file that changed is replaced")
+            shot(f"{stem}-files-restore{extension}", "files-restore")
+            files_set("replace", "now", "Replace")
+            if not wait_for(60, lambda: "First draft"
+                            in files_contents(f"{files_home}/Documents/{FILES_DIARY}")):
+                fail(f"{FILES_DIARY} was not brought back from {files_moment}")
+            _, files_trashed = run(f"cat ~/.local/share/Trash/files/{FILES_DIARY}", "the copy in the trash")
+            if "Second draft" not in without_console(files_trashed):
+                fail(f"the {FILES_DIARY} that was there is not in the trash: "
+                     f"{without_console(files_trashed).strip()[-200:]!r}")
+            files_set("now", "now", "Back to now")
+            files_until(30, lambda lines: files_value(lines, "location") == files_documents
+                        and files_value(lines, "moment") is None, "Documents as it is now")
+            ok(f"{FILES_RECEIPTS} came back from the snapshot, {FILES_DIARY} after the question, and the "
+               "copy that was there went to the trash")
+
+            run(f"printf 'Older\\n' > ~/Documents/{FILES_FOLDER}/'{FILES_UNDER}'",
+                "a file under another folder for the search")
+            files_set("search", FILES_DIARY.removesuffix(".txt"), "the search field with a word in it")
+            files_until(60, lambda lines: files_value(lines, "search-kind") == "name"
+                        and f"row file {FILES_DIARY} in {FILES_DIARY}" in lines
+                        and f"row file {FILES_UNDER} in {FILES_FOLDER}/{FILES_UNDER}" in lines,
+                        "what the names found in Documents and under it")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            shot(f"{stem}-files-search{extension}", "files-search")
+            ok(f"the search field found {FILES_DIARY} and {FILES_UNDER} by name, in Documents and under it")
+
+            if args.models:
+                # by meaning, through quasar's index of home from step 4c. it is an index of home, so
+                # the search runs from home, and the file it finds shares no word with the question
+                files_set("escape", "now", "Escape, which closes the field")
+                files_set("place", "home", "Home in the sidebar")
+                files_until(30, lambda lines: files_value(lines, "location") == files_home
+                            and files_value(lines, "ready") == "yes", "Home for the search by meaning")
+                files_set("meaning", FILES_MEANING, f"a search for {FILES_MEANING}")
+                files_meaning = files_until(180, lambda lines: files_value(lines, "search-kind") == "meaning"
+                                            and (files_value(lines, "search-problem") is not None
+                                                 or any(line.startswith("row file ") for line in lines)),
+                                            f"what the index found for {FILES_MEANING}")
+                files_why = files_value(files_meaning, "search-problem")
+                if files_why:
+                    fail(f"the search by meaning said {files_why!r}, and step 4c indexed home")
+                files_rows = [line for line in files_meaning if line.startswith("row ")]
+                if not files_rows or not files_rows[0].endswith(f" in {FILES_FOUND}"):
+                    fail(f"the search for {FILES_MEANING!r} put {files_rows[:1]} first, expected {FILES_FOUND}")
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                shot(f"{stem}-files-meaning{extension}", "files-meaning")
+                ok(f"the search for {FILES_MEANING!r} put {FILES_FOUND} first, by meaning, from the index "
+                   "Quasar's model made of home")
+                files_set("escape", "now", "Escape, which closes the field")
 
             files_set("close", "now", "Files' close button")
             if not wait_for(60, lambda: not app_windows(FILES_APP_ID, "Files' window after it closed")):
