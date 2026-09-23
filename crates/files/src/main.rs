@@ -8,10 +8,15 @@
 //! `rift-files` opens a window on home, and `rift-files <folder>` one on that folder, or on the
 //! folder of a file with the file selected; with Files running, it asks that one for the window.
 //! `rift-files --set <name> <value>` does what pressing it would in the window in front, and
-//! `rift-files --state` prints what that window shows.
+//! `rift-files --state` prints what that window shows. `rift-files --bus` is what the session bus
+//! starts when an app asks for the file manager: the app with no window until the call says what
+//! to show.
 
 mod actions;
 mod browser;
+// the FileManager1 interface on the session bus, which is a bus and so a linux one
+#[cfg(target_os = "linux")]
+mod bus;
 mod control;
 mod dialogs;
 mod find;
@@ -33,7 +38,7 @@ use control::Command;
 // the colours, the rows, the menus and the icons, which Settings and Welcome draw with too
 use rift_ui::{icons, theme, widgets};
 
-const USAGE: &str = "Usage: rift-files [<folder or file>...] [--screenshot <png>]\n       rift-files [--set <name> <value> | --state]";
+const USAGE: &str = "Usage: rift-files [<folder or file>...] [--screenshot <png>]\n       rift-files [--bus | --set <name> <value> | --state]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,6 +56,7 @@ fn main() -> ExitCode {
             println!("rift-files {}", librift::VERSION);
             ExitCode::SUCCESS
         }
+        ["--bus"] => serve(),
         ["--state"] => match control::ask(&Command::State) {
             Ok(lines) => {
                 print!("{lines}");
@@ -66,6 +72,22 @@ fn main() -> ExitCode {
             fail(&format!("rift-files: unknown option {other}\n{USAGE}"))
         }
         paths => open(paths, None),
+    }
+}
+
+/// Answer on the session bus with no window open, which is how the bus starts Files for a call to
+/// `org.freedesktop.FileManager1`. A Files that is already running has the name, so there is
+/// nothing to do.
+fn serve() -> ExitCode {
+    if control::already_open() {
+        return ExitCode::SUCCESS;
+    }
+    match ui::run(ui::Start {
+        bus: true,
+        ..ui::Start::default()
+    }) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => fail(&format!("rift-files: {why}")),
     }
 }
 
@@ -93,6 +115,7 @@ fn open(given: &[&str], screenshot: Option<PathBuf>) -> ExitCode {
     match ui::run(ui::Start {
         open: paths,
         screenshot,
+        bus: false,
     }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => fail(&format!("rift-files: {why}")),

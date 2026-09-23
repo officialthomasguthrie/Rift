@@ -184,6 +184,9 @@ pub struct Browser {
     pub stamp: crate::ui::Stamp,
     /// Names to select once the folder has been read again: what was just made, pasted or left.
     pub select_after: Vec<OsString>,
+    /// Whether to show what is known about the selection once the folder has been read, which is
+    /// what `ShowItemProperties` on the bus asks for.
+    pub properties_after: bool,
 }
 
 impl Browser {
@@ -217,6 +220,7 @@ impl Browser {
             toasts: 0,
             stamp: Vec::new(),
             select_after: Vec::new(),
+            properties_after: false,
         }
     }
 

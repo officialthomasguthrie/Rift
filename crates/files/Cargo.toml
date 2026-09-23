@@ -29,6 +29,8 @@ image = { version = "0.25.9", default-features = false, features = ["png"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 # a copy on btrfs shares the blocks of the file it copies, and a rename never writes over a name
 rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
+# the FileManager1 interface on the session bus, the same zbus librift asks the system bus with
+zbus = { version = "5.18", default-features = false, features = ["async-io", "blocking-api"] }
 
 [lints]
 workspace = true

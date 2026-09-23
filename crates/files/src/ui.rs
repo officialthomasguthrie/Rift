@@ -41,6 +41,10 @@ const HEIGHT: f32 = 640.0;
 /// How often the folders on screen are looked at for a change.
 const LOOK: Duration = Duration::from_secs(1);
 
+/// How long an app the session bus started waits for the call that follows before it gives up and
+/// ends. Nothing is on screen in the meantime, so nothing is taken away from anyone.
+const BUS_WAIT: Duration = Duration::from_secs(30);
+
 /// What a place's own folders said when they were last read: each one's time and size.
 pub type Stamp = Vec<(i64, i64, u64)>;
 
@@ -51,6 +55,9 @@ pub struct Start {
     pub open: Vec<PathBuf>,
     /// Where to save a picture of the first window once it has drawn, and then quit.
     pub screenshot: Option<PathBuf>,
+    /// Whether the session bus started the app: it opens no window of its own and waits for the
+    /// call that follows to say what to show.
+    pub bus: bool,
 }
 
 /// What Cut and Copy put on the app's clipboard.
@@ -108,6 +115,22 @@ pub struct Files {
     picture: Option<PathBuf>,
     /// Whether the picture `--screenshot` asked for is on its way.
     shooting: bool,
+    /// While the session bus started the app and no window has opened yet: when to give up
+    /// waiting for the call that follows.
+    waiting: Option<std::time::Instant>,
+}
+
+/// What an app on the session bus asked Files to show, through `org.freedesktop.FileManager1`.
+// only the bus makes one, and a bus is a linux thing
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Show {
+    /// These files, each in the folder it is in and selected there.
+    Items(Vec<PathBuf>),
+    /// These folders.
+    Folders(Vec<PathBuf>),
+    /// What is known about these files, in the Properties dialog over their folder.
+    Properties(Vec<PathBuf>),
 }
 
 /// What can be done to the selection or in a folder, from a menu, a key or the socket.
@@ -269,6 +292,9 @@ pub enum Message {
     Pasted(window::Id, Option<String>),
     /// A line from the socket.
     Said(Command),
+    /// An app on the session bus asked for something to be shown.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Show(Show),
     /// A picture of a window.
     Shot(window::Screenshot),
     /// A window has opened.
@@ -377,9 +403,13 @@ fn boot(start: &Start) -> (Files, Task<Message>) {
         screenshot: start.screenshot.clone(),
         picture: None,
         shooting: false,
+        waiting: start.bus.then(|| std::time::Instant::now() + BUS_WAIT),
     };
     state.trash_full = state.anything_trashed();
-    let work: Vec<Task<Message>> = if start.open.is_empty() {
+    let work: Vec<Task<Message>> = if start.bus {
+        // the call that started the app says what to show, and opens the window for it
+        Vec::new()
+    } else if start.open.is_empty() {
         vec![open_window(&mut state, home_location(), None)]
     } else {
         start
@@ -785,6 +815,7 @@ fn answered(state: &mut Files, message: Message) -> Task<Message> {
         Message::Unlocked(id, drive, done) => actions::unlocked(state, id, &drive, *done),
         Message::Pasted(id, text) => actions::pasted(state, id, text.as_deref()),
         Message::Said(command) => said(state, command),
+        Message::Show(what) => shown(state, what),
         Message::Shot(shot) => {
             let path = state.picture.take().or_else(|| state.screenshot.clone());
             if let Some(path) = &path
@@ -940,7 +971,25 @@ fn arrived(
             Task::none()
         }
     };
-    Task::batch([shown, thumbs::want(state, id), shoot(state)])
+    Task::batch([
+        shown,
+        asked_about(state, id),
+        thumbs::want(state, id),
+        shoot(state),
+    ])
+}
+
+/// What is known about the selection, for a window a `ShowItemProperties` call opened: the folder
+/// has been read now, so there is something to say about what it selected.
+fn asked_about(state: &mut Files, id: window::Id) -> Task<Message> {
+    let asked = state
+        .windows
+        .get_mut(&id)
+        .is_some_and(|browser| std::mem::take(&mut browser.properties_after));
+    if !asked {
+        return Task::none();
+    }
+    actions::act(state, id, Act::Properties)
 }
 
 /// What udisks says is plugged in now. A drive coming or going takes its own trash with it, so a
@@ -970,6 +1019,14 @@ fn drives_read(state: &mut Files, found: Vec<Volume>) -> Task<Message> {
 
 /// Look at every window's place for a change, and at the trash and the colours.
 fn tick(state: &mut Files) -> Task<Message> {
+    // an app the bus started that was never told what to show ends rather than sit there
+    if let Some(until) = state.waiting {
+        if !state.windows.is_empty() || state.busy() {
+            state.waiting = None;
+        } else if std::time::Instant::now() > until {
+            return iced::exit();
+        }
+    }
     let look = Look::read();
     if look != state.look {
         state.look = look;
@@ -1015,6 +1072,64 @@ fn said(state: &mut Files, command: Command) -> Task<Message> {
     }
 }
 
+/// What an app on the bus asked to be shown: a window for each folder, with the files it named in
+/// that folder selected, and Properties over the first of them when it asked for that. A window is
+/// opened for it whether or not one is open already, the way a call that starts Files opens one.
+fn shown(state: &mut Files, what: Show) -> Task<Message> {
+    match what {
+        Show::Items(paths) => in_folders(state, &paths, false),
+        Show::Properties(paths) => in_folders(state, &paths, true),
+        Show::Folders(paths) => {
+            let mut work = Vec::new();
+            for path in &paths {
+                work.push(open_path(state, path));
+            }
+            Task::batch(work)
+        }
+    }
+}
+
+/// One window for each folder the files are in, with the files in it selected once it has been
+/// read. A folder named here is shown in the folder over it, selected, which is what Show in
+/// folder means for a folder.
+fn in_folders(state: &mut Files, paths: &[PathBuf], properties: bool) -> Task<Message> {
+    let mut folders: Vec<(PathBuf, Vec<OsString>)> = Vec::new();
+    for path in paths {
+        let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
+            continue;
+        };
+        if !folder.is_dir() {
+            continue;
+        }
+        match folders.iter_mut().find(|(there, _)| there == folder) {
+            Some((_, names)) => names.push(name.to_owned()),
+            None => folders.push((folder.to_path_buf(), vec![name.to_owned()])),
+        }
+    }
+    let mut work = Vec::new();
+    for (folder, names) in folders {
+        work.push(open_showing(state, folder, names, properties));
+    }
+    Task::batch(work)
+}
+
+/// A window on a folder with these names selected once it has been read, and what is known about
+/// them over it when the call asked for that.
+fn open_showing(
+    state: &mut Files,
+    folder: PathBuf,
+    names: Vec<OsString>,
+    properties: bool,
+) -> Task<Message> {
+    let opening = open_window(state, Location::Folder(folder), None);
+    // the window it opened is the one in front, and the one to select in when it has been read
+    if let Some(browser) = state.front.and_then(|id| state.windows.get_mut(&id)) {
+        browser.select_after = names;
+        browser.properties_after = properties;
+    }
+    opening
+}
+
 /// Take a picture of the window in front for `--set picture`.
 pub fn picture(state: &mut Files, path: PathBuf) -> Task<Message> {
     let Some(id) = state.front_id() else {
@@ -1037,6 +1152,8 @@ fn subscription(state: &Files) -> Subscription<Message> {
         followed.push(terminal());
         followed.push(ticking());
         followed.push(disks());
+        #[cfg(target_os = "linux")]
+        followed.push(crate::bus::serve());
     }
     Subscription::batch(followed)
 }

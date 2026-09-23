@@ -1,9 +1,29 @@
 # the file manager, rift-files from the workspace package: its row in the Applications menu, the
-# app every folder opens in, and the folders of home it and every other app look for. xdg-open, a
-# gtk app that opens a folder and the portal's OpenDirectory all ask for the app of inode/directory,
-# which was disk usage analyzer's until files claimed it
-{ lib, pkgs, ... }:
+# app every folder opens in, the name it answers to on the session bus, and the folders of home it
+# and every other app look for. xdg-open, a gtk app that opens a folder and the portal's
+# OpenDirectory all ask for the app of inode/directory, which was disk usage analyzer's until files
+# claimed it
+{
+  lib,
+  pkgs,
+  self,
+  ...
+}:
 let
+  workspace = self.packages.${pkgs.stdenv.hostPlatform.system}.workspace;
+  # the name every file manager answers to, which an app calls to show a file in its folder rather
+  # than open it: the portal's OpenDirectory and a browser's Show in folder both do. with the
+  # service file the bus can start files for a call when it is not running, and --bus is the app
+  # with no window until that call says what to show
+  fileManager = pkgs.writeTextFile {
+    name = "rift-files-dbus-service";
+    destination = "/share/dbus-1/services/org.freedesktop.FileManager1.service";
+    text = ''
+      [D-BUS Service]
+      Name=org.freedesktop.FileManager1
+      Exec=${workspace}/bin/rift-files --bus
+    '';
+  };
   # the folders of home, the way xdg-user-dirs names them. glib reads this file, so the file chooser
   # lists the folders, a browser saves downloads in Downloads and the camera saves in Pictures. a
   # desktop of icons, templates and a public folder are not part of rift, so those three are home
@@ -23,6 +43,8 @@ let
 in
 {
   environment.systemPackages = [
+    fileManager
+
     # the program that makes the small picture of a file for the grid in files. the freedesktop
     # thumbnailers are named by .thumbnailer files under share/thumbnailers, which the system links
     # into its own share; gdk-pixbuf's covers png, jpeg, gif, bmp, tiff and the icon formats, and

@@ -23,8 +23,10 @@ pub const TALL: f32 = 152.0;
 const PICTURE: f32 = 84.0;
 /// How big the icon of a file with no picture is drawn.
 const ICON: f32 = 48.0;
-/// How much room the name under a picture has: two lines of it.
-const NAME: f32 = 36.0;
+/// How much room the name under a picture has: two lines of it. Two lines of 14 px text are 36.4
+/// px, so a box of 36 clips the second line by a fraction, which the software renderer draws as a
+/// row of the tips of its descenders under the tile.
+const NAME: f32 = 38.0;
 
 /// How many tiles stand across the part of a window the folder is in.
 #[must_use]

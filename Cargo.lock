@@ -1430,6 +1430,7 @@ dependencies = [
  "librift",
  "rift-ui",
  "rustix 1.1.4",
+ "zbus",
 ]
 
 [[package]]
