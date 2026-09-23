@@ -429,6 +429,17 @@ DRIVE_EXCHANGE = "/exchange"
 DRIVE_LABEL = "STICK"
 DRIVE_MOUNT = f"/run/media/rift/{DRIVE_LABEL}"
 DRIVE_FILE = "handover.txt"
+# the locked disk --locked attaches: the luks label it carries, the file system inside it, the
+# passphrase the dialog takes and the file that is on it. the sidebar names it by whatever udisks
+# says, so the step finds it by being the one that is locked
+DRIVE_LOCKED = "LOCKED"
+DRIVE_INSIDE = "PRIVATE"
+DRIVE_INSIDE_MOUNT = f"/run/media/rift/{DRIVE_INSIDE}"
+DRIVE_SECRET = "rift-locked"
+DRIVE_WRONG = "not the passphrase"
+DRIVE_KEPT = "holiday.txt"
+# the pictures step 5q puts in Pictures for the grid, beside the one step 5n opened
+PICTURES = ("Harbour at dusk", "Coast road", "Pine ridge")
 # one window of `horizon msg --json windows`, whose fields come in the order niri-ipc declares them
 WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
@@ -1447,6 +1458,8 @@ def main():
                     "and boot the clone")
     ap.add_argument("--stick", help=f"an image holding one file system labelled {DRIVE_LABEL}, attach it as a "
                     "removable disk and mount it, copy onto it and eject it from Files")
+    ap.add_argument("--locked", help=f"an image holding one luks2 volume labelled {DRIVE_LOCKED} with a file "
+                    f"system labelled {DRIVE_INSIDE} in it, attach it as a removable disk and unlock it from Files")
     ap.add_argument("--flatpak", help="the directory nix build .#test-flatpak makes, with a signed repository and its "
                     "key: add it as a remote, install its app from Welcome and run it with the portals")
     ap.add_argument("--offline", help="boot with no network card, check Welcome opens on the page that says so, save "
@@ -1507,7 +1520,7 @@ def main():
         # and one for backups. vault mounts it by the uuid of its file system
         cmd += ["-drive", f"if=none,id=backup,format=raw,file={os.path.abspath(args.backup)}",
                 "-device", "nvme,drive=backup,serial=backup"]
-    if args.clone or args.stick:
+    if args.clone or args.stick or args.locked:
         # a scsi controller for the disks that say they are removable, the way a stick in a card
         # reader does
         cmd += ["-device", "virtio-scsi-pci,id=scsi"]
@@ -1520,6 +1533,10 @@ def main():
         # and a memory stick with a file system on it, which Files mounts through udisks
         cmd += ["-drive", f"if=none,id=stick,format=raw,file={os.path.abspath(args.stick)}",
                 "-device", "scsi-hd,bus=scsi.0,drive=stick,serial=stick,removable=on"]
+    if args.locked:
+        # and an encrypted stick, which Files unlocks with the passphrase typed into its dialog
+        cmd += ["-drive", f"if=none,id=locked,format=raw,file={os.path.abspath(args.locked)}",
+                "-device", "scsi-hd,bus=scsi.0,drive=locked,serial=locked,removable=on"]
     print("boot-test: " + " ".join(cmd), flush=True)
 
     start = time.monotonic()
@@ -6361,9 +6378,10 @@ def main():
                 if drive_listed[DRIVE_LABEL] != ("there", "none"):
                     fail(f"Files says {DRIVE_LABEL} is {drive_listed[DRIVE_LABEL]}, and nothing is mounted "
                          "by itself")
-                if list(drive_listed) != [DRIVE_LABEL]:
-                    fail(f"Files lists the disks {list(drive_listed)}, and only a disk a person plugged in "
-                         "belongs there: the backup disk of this machine is not one")
+                drive_wanted = 2 if args.locked else 1
+                if len(drive_listed) != drive_wanted:
+                    fail(f"Files lists the disks {sorted(drive_listed)}, expected {drive_wanted} of them: only a "
+                         "disk a person plugged in belongs there, and the backup disk of this machine is not one")
                 files_set("drive", DRIVE_LABEL, f"{DRIVE_LABEL} in the sidebar")
                 drive_found = files_until(120, lambda lines: drive_lines(lines).get(DRIVE_LABEL)
                                           == ("mounted", DRIVE_MOUNT)
@@ -6548,6 +6566,104 @@ def main():
                 ok(f"the search for {FILES_MEANING!r} put {FILES_FOUND} first, by meaning, from the index "
                    "Quasar's model made of home")
                 files_set("escape", "now", "Escape, which closes the field")
+
+            # 5q. pictures. the grid is the other way to show a folder: a tile for each thing with
+            # the small picture of a file that has one, made by the freedesktop thumbnailers the
+            # image has and kept in the owner's own cache. then what is known about one file, in the
+            # Properties dialog, and last the encrypted disk, which is unlocked with the passphrase
+            # typed into its dialog and mounted and opened
+            files_set("escape", "now", "Escape, in case a field is open")
+            for picture_name in PICTURES:
+                run(f"cp /run/current-system/sw/share/backgrounds/rift/{PICTURE}.jpg "
+                    f"'{files_home}/Pictures/{picture_name}.jpg'", f"{picture_name}.jpg in Pictures")
+            files_set("place", "pictures", "Pictures in the sidebar")
+            files_until(60, lambda lines: files_value(lines, "location") == f"{files_home}/Pictures"
+                        and all(f"row file {name}.jpg" in lines for name in PICTURES),
+                        "the pictures in Pictures")
+            files_set("view", "grid", "the grid")
+            files_until(180, lambda lines: files_value(lines, "view") == "grid"
+                        and int(files_value(lines, "thumbnails") or 0) >= len(PICTURES),
+                        "a small picture for each of the pictures")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            look(f"{FILES_APP} showing Pictures as a grid", f"{stem}-files-grid{extension}", 120,
+                 apps=[FILES_APP], journals=("horizon",), settle=3)
+            # the cache is the freedesktop one: a png of the file's address in md5, readable by the
+            # owner alone, with the address and the time of the file written into it
+            _, picture_said = run("ls -1 ~/.cache/thumbnails/normal | wc -l; "
+                                  "stat -c %a ~/.cache/thumbnails/normal/*.png | sort -u | head -2; "
+                                  "grep -al 'Thumb::URI' ~/.cache/thumbnails/normal/*.png | wc -l",
+                                  "the pictures in the cache")
+            picture_said = [line.strip() for line in without_console(picture_said).splitlines() if line.strip()]
+            picture_made = [line for line in picture_said if line.isdigit()]
+            if len(picture_made) < 2 or int(picture_made[0]) < len(PICTURES) \
+                    or int(picture_made[-1]) < len(PICTURES) or "600" not in picture_said:
+                fail(f"~/.cache/thumbnails/normal holds {picture_said!r}, expected at least {len(PICTURES)} "
+                     "pngs with Thumb::URI in them, readable by the owner alone")
+            ok(f"the grid drew a small picture of each of {len(PICTURES) + 1} photographs, made by the image's own "
+               f"thumbnailers and kept as {picture_made[0]} pngs in ~/.cache/thumbnails/normal")
+
+            files_select(f"{PICTURES[0]}.jpg")
+            files_set("properties", "now", "Properties")
+            picture_lines = files_until(60, lambda lines: files_value(lines, "dialog") == "properties"
+                                        and files_value(lines, "property pixels") is not None,
+                                        f"what is known about {PICTURES[0]}.jpg")
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+            shot(f"{stem}-files-properties{extension}", "files-properties")
+            picture_facts = {key: files_value(picture_lines, f"property {key}")
+                             for key in ("name", "kind", "size", "where", "changed", "pixels", "permissions")}
+            picture_wide = re.match(r"^(\d+) by (\d+)$", picture_facts["pixels"] or "")
+            if picture_facts["name"] != f"{PICTURES[0]}.jpg" or picture_facts["kind"] != "image/jpeg" \
+                    or picture_facts["where"] != "Pictures" or not picture_wide \
+                    or int(picture_wide.group(1)) < 100 or not picture_facts["permissions"] \
+                    or not picture_facts["changed"] or not picture_facts["size"]:
+                fail(f"Properties says {picture_facts!r} about {PICTURES[0]}.jpg")
+            files_set("escape", "now", "Close")
+            files_until(30, lambda lines: files_value(lines, "dialog") == "none", "the dialog closed")
+            files_set("view", "list", "the list again")
+            files_until(30, lambda lines: files_value(lines, "view") == "list", "the list again")
+            ok(f"Properties says {PICTURES[0]}.jpg is a {picture_facts['kind']} of {picture_facts['size']}, "
+               f"{picture_facts['pixels']} pixels, in {picture_facts['where']}, changed {picture_facts['changed']}, "
+               f"{picture_facts['permissions']}")
+
+            if args.locked:
+                def locked_disks(lines):
+                    """The disks Files says are locked, by name."""
+                    return [name for name, (state, _) in drive_lines(lines).items() if state == "locked"]
+
+                locked_found = files_until(180, lambda lines: len(locked_disks(lines)) == 1,
+                                           "the encrypted disk in the sidebar, locked")
+                locked_name = locked_disks(locked_found)[0]
+                if drive_lines(locked_found)[locked_name][1] != "none":
+                    fail(f"Files says the encrypted disk is {drive_lines(locked_found)[locked_name]}, expected "
+                         "locked and mounted nowhere")
+                files_set("unlock", locked_name, f"a press on {locked_name}")
+                files_until(30, lambda lines: files_value(lines, "dialog") == "unlock",
+                            "the dialog that asks for the passphrase")
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                shot(f"{stem}-files-unlock{extension}", "files-unlock")
+                files_set("type", DRIVE_WRONG, "a passphrase that does not open it")
+                files_set("confirm", "now", "Unlock")
+                files_until(120, lambda lines: files_value(lines, "dialog") == "unlock"
+                            and files_value(lines, "dialog-problem") is not None,
+                            "what a wrong passphrase says")
+                files_set("type", DRIVE_SECRET, "the passphrase")
+                files_set("confirm", "now", "Unlock again")
+                files_until(180, lambda lines: files_value(lines, "location") == DRIVE_INSIDE_MOUNT
+                            and files_value(lines, "ready") == "yes"
+                            and files_value(lines, "dialog") == "none",
+                            f"{DRIVE_INSIDE} unlocked, mounted and open")
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                look(f"{FILES_APP} on the disk it unlocked", f"{stem}-files-unlocked{extension}", 120,
+                     apps=[FILES_APP], journals=("horizon",), settle=3)
+                _, locked_said = run(f"findmnt --noheadings --output SOURCE,FSTYPE {DRIVE_INSIDE_MOUNT}; "
+                                     f"cat '{DRIVE_INSIDE_MOUNT}/{DRIVE_KEPT}'", "what came out of the locked disk")
+                locked_said = without_console(locked_said)
+                if "/dev/mapper/" not in locked_said or "the beach house" not in locked_said:
+                    fail(f"{DRIVE_INSIDE_MOUNT} is not the file system out of the locked disk: "
+                         f"{locked_said.strip()[-400:]!r}")
+                ok(f"{locked_name} was listed locked and mounted nowhere, refused a wrong passphrase, and with the "
+                   f"right one udisks unlocked it and mounted {DRIVE_INSIDE} at {DRIVE_INSIDE_MOUNT}, which Files "
+                   f"opened with {DRIVE_KEPT} in it")
 
             files_set("close", "now", "Files' close button")
             if not wait_for(60, lambda: not app_windows(FILES_APP_ID, "Files' window after it closed")):

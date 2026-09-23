@@ -500,6 +500,19 @@ jobs:
           # on it. Files mounts it through udisks when its row in the sidebar is pressed
           truncate -s 256M stick.img
           nix shell --inputs-from . nixpkgs#exfatprogs -c mkfs.exfat -L STICK stick.img
+          # an encrypted stick for Files: one luks2 volume with an ext4 inside it, the way a person
+          # encrypts a stick with Disks. mkfs writes the file that is on it without mounting
+          # anything, and the passphrase is the one the test types into Files' dialog
+          truncate -s 128M locked.img
+          printf 'rift-locked' > locked.txt
+          mkdir -p private && printf 'the beach house\n' > private/holiday.txt
+          cryptsetup=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#cryptsetup)/bin/cryptsetup
+          "$cryptsetup" luksFormat --type luks2 --label LOCKED --pbkdf pbkdf2 \
+            --pbkdf-force-iterations 1000 --batch-mode locked.img locked.txt
+          sudo "$cryptsetup" open --key-file locked.txt locked.img rift-locked-test
+          sudo mkfs.ext4 -q -F -L PRIVATE -d private /dev/mapper/rift-locked-test
+          sudo "$cryptsetup" close rift-locked-test
+          rm -r private locked.txt
           # the disk the clone goes onto. sparse, the clone fills about 7G of it, and the runner has
           # more than 80G free. the first drive has an exchange partition, so the clone gets one too
           truncate -s 26G clone.img
@@ -509,7 +522,7 @@ jobs:
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --models models/cache \
             --exchange 1G --log serial.log --splash splash.png --desktop desktop.png --lens \
             --updates updates.img --backup backup.img --clone clone.img --stick stick.img \
-            --flatpak test-flatpak --timeout 2400
+            --locked locked.img --flatpak test-flatpak --timeout 2400
       - name: Boot a drive that makes persist at its first boot
         # rift-flash leaves persist out, the way it writes a drive on macos and windows. the drive
         # asks for a passphrase over serial, makes persist and formats its exchange partition, and the
