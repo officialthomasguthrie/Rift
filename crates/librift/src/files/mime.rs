@@ -423,7 +423,7 @@ fn class(pattern: &[char], at: usize, wanted: char) -> Option<(bool, usize)> {
 
 /// The data directories, the owner's first, then the session's, then the system profile, where the
 /// image's database is even when the environment is thin.
-fn data_dirs() -> Vec<PathBuf> {
+pub(crate) fn data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut push = |dir: PathBuf| {
         if !dirs.contains(&dir) {

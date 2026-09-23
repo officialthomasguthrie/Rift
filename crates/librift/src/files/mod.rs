@@ -6,6 +6,7 @@
 
 pub mod mime;
 pub mod places;
+pub mod thumbnails;
 pub mod trash;
 
 use std::cmp::Ordering;
@@ -142,6 +143,8 @@ pub struct Options {
     pub sort: Sort,
     /// Whether it runs from the other end of that order.
     pub reversed: bool,
+    /// Whether a folder is shown as a grid of pictures rather than a list of rows.
+    pub grid: bool,
 }
 
 impl Options {
@@ -154,8 +157,8 @@ impl Options {
             .unwrap_or_default()
     }
 
-    /// The options a file holds: `hidden on` and `sort size reversed`, a line each. A line that is
-    /// not one of them is left out.
+    /// The options a file holds: `hidden on`, `sort size reversed` and `view grid`, a line each. A
+    /// line that is not one of them is left out.
     #[must_use]
     pub fn parse(text: &str) -> Self {
         let mut options = Self::default();
@@ -163,6 +166,7 @@ impl Options {
             let mut words = line.split_whitespace();
             match (words.next(), words.next(), words.next()) {
                 (Some("hidden"), Some(value), None) => options.hidden = value == "on",
+                (Some("view"), Some(value), None) => options.grid = value == "grid",
                 (Some("sort"), Some(word), rest) => {
                     if let Some(sort) = Sort::from_word(word) {
                         options.sort = sort;
@@ -179,10 +183,11 @@ impl Options {
     #[must_use]
     pub fn text(self) -> String {
         format!(
-            "hidden {}\nsort {}{}\n",
+            "hidden {}\nsort {}{}\nview {}\n",
             if self.hidden { "on" } else { "off" },
             self.sort.word(),
-            if self.reversed { " reversed" } else { "" }
+            if self.reversed { " reversed" } else { "" },
+            if self.grid { "grid" } else { "list" }
         )
     }
 
@@ -638,6 +643,115 @@ fn counted(stem: &str, copy: bool) -> (&str, u32) {
     number.map_or((stem, first), |number| (&stem[..open], number))
 }
 
+/// How wide and tall a picture is, read out of the front of the file itself rather than by
+/// decoding it: png, jpeg, gif, bmp and webp say so in their first bytes. Nothing for a file that
+/// is not one of those, or one that is cut short.
+#[must_use]
+pub fn picture_size(path: &Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+
+    let mut front = vec![0u8; FRONT];
+    let mut file = fs::File::open(path).ok()?;
+    let mut read = 0;
+    while read < front.len() {
+        match file.read(&mut front[read..]) {
+            Ok(0) => break,
+            Ok(more) => read += more,
+            Err(_) => return None,
+        }
+    }
+    front.truncate(read);
+    size_in(&front)
+}
+
+/// How much of a file is read to find the size of the picture in it. A jpeg can carry a lot of
+/// notes about the camera before it says how big it is.
+const FRONT: usize = 256 * 1024;
+
+/// The size a picture's first bytes say it is.
+#[must_use]
+fn size_in(front: &[u8]) -> Option<(u32, u32)> {
+    let big = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(front.get(at..at + 4)?.try_into().ok()?))
+    };
+    let small = |at: usize| -> Option<u32> {
+        Some(u32::from(u16::from_le_bytes(
+            front.get(at..at + 2)?.try_into().ok()?,
+        )))
+    };
+    if front.starts_with(b"\x89PNG\r\n\x1a\n") && front.get(12..16) == Some(b"IHDR") {
+        return Some((big(16)?, big(20)?));
+    }
+    if front.starts_with(b"GIF87a") || front.starts_with(b"GIF89a") {
+        return Some((small(6)?, small(8)?));
+    }
+    if front.starts_with(b"BM") {
+        let width = u32::from_le_bytes(front.get(18..22)?.try_into().ok()?);
+        let height = u32::from_le_bytes(front.get(22..26)?.try_into().ok()?);
+        return Some((
+            width,
+            i32::try_from(height).map_or(height, i32::unsigned_abs),
+        ));
+    }
+    if front.starts_with(b"RIFF") && front.get(8..12) == Some(b"WEBP") {
+        return webp_size(front);
+    }
+    if front.starts_with(b"\xff\xd8") {
+        return jpeg_size(front);
+    }
+    None
+}
+
+/// The size a webp says it is: the extended header, the lossy one or the lossless one.
+fn webp_size(front: &[u8]) -> Option<(u32, u32)> {
+    let three = |at: usize| -> Option<u32> {
+        let bytes = front.get(at..at + 3)?;
+        Some(u32::from(bytes[0]) | u32::from(bytes[1]) << 8 | u32::from(bytes[2]) << 16)
+    };
+    match front.get(12..16)? {
+        b"VP8X" => Some((three(24)? + 1, three(27)? + 1)),
+        b"VP8 " => {
+            let width = u16::from_le_bytes(front.get(26..28)?.try_into().ok()?) & 0x3fff;
+            let height = u16::from_le_bytes(front.get(28..30)?.try_into().ok()?) & 0x3fff;
+            Some((u32::from(width), u32::from(height)))
+        }
+        b"VP8L" => {
+            let bits = u32::from_le_bytes(front.get(21..25)?.try_into().ok()?);
+            Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+        }
+        _ => None,
+    }
+}
+
+/// The size a jpeg says it is, which stands in the frame header, after however many notes the
+/// camera wrote in front of it.
+fn jpeg_size(front: &[u8]) -> Option<(u32, u32)> {
+    let mut at = 2;
+    while at + 9 < front.len() {
+        if front[at] != 0xff {
+            at += 1;
+            continue;
+        }
+        let marker = front[at + 1];
+        let length = usize::from(u16::from_be_bytes([front[at + 2], front[at + 3]]));
+        // the frame headers, which say how big the picture is; the four that are not are tables
+        if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+            let height = u16::from_be_bytes([front[at + 5], front[at + 6]]);
+            let width = u16::from_be_bytes([front[at + 7], front[at + 8]]);
+            return Some((u32::from(width), u32::from(height)));
+        }
+        if matches!(marker, 0xd8 | 0xd9 | 0x01) || (0xd0..=0xd7).contains(&marker) {
+            at += 2;
+            continue;
+        }
+        if length < 2 {
+            return None;
+        }
+        at += 2 + length;
+    }
+    None
+}
+
 /// A path as a `file://` address, each byte outside the unreserved ones and the slash written as
 /// `%XX`, the way `GLib` writes a file's uri.
 #[must_use]
@@ -935,13 +1049,44 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_says_how_big_it_is_in_its_first_bytes() {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1920u32.to_be_bytes());
+        png.extend_from_slice(&1080u32.to_be_bytes());
+        assert_eq!(size_in(&png), Some((1920, 1080)));
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&640u16.to_le_bytes());
+        gif.extend_from_slice(&480u16.to_le_bytes());
+        assert_eq!(size_in(&gif), Some((640, 480)));
+        // a jpeg with a note in front of the frame header, the way a camera writes one
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1, 0x00, 0x06, 1, 2, 3, 4];
+        jpeg.extend_from_slice(&[0xff, 0xc0, 0x00, 0x11, 8]);
+        // the frame header says how tall it is before how wide
+        jpeg.extend_from_slice(&600u16.to_be_bytes());
+        jpeg.extend_from_slice(&800u16.to_be_bytes());
+        jpeg.extend_from_slice(&[0; 8]);
+        assert_eq!(size_in(&jpeg), Some((800, 600)));
+        assert_eq!(size_in(b"not a picture at all"), None);
+        let folder = temporary("picture");
+        fs::write(folder.join("a.png"), &png).unwrap();
+        assert_eq!(picture_size(&folder.join("a.png")), Some((1920, 1080)));
+        assert_eq!(picture_size(&folder.join("nowhere.png")), None);
+    }
+
+    #[test]
     fn the_options_read_back_from_their_file() {
         let options = Options {
             hidden: true,
             sort: Sort::Modified,
             reversed: true,
+            grid: true,
         };
-        assert_eq!(options.text(), "hidden on\nsort modified reversed\n");
+        assert_eq!(
+            options.text(),
+            "hidden on\nsort modified reversed\nview grid\n"
+        );
         assert_eq!(Options::parse(&options.text()), options);
         assert_eq!(
             Options::parse("sort nowhere\nhidden maybe\n"),

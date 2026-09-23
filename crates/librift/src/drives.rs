@@ -309,6 +309,37 @@ mod asking {
         Ok(PathBuf::from(where_it_went))
     }
 
+    /// Unlock an encrypted volume with a passphrase, and say what came out of it: the object of
+    /// the file system inside, which is the one to mount. udisks holds the passphrase only as long
+    /// as the call takes.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when the passphrase does not open it, when udisks refuses, or when the volume is
+    /// not there.
+    pub fn unlock(id: &str, passphrase: &str) -> Result<String, String> {
+        let connection = bus::connect(TIMEOUT)?;
+        let options: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+        let inside: OwnedObjectPath = on(&connection, id, ENCRYPTED)?
+            .call("Unlock", &(passphrase, options))
+            .map_err(|e| wrong_passphrase(e, "unlock"))?;
+        Ok(inside.to_string())
+    }
+
+    /// The sentence for an unlock that did not happen. A passphrase that does not open the volume
+    /// is the everyday answer, and udisks says so in a message of its own.
+    fn wrong_passphrase(error: zbus::Error, doing: &str) -> String {
+        if let zbus::Error::MethodError(_, Some(said), _) = &error
+            && (said.contains("No key available")
+                || said.contains("Failed to activate device")
+                || said.contains("wrong passphrase")
+                || said.contains("Wrong passphrase"))
+        {
+            return "That passphrase does not open this disk.".to_string();
+        }
+        refusal(error, doing)
+    }
+
     /// Unmount a volume, writing out everything that was waiting.
     ///
     /// # Errors
@@ -503,7 +534,7 @@ mod asking {
 }
 
 #[cfg(feature = "bus")]
-pub use asking::{eject, mount, unmount, volumes, watch};
+pub use asking::{eject, mount, unlock, unmount, volumes, watch};
 
 #[cfg(test)]
 mod tests {
