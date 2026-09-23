@@ -827,7 +827,7 @@ fn trash_read(state: &mut Files, id: window::Id, trashed: Vec<Trashed>) -> Task<
     let types = Arc::clone(&state.types);
     state.trash_full = !trashed.is_empty();
     let shown = match state.windows.get_mut(&id) {
-        Some(browser) if browser.location == Location::Trash => {
+        Some(browser) if browser.location == Location::Trash && browser.searching().is_none() => {
             browser.show_trash(trashed, &types, options);
             actions::select_waiting(browser)
         }
@@ -886,7 +886,9 @@ pub fn up(state: &mut Files, id: window::Id) -> Task<Message> {
     read(state, id)
 }
 
-/// A folder has been read. Only the place the window is still at counts.
+/// A folder has been read. Only the place the window is still at counts, and only while the list
+/// is the folder's own: a read that was on its way when the search field was opened would take the
+/// place of what the search found.
 fn arrived(
     state: &mut Files,
     id: window::Id,
@@ -897,7 +899,7 @@ fn arrived(
     let Some(browser) = state.windows.get_mut(&id) else {
         return Task::none();
     };
-    if &browser.location != location {
+    if &browser.location != location || browser.searching().is_some() {
         return Task::none();
     }
     let shown = match found {

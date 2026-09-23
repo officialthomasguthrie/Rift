@@ -147,20 +147,18 @@ fn header(browser: &Browser, id: window::Id, look: Colors) -> Element<'_, Messag
             ..button::Style::default()
         });
     let line = container(space().height(1.0).width(Fill)).style(move |_: &Theme| fill(look.line));
-    let mut tools = row![
-        name,
-        back,
-        forward,
-        path_bar(browser, id, look),
-        tool(
+    let mut tools = row![name, back, forward, path_bar(browser, id, look)]
+        .align_y(Center)
+        .spacing(4)
+        .padding([0, 8]);
+    // the trash is not a folder to walk, so it has nothing to search
+    if browser.location.place().is_some() {
+        tools = tools.push(tool(
             look,
             "edit-find-symbolic",
-            Some(Message::Do(id, Act::Search))
-        ),
-    ]
-    .align_y(Center)
-    .spacing(4)
-    .padding([0, 8]);
+            Some(Message::Do(id, Act::Search)),
+        ));
+    }
     // only home is snapshotted, so only a folder in it has a Timeline to show
     if browser.location.about().is_some_and(timeline::covers) {
         tools = tools.push(tool(

@@ -850,6 +850,9 @@ fn open_search(state: &mut Files, id: window::Id) -> Task<Message> {
     let Some(browser) = state.windows.get_mut(&id) else {
         return Task::none();
     };
+    if !searchable(browser) {
+        return Task::none();
+    }
     browser.typing = None;
     if browser.search.is_none() {
         browser.search = Some(Query {
@@ -865,12 +868,21 @@ fn open_search(state: &mut Files, id: window::Id) -> Task<Message> {
     ])
 }
 
+/// Whether what the window shows can be searched: a folder, or a folder in a moment. The trash is
+/// not a folder to walk, so it has nothing to search.
+fn searchable(browser: &Browser) -> bool {
+    browser.location.place().is_some()
+}
+
 /// What is typed in the search field: the list follows every letter. An empty field brings the
 /// folder itself back.
 pub fn search_typed(state: &mut Files, id: window::Id, typed: String) -> Task<Message> {
     let Some(browser) = state.windows.get_mut(&id) else {
         return Task::none();
     };
+    if !searchable(browser) {
+        return Task::none();
+    }
     browser.search = Some(Query {
         words: typed,
         meaning: false,
