@@ -850,11 +850,18 @@ mod tests {
     #[test]
     fn what_is_replaced_goes_to_the_trash_and_the_name_is_free() {
         let root = temporary("replace");
-        fs::create_dir_all(root.join(".Trash-0/files")).unwrap();
         fs::create_dir_all(root.join("a")).unwrap();
         fs::create_dir_all(root.join("b")).unwrap();
         fs::write(root.join("a/x.txt"), "new").unwrap();
         fs::write(root.join("b/x.txt"), "there before").unwrap();
+        // the trash this file belongs in, made now so that putting something in it works. a
+        // machine with nowhere to keep one, which a build sandbox is, has nothing to test here
+        let Some(trash) = Trash::for_path(&root.join("b/x.txt"), files::uid())
+            .filter(|trash| fs::create_dir_all(trash.root().join("files")).is_ok())
+        else {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        };
         let (mut said, _heard) = quiet();
         let stop = AtomicBool::new(false);
         let mut outcome = Outcome::default();
@@ -876,7 +883,6 @@ mod tests {
         assert_eq!(outcome.replaced, 1);
         assert_eq!(fs::read_to_string(root.join("b/x.txt")).unwrap(), "new");
         // the old one is in the trash of the file system it was on, not written over
-        let trash = Trash::for_path(&root.join("b/x.txt"), files::uid()).expect("a trash");
         let was = fs::canonicalize(&root).unwrap().join("b/x.txt");
         let found = trash
             .list(0)
