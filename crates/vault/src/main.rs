@@ -30,9 +30,10 @@ use slots::Drive;
 use timeline::{Keep, Timeline};
 
 /// What is snapshotted, where the snapshots go, and where the snapshotted subvolume is mounted.
+/// The last two are in librift, since Files reads a folder in a snapshot itself.
 const SUBVOLUME: &str = "/persist/@home";
-const SNAPSHOTS: &str = "/persist/@snapshots/home";
-const HOME: &str = "/home";
+const SNAPSHOTS: &str = librift::vault::SNAPSHOTS;
+const HOME: &str = librift::vault::HOME;
 /// The backup target and its password, restores from a backup on their way, the backup disk while
 /// it is mounted, and where disks are found.
 const STATE: &str = "/var/lib/rift/vault";

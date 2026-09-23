@@ -542,6 +542,69 @@ pub fn rank(index: &Index, query: &[f32], limit: usize) -> Vec<Hit> {
     hits
 }
 
+/// Why a search by meaning could not run. Each caller says it in its own words: a terminal names
+/// the command that makes the index, a window names the page that does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Missing {
+    /// There is no index of home yet.
+    NotIndexed,
+    /// The index is there and holds no file.
+    Empty,
+    /// The embedding model is still loading.
+    Loading,
+    /// The index was made with another model: the one it was made with, then the one Quasar runs.
+    Model(String, String),
+    /// Anything else, as a sentence: no bus, no Quasar, or an index that cannot be read.
+    Failed(String),
+}
+
+/// The files of `home` closest in meaning to `words`, closest first, at most `limit` of them.
+/// Quasar turns the words into a vector; the index, which is the owner's own file, is read here.
+///
+/// # Errors
+///
+/// [`Missing`] when there is no index, the model that made it is not the one Quasar runs, or
+/// Quasar is not answering.
+#[cfg(feature = "bus")]
+pub fn find(
+    home: &Path,
+    cache: Option<&OsStr>,
+    words: &str,
+    limit: usize,
+) -> Result<Vec<Hit>, Missing> {
+    let path = index_path(home, cache);
+    let index = match fs::read(&path) {
+        Ok(bytes) => Index::decode(&bytes).map_err(Missing::Failed)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Missing::NotIndexed),
+        Err(e) => {
+            return Err(Missing::Failed(format!(
+                "Could not read {}: {e}",
+                path.display()
+            )));
+        }
+    };
+    if index.files.is_empty() {
+        return Err(Missing::Empty);
+    }
+    let status = crate::quasar::status().map_err(Missing::Failed)?;
+    match status.embedding_state.as_str() {
+        "ready" => {}
+        "loading" => return Err(Missing::Loading),
+        _ => return Err(Missing::Failed(status.embedding_error)),
+    }
+    if status.embedding_model != index.model {
+        return Err(Missing::Model(index.model, status.embedding_model));
+    }
+    let vectors = crate::quasar::Client::connect()
+        .map_err(Missing::Failed)?
+        .embed(Kind::Query.name(), &[words.to_string()])
+        .map_err(Missing::Failed)?;
+    let vector = vectors
+        .first()
+        .ok_or_else(|| Missing::Failed("Quasar sent no vector for the words.".to_string()))?;
+    Ok(rank(&index, &normalized(vector), limit))
+}
+
 /// Where the index of a home is kept: in `rift` under the owner's cache folder, which is
 /// `$XDG_CACHE_HOME` when it is set and `.cache` in home when it is not.
 #[must_use]

@@ -257,6 +257,13 @@ fn entry(path: &Path, name: OsString, listed: &str, count: bool, types: &mime::D
     }
 }
 
+/// One entry for a file a search found, which is not read as part of a folder: the same as a
+/// folder's own entry, without the folder's `.hidden` list.
+#[must_use]
+pub fn entry_of(path: &Path, name: OsString, types: &mime::Database) -> Entry {
+    entry(path, name, "", true, types)
+}
+
 /// Whether a name is one a list hides: a dot in front, a backup's tilde at the end, or a line of
 /// the folder's `.hidden` file.
 #[must_use]
@@ -416,6 +423,23 @@ pub fn when_words(seconds: i64, now: i64, offset: i32) -> String {
         format!("{date} {month}")
     } else {
         format!("{date} {month} {year}")
+    }
+}
+
+/// A moment the way the Timeline says it: the day the way [`when_words`] says it, with the time
+/// after it, and Today for today. Both times are seconds since 1970 and `offset` is the local
+/// zone's distance from UTC in seconds.
+#[must_use]
+pub fn when_moment(seconds: i64, now: i64, offset: i32) -> String {
+    const DAY: i64 = 86_400;
+    let local = seconds + i64::from(offset);
+    let minutes = local.rem_euclid(DAY) / 60;
+    let clock = format!("{:02}:{:02}", minutes / 60, minutes % 60);
+    let today = (now + i64::from(offset)).div_euclid(DAY) == local.div_euclid(DAY);
+    if today {
+        format!("Today at {clock}")
+    } else {
+        format!("{} at {clock}", when_words(seconds, now, offset))
     }
 }
 
@@ -815,6 +839,9 @@ mod tests {
         assert_eq!(when_words(now - 400 * 86_400, now, 0), "18 Aug 2025");
         // twelve hours east it is already 22:42, and the minute before is still today
         assert_eq!(when_words(now - 60, now, 12 * 3600), "22:41");
+        assert_eq!(when_moment(now - 60, now, 0), "Today at 10:41");
+        assert_eq!(when_moment(now - 86_400, now, 0), "Yesterday at 10:42");
+        assert_eq!(when_moment(now - 5 * 86_400, now, 0), "17 Sep at 10:42");
         assert_eq!(offset_of("+1200"), Some(43_200));
         assert_eq!(offset_of("-0330"), Some(-12_600));
         assert_eq!(offset_of("UTC"), None);

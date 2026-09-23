@@ -2,6 +2,7 @@
 //! disk and where they go, making them, restoring a file from one, and the boot style on the
 //! drive's esp, which only root can write.
 
+use std::path::{Path, PathBuf};
 #[cfg(feature = "bus")]
 use std::time::Duration;
 
@@ -38,6 +39,30 @@ const SLOTS_TIMEOUT: Duration = Duration::from_secs(60);
 
 const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
+
+/// Where Vault keeps the snapshots of home, one folder each, named by the time it was taken.
+pub const SNAPSHOTS: &str = "/persist/@snapshots/home";
+
+/// Where the subvolume the snapshots are of is mounted, so a path under it has a place in each of
+/// them.
+pub const HOME: &str = "/home";
+
+/// Where `path`, somewhere under [`HOME`], lies inside the snapshot named `at`. `None` when the
+/// path is not under home, when it has a `.` or a `..` in it, or when the name is not a
+/// snapshot's.
+#[must_use]
+pub fn in_snapshot(at: &str, path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    snapshot_time(at)?;
+    let rest = path.strip_prefix(HOME).ok()?;
+    if rest
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(Path::new(SNAPSHOTS).join(at).join(rest))
+}
 
 /// The first 8 digits of a backup's id, which is what people see and type.
 #[must_use]
@@ -366,6 +391,26 @@ mod tests {
         assert_eq!(read("unchanged"), Some(Restored::Unchanged));
         assert_eq!(read("deleted"), None);
         assert_eq!(read(""), None);
+    }
+
+    #[test]
+    fn a_path_in_home_has_a_place_in_every_snapshot() {
+        let at = "2026-09-12T14:00:03Z";
+        assert_eq!(
+            in_snapshot(at, Path::new("/home/rift/Documents")),
+            Some(PathBuf::from(
+                "/persist/@snapshots/home/2026-09-12T14:00:03Z/rift/Documents"
+            ))
+        );
+        assert_eq!(
+            in_snapshot(at, Path::new("/home")),
+            Some(PathBuf::from(
+                "/persist/@snapshots/home/2026-09-12T14:00:03Z"
+            ))
+        );
+        assert_eq!(in_snapshot(at, Path::new("/etc/passwd")), None);
+        assert_eq!(in_snapshot(at, Path::new("/home/rift/../root")), None);
+        assert_eq!(in_snapshot("yesterday", Path::new("/home/rift")), None);
     }
 
     #[test]

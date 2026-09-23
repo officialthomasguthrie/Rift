@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use librift::quasar::{self, Client};
-use librift::search::{self, Hit, Index, Kind};
+use librift::search::{self, Hit, Index, Missing};
 
 use crate::text;
 
@@ -103,37 +103,32 @@ fn update() -> Result<(), String> {
 
 fn find(words: &str) -> Result<Vec<Hit>, String> {
     let home = home()?;
-    let path = index_path(&home);
-    let index = match fs::read(&path) {
-        Ok(bytes) => Index::decode(&bytes)?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err("Nothing is indexed yet. Run rift ai index first.".into());
-        }
-        Err(e) => return Err(format!("Could not read {}: {e}", path.display())),
-    };
-    let status = quasar::status()?;
-    match status.embedding_state.as_str() {
-        "ready" => {}
-        "loading" => {
-            return Err("The embedding model is still loading. Try again in a moment.".into());
-        }
-        _ => return Err(status.embedding_error),
-    }
-    if status.embedding_model != index.model {
-        return Err(format!(
-            "The index was made with {}, and Quasar runs {}. Run rift ai index to make it again.",
-            index.model, status.embedding_model
-        ));
-    }
-    let vectors = Client::connect()?.embed(Kind::Query.name(), &[words.to_string()])?;
-    let vector = vectors
-        .first()
-        .ok_or("Quasar sent no vector for the words.")?;
-    let hits = search::rank(&index, &search::normalized(vector), RESULTS);
+    let hits = search::find(
+        &home,
+        env::var_os("XDG_CACHE_HOME").as_deref(),
+        words,
+        RESULTS,
+    )
+    .map_err(said)?;
     if hits.is_empty() {
-        return Err("Nothing in your home folder is indexed yet.".into());
+        return Err("Nothing in your home folder is close to those words.".into());
     }
     Ok(hits)
+}
+
+/// What a terminal says when a search by meaning cannot run: the command that makes the index,
+/// since that is what a person has in front of them.
+fn said(missing: Missing) -> String {
+    match missing {
+        Missing::NotIndexed | Missing::Empty => {
+            "Nothing is indexed yet. Run rift ai index first.".to_string()
+        }
+        Missing::Loading => "The embedding model is still loading. Try again in a moment.".into(),
+        Missing::Model(index, running) => format!(
+            "The index was made with {index}, and Quasar runs {running}. Run rift ai index to make it again."
+        ),
+        Missing::Failed(why) => why,
+    }
 }
 
 fn home() -> Result<PathBuf, String> {
