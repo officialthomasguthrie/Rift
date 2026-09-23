@@ -2902,9 +2902,13 @@ def main():
             run("set -x XDG_RUNTIME_DIR /run/user/(id -u)", "the runtime directory")
 
             def bar_state(what):
-                """What `lens --state` prints, as a dict of the words it knows."""
+                """What `lens --state` prints, as a dict of the words it knows. A shell that has just
+                been started again has no socket yet, which is nothing to fail over: every caller asks
+                again until it answers, and says its own piece when it never does."""
                 status, output = run("lens --state", what)
                 printed = without_console(output)
+                if status != 0 and ("Connection refused" in printed or "No such file" in printed):
+                    return {}
                 if status != 0:
                     fail(f"lens --state exited with {status}: {printed.strip()[-300:]!r}")
                 state = {}
