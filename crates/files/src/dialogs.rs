@@ -27,6 +27,9 @@ pub enum Dialog {
     Rename {
         /// Its name now.
         from: OsString,
+        /// The folder it is in, which is the window's folder unless a search found it under one
+        /// of its own.
+        inside: PathBuf,
         /// What is typed.
         name: String,
         /// Whether it is a folder.
@@ -49,17 +52,29 @@ pub enum Dialog {
     },
     /// Empty the trash.
     Empty,
-    /// A copy or a move whose name is already taken in the folder it is going to.
+    /// A copy, a move or a file brought back from a moment whose name is already taken in the
+    /// folder it is going to.
     Replace {
-        /// What is being copied or moved.
+        /// What is being copied, moved or brought back.
         from: Vec<PathBuf>,
         /// Where to.
         into: PathBuf,
-        /// Whether it is a move.
-        moving: bool,
+        /// Which of the three it is.
+        putting: Putting,
         /// The names that are taken there.
         names: Vec<String>,
     },
+}
+
+/// What is going into the folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Putting {
+    /// A copy of what is on the clipboard.
+    Copy,
+    /// What is on the clipboard, moved.
+    Move,
+    /// A file out of a moment in the Timeline, which the question names.
+    Bring(String),
 }
 
 impl Dialog {
@@ -97,13 +112,16 @@ impl Dialog {
         }
     }
 
-    /// What is wrong with the name typed in `folder`, as the line under the field. Nothing for a
-    /// dialog with no field, and nothing for an empty name, which only dims the button.
+    /// What is wrong with the name typed, as the line under the field: `folder` is the window's
+    /// folder, and a rename looks in the folder the file itself is in. Nothing for a dialog with
+    /// no field, and nothing for an empty name, which only dims the button.
     #[must_use]
     pub fn problem(&self, folder: &Path) -> Option<String> {
-        let (name, from) = match self {
-            Self::NewFolder { name } => (name, None),
-            Self::Rename { name, from, .. } => (name, Some(from.as_os_str())),
+        let (name, from, folder) = match self {
+            Self::NewFolder { name } => (name, None, folder),
+            Self::Rename {
+                name, from, inside, ..
+            } => (name, Some(from.as_os_str()), inside.as_path()),
             _ => return None,
         };
         name_problem(folder, name, from)
@@ -213,10 +231,10 @@ pub fn view<'a>(
         }
         Dialog::Replace {
             into,
-            moving,
+            putting,
             names,
             ..
-        } => replacing(look, id, into, *moving, names, cancel, ready),
+        } => replacing(look, id, into, putting, names, cancel, ready),
         Dialog::Forget { labels, .. } => {
             let said = if labels.len() == 1 {
                 "It cannot be brought back."
@@ -242,12 +260,13 @@ pub fn view<'a>(
 
 /// The question before a name in the folder is replaced. Keeping both is the default answer, the
 /// way nothing in Rift is ever written over without being asked; Replace puts what is there in
-/// the trash first, so it can still be brought back.
+/// the trash first, so it can still be brought back. A file out of a moment is the same question,
+/// with the moment it comes from in it.
 fn replacing<'a>(
     look: Colors,
     id: window::Id,
     into: &Path,
-    moving: bool,
+    putting: &Putting,
     names: &[String],
     cancel: Element<'a, Message>,
     ready: Option<Message>,
@@ -261,9 +280,13 @@ fn replacing<'a>(
     } else {
         "They are"
     };
-    let doing = if moving { "moved" } else { "copied" };
+    let taking = match putting {
+        Putting::Copy => "what is copied".to_string(),
+        Putting::Move => "what is moved".to_string(),
+        Putting::Bring(moment) => format!("the copy from {moment}"),
+    };
     let said = format!(
-        "{what} in {} already. What is there goes to the trash, and what is {doing} takes the name.",
+        "{what} in {} already. What is there goes to the trash, and {taking} takes the name.",
         librift::files::shown(into)
     );
     let body: Element<'a, Message> = text(said).size(TEXT_SIZE).color(look.text).into();

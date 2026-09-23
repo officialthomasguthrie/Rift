@@ -1,5 +1,7 @@
-//! One window: the folder it shows, where it has been, what is in the folder in the order of the
-//! list, what is selected, and what stands over the list at the moment, a menu or a dialog.
+//! One window: the place it shows, where it has been, what is in the place in the order of the
+//! list, what is selected, and what stands over the list at the moment, a menu or a dialog. A
+//! place is a folder, the trash, or a folder as it was at a moment in the Timeline; a search of
+//! the folder and what is under it puts its own rows in the list while the field has words in it.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -19,6 +21,14 @@ pub enum Location {
     Folder(PathBuf),
     /// The trash.
     Trash,
+    /// A folder in home as it was at a moment: the name of the snapshot, and the folder as it is
+    /// now. Nothing in it can be changed, since a snapshot is read only.
+    Moment {
+        /// The snapshot's name, which is the time it was taken.
+        at: String,
+        /// The folder in home the moment is of.
+        folder: PathBuf,
+    },
 }
 
 impl Location {
@@ -28,26 +38,81 @@ impl Location {
         match self {
             Self::Folder(path) => files::shown(path),
             Self::Trash => "Trash".to_string(),
+            Self::Moment { folder, .. } => files::shown(folder),
         }
     }
 
-    /// What `--state` prints for it: the folder's path, or `trash`.
+    /// What `--state` prints for it: the folder's path, `trash`, or the moment and its folder.
     #[must_use]
     pub fn word(&self) -> String {
         match self {
             Self::Folder(path) => path.display().to_string(),
             Self::Trash => "trash".to_string(),
+            Self::Moment { at, folder } => format!("moment {at} {}", folder.display()),
         }
     }
 
-    /// The folder, when it is one.
+    /// The folder whose things can be changed, which is a folder now and never a moment.
     #[must_use]
     pub fn folder(&self) -> Option<&Path> {
         match self {
             Self::Folder(path) => Some(path),
+            Self::Trash | Self::Moment { .. } => None,
+        }
+    }
+
+    /// The folder this is about as it is now: the folder itself, or the one a moment is of.
+    #[must_use]
+    pub fn about(&self) -> Option<&Path> {
+        match self {
+            Self::Folder(path) | Self::Moment { folder: path, .. } => Some(path),
             Self::Trash => None,
         }
     }
+
+    /// Where its rows are read from: the folder, or the folder inside the snapshot.
+    #[must_use]
+    pub fn place(&self) -> Option<PathBuf> {
+        match self {
+            Self::Folder(path) => Some(path.clone()),
+            Self::Trash => None,
+            Self::Moment { at, folder } => librift::vault::in_snapshot(at, folder),
+        }
+    }
+
+    /// The moment it is of, when it is one.
+    #[must_use]
+    pub fn at(&self) -> Option<&str> {
+        match self {
+            Self::Moment { at, .. } => Some(at),
+            Self::Folder(_) | Self::Trash => None,
+        }
+    }
+
+    /// The place a folder in this one is: a folder now, or the same folder at the same moment.
+    #[must_use]
+    pub fn inside(&self, name: &std::ffi::OsStr) -> Option<Self> {
+        match self {
+            Self::Folder(path) => Some(Self::Folder(path.join(name))),
+            Self::Moment { at, folder } => Some(Self::Moment {
+                at: at.clone(),
+                folder: folder.join(name),
+            }),
+            Self::Trash => None,
+        }
+    }
+}
+
+/// A search of the folder and what is under it, while the header bar's field has words in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Query {
+    /// What is typed in the field.
+    pub words: String,
+    /// Whether the rows are the ones the index found, closest in meaning first, rather than the
+    /// ones whose name has the words in it.
+    pub meaning: bool,
+    /// The sentence in place of the files closest in meaning, when there are none to be had.
+    pub problem: Option<String>,
 }
 
 /// A short line at the bottom of the window about what just happened.
@@ -105,6 +170,11 @@ pub struct Browser {
     pub dialog: Option<Dialog>,
     /// What is typed in the path bar while it is a field.
     pub typing: Option<String>,
+    /// The search in the header bar's field, while it is open.
+    pub search: Option<Query>,
+    /// Whether the rows are in an order of their own, which the list's own order leaves alone:
+    /// the files closest in meaning, closest first.
+    pub ranked: bool,
     /// The line at the bottom about what just happened.
     pub toast: Option<Toast>,
     /// How many toasts the window has shown.
@@ -141,6 +211,8 @@ impl Browser {
             menu: None,
             dialog: None,
             typing: None,
+            search: None,
+            ranked: false,
             toast: None,
             toasts: 0,
             stamp: Vec::new(),
@@ -195,6 +267,8 @@ impl Browser {
         self.scroll = 0.0;
         self.menu = None;
         self.typing = None;
+        self.search = None;
+        self.ranked = false;
         self.stamp.clear();
         self.select_after.clear();
     }
@@ -205,7 +279,27 @@ impl Browser {
         self.read = read;
         self.ready = true;
         self.problem = None;
+        self.ranked = false;
         self.arrange(options);
+    }
+
+    /// What a search found, each row named by its path under the folder. The ones the index found
+    /// keep the order they came in, closest in meaning first.
+    pub fn show_found(&mut self, found: Vec<Entry>, ranked: bool, options: Options) {
+        self.read = found;
+        self.ready = true;
+        self.problem = None;
+        self.ranked = ranked;
+        self.arrange(options);
+    }
+
+    /// The words in the search field, when there are any.
+    #[must_use]
+    pub fn searching(&self) -> Option<&str> {
+        self.search
+            .as_ref()
+            .map(|query| query.words.trim())
+            .filter(|words| !words.is_empty())
     }
 
     /// The trash as it was read, the newest first, with where each thing was.
@@ -256,7 +350,9 @@ impl Browser {
             .filter(|entry| shows_hidden || !entry.hidden)
             .cloned()
             .collect();
-        files::sort(&mut self.rows, options);
+        if !self.ranked {
+            files::sort(&mut self.rows, options);
+        }
         let names: HashSet<&OsString> = self.rows.iter().map(|entry| &entry.name).collect();
         self.selected.retain(|name| names.contains(name));
         for kept in [&mut self.cursor, &mut self.anchor] {

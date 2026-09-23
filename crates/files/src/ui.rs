@@ -27,7 +27,7 @@ use crate::control::{self, Command};
 use crate::jobs::{self, Job, Step};
 use crate::theme::{Colors, colors};
 use crate::widgets::{FONT, TEXT_SIZE};
-use crate::{actions, list, view};
+use crate::{actions, find, list, view};
 
 /// What the windows call themselves: the name of the desktop entry, which the dock, the compositor
 /// and the boot test all know them by.
@@ -82,6 +82,8 @@ pub struct Files {
     pub places: Vec<Place>,
     /// The disks a person plugged in, as udisks last said.
     pub drives: Vec<Volume>,
+    /// The moments Vault last listed, oldest first, for the windows that show one.
+    pub moments: Vec<String>,
     /// The drive's own exchange partition, when it has one and the system has mounted it.
     pub exchange: Option<PathBuf>,
     /// The disks being mounted, unmounted or ejected at the moment, by what names them on the bus,
@@ -158,6 +160,20 @@ pub enum Act {
     Mount(String),
     /// Unmount everything on this disk and eject it.
     Eject(String),
+    /// Show this folder as it was, at the newest moment Vault has.
+    Timeline,
+    /// The moment before this one, or the one after it.
+    Step {
+        /// Whether it steps back in time.
+        earlier: bool,
+    },
+    /// Leave the Timeline and show the folder as it is now.
+    Now,
+    /// Bring what is selected in a moment back into the folder, or everything in the moment when
+    /// nothing is selected.
+    Bring,
+    /// Search this folder and what is under it: the field in the header bar opens.
+    Search,
 }
 
 /// What a press, a key, a line on the socket or a job asks for.
@@ -193,6 +209,15 @@ pub enum Message {
     Read(window::Id, Location, Box<Result<Vec<Entry>, String>>),
     /// What reading the trash found.
     TrashRead(window::Id, Vec<Trashed>),
+    /// The moments Vault listed, for the window that asked.
+    Moments(window::Id, Box<Result<Vec<String>, String>>),
+    /// What is typed in the search field.
+    SearchTyped(window::Id, String),
+    /// Enter in the search field, which searches by meaning.
+    SearchEntered(window::Id),
+    /// What a search found: the words it was for, whether it was by meaning, and the rows or the
+    /// sentence to show in their place.
+    Searched(window::Id, String, bool, Box<Result<Vec<Entry>, String>>),
     /// Open the header bar's menu.
     MainMenu(window::Id),
     /// Close the menu.
@@ -324,6 +349,7 @@ fn boot(start: &Start) -> (Files, Task<Message>) {
         types: Arc::new(mime::Database::load()),
         places: places::places(),
         drives: Vec::new(),
+        moments: Vec::new(),
         exchange: drives::exchange(),
         working: Vec::new(),
         clipboard: None,
@@ -418,30 +444,75 @@ fn save(path: &Path, shot: &window::Screenshot) -> Result<(), String> {
         .map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
-/// Read what a window shows, on a thread of its own.
+/// Read what a window shows, on a thread of its own: the folder, the folder inside a snapshot,
+/// the trash, or what the search field is looking for.
 pub fn read(state: &Files, id: window::Id) -> Task<Message> {
     let Some(browser) = state.windows.get(&id) else {
         return Task::none();
     };
+    if let Some(words) = browser.searching() {
+        let meaning = browser.search.as_ref().is_some_and(|query| query.meaning);
+        return search(state, id, words.to_string(), meaning);
+    }
     let location = browser.location.clone();
     let types = Arc::clone(&state.types);
     let offset = state.offset;
     let bins = state.trashes();
     let (sender, receiver) = oneshot::channel();
     thread::spawn(move || {
-        let message = match &location {
-            Location::Folder(path) => {
-                let found = files::read(path, &types);
+        let message = match (&location, location.place()) {
+            (_, Some(path)) => {
+                let found = files::read(&path, &types).map_err(|why| missing(&location, why));
                 Message::Read(id, location, Box::new(found))
             }
-            Location::Trash => {
+            (Location::Trash, None) => {
                 let mut found: Vec<Trashed> =
                     bins.iter().flat_map(|trash| trash.list(offset)).collect();
                 bin::newest_first(&mut found);
                 Message::TrashRead(id, found)
             }
+            (_, None) => Message::Read(
+                id,
+                location,
+                Box::new(Err("This folder is not in the Timeline.".to_string())),
+            ),
         };
         let _ = sender.send(message);
+    });
+    Task::perform(receiver, move |said| said.unwrap_or(Message::CloseMenu(id)))
+}
+
+/// Why a place cannot be shown. A folder in a moment that is not there was not there then, which
+/// is not the same as a folder that is gone.
+fn missing(location: &Location, why: String) -> String {
+    match location {
+        Location::Moment { .. } if !location.place().is_some_and(|path| path.exists()) => {
+            "There was no such folder at this moment.".to_string()
+        }
+        _ => why,
+    }
+}
+
+/// Search the folder and what is under it, on a thread of its own: by name, or by meaning through
+/// the index of home.
+fn search(state: &Files, id: window::Id, words: String, meaning: bool) -> Task<Message> {
+    let Some(root) = state
+        .windows
+        .get(&id)
+        .and_then(|browser| browser.location.place())
+    else {
+        return Task::none();
+    };
+    let types = Arc::clone(&state.types);
+    let hidden = state.options.hidden;
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let found = if meaning {
+            find::by_meaning(&root, &words, &types)
+        } else {
+            Ok(find::by_name(&root, &words, hidden, &types))
+        };
+        let _ = sender.send(Message::Searched(id, words, meaning, Box::new(found)));
     });
     Task::perform(receiver, move |said| said.unwrap_or(Message::CloseMenu(id)))
 }
@@ -453,6 +524,8 @@ pub fn stamp(state: &Files, location: &Location) -> Stamp {
     use std::os::unix::fs::MetadataExt;
     let folders: Vec<PathBuf> = match location {
         Location::Folder(path) => vec![path.clone()],
+        // a snapshot is read only, so what it holds never changes under the window
+        Location::Moment { .. } => Vec::new(),
         Location::Trash => state
             .trashes()
             .iter()
@@ -569,6 +642,7 @@ impl Files {
         for job in self.jobs.iter().filter(|job| job.running()) {
             lines.push(format!("job {} {}", job.number, job.percent()));
         }
+        lines.push(format!("moments {}", self.moments.len()));
         if let Some(browser) = self.front_id().and_then(|id| self.windows.get(&id)) {
             lines.extend(list::state(browser));
         }
@@ -606,8 +680,6 @@ fn handle(state: &mut Files, message: Message) -> Task<Message> {
         Message::Back(id) => travel(state, id, Browser::go_back),
         Message::Forward(id) => travel(state, id, Browser::go_forward),
         Message::Up(id) => up(state, id),
-        Message::Read(id, location, found) => arrived(state, id, &location, *found),
-        Message::TrashRead(id, trashed) => trash_read(state, id, trashed),
         Message::MainMenu(id) => actions::main_menu(state, id),
         Message::CloseMenu(id) => {
             if let Some(browser) = state.windows.get_mut(&id) {
@@ -655,6 +727,22 @@ fn handle(state: &mut Files, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        other => answered(state, other),
+    }
+}
+
+/// What comes back from somewhere else: a folder, a search or a disk read on a thread of its own,
+/// a job, the clipboard, the socket, or a picture of a window.
+fn answered(state: &mut Files, message: Message) -> Task<Message> {
+    match message {
+        Message::Read(id, location, found) => arrived(state, id, &location, *found),
+        Message::TrashRead(id, trashed) => trash_read(state, id, trashed),
+        Message::Moments(id, listed) => actions::moments(state, id, *listed),
+        Message::SearchTyped(id, typed) => actions::search_typed(state, id, typed),
+        Message::SearchEntered(id) => actions::search_entered(state, id),
+        Message::Searched(id, words, meaning, found) => {
+            actions::searched(state, id, &words, meaning, *found)
+        }
         Message::Tick => tick(state),
         Message::Drives(found) => drives_read(state, found),
         Message::Disk(id, drive, done) => actions::disk_done(state, id, &drive, *done),
@@ -684,6 +772,7 @@ fn handle(state: &mut Files, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        _ => Task::none(),
     }
 }
 
@@ -871,7 +960,11 @@ fn tick(state: &mut Files) -> Task<Message> {
             && now != browser.stamp
         {
             browser.stamp = now;
-            changed.push(id);
+            // a search by meaning stands still: reading it again would ask Quasar for the words
+            // again every time anything in the folder changed
+            if !browser.search.as_ref().is_some_and(|query| query.meaning) {
+                changed.push(id);
+            }
         }
     }
     Task::batch(changed.into_iter().map(|id| read(state, id)))

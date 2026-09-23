@@ -1,7 +1,8 @@
-//! How a window is drawn: the header bar along the top with the way back and forward and the path
-//! of the folder, the places and the drives down the left, the list beside them, and over the list
-//! whatever stands there for a moment: the progress of a job, a toast, what is selected, a menu or
-//! a dialog.
+//! How a window is drawn: the header bar along the top with the way back and forward, the path of
+//! the folder and the search field, the places and the drives down the left, the list beside them,
+//! and over the list whatever stands there for a moment: the progress of a job, a toast, what is
+//! selected, a menu or a dialog. A bar under the header says what the window is showing when it is
+//! not simply the folder: a moment in the Timeline, or a search by meaning.
 
 use std::path::{Path, PathBuf};
 
@@ -14,19 +15,20 @@ use crate::browser::{Browser, Location};
 use crate::dialogs;
 use crate::icons;
 use crate::jobs::Job;
-use crate::list::{self, HEADS, path_id};
+use crate::list::{self, HEADS, path_id, search_id};
 use crate::menus;
 use crate::theme::Colors;
+use crate::timeline;
 use crate::ui::{Act, Files, Message};
 use crate::widgets::{
-    BOLD, TEXT_SIZE, action, fill, menu, progress, scroll, shade, toast, tool, wide_field,
+    BOLD, TEXT_SIZE, action, fill, menu, primary, progress, scroll, shade, toast, tool, wide_field,
 };
 
 /// How wide the sidebar is.
 pub const SIDEBAR: f32 = 208.0;
 /// How tall the header bar is. It is the title bar of the window, which the app draws itself.
 pub const HEADER: f32 = 45.0;
-/// Where the first row of the list is from the top of the window.
+/// Where the first row of the list is from the top of the window, under the bar when there is one.
 pub const LIST_TOP: f32 = HEADER + 1.0 + HEADS + 1.0;
 /// How tall a row of the sidebar is.
 const SIDE_ROW: f32 = 34.0;
@@ -34,6 +36,8 @@ const SIDE_ROW: f32 = 34.0;
 const EJECT: f32 = 30.0;
 /// How many parts of a path the path bar shows before it leaves out the middle.
 const CRUMBS: usize = 5;
+/// How tall the bar under the header is.
+const BAR: f32 = 40.0;
 
 /// A window.
 pub fn window(state: &Files, id: window::Id) -> Element<'_, Message> {
@@ -41,14 +45,16 @@ pub fn window(state: &Files, id: window::Id) -> Element<'_, Message> {
         return space().into();
     };
     let look = state.colors();
-    let body = row![
-        sidebar(state, id, browser, look),
-        container(list::view(state, id, browser, look))
-            .width(Fill)
-            .height(Fill)
-            .style(move |_: &Theme| fill(look.view)),
-    ]
-    .height(Fill);
+    let listing = container(list::view(state, id, browser, look))
+        .width(Fill)
+        .height(Fill)
+        .style(move |_: &Theme| fill(look.view));
+    // the bar stands over the list, so the places down the left run from the header to the bottom
+    let beside: Element<'_, Message> = match bar(state, id, browser, look) {
+        Some(bar) => column![bar, listing].into(),
+        None => listing.into(),
+    };
+    let body = row![sidebar(state, id, browser, look), beside].height(Fill);
     let mut layers: Vec<Element<'_, Message>> =
         vec![column![header(browser, id, look), body].into()];
     if let Some(bottom) = bottom(state, id, browser, look) {
@@ -141,19 +147,37 @@ fn header(browser: &Browser, id: window::Id, look: Colors) -> Element<'_, Messag
             ..button::Style::default()
         });
     let line = container(space().height(1.0).width(Fill)).style(move |_: &Theme| fill(look.line));
+    let mut tools = row![
+        name,
+        back,
+        forward,
+        path_bar(browser, id, look),
+        tool(
+            look,
+            "edit-find-symbolic",
+            Some(Message::Do(id, Act::Search))
+        ),
+    ]
+    .align_y(Center)
+    .spacing(4)
+    .padding([0, 8]);
+    // only home is snapshotted, so only a folder in it has a Timeline to show
+    if browser.location.about().is_some_and(timeline::covers) {
+        tools = tools.push(tool(
+            look,
+            "document-open-recent-symbolic",
+            Some(Message::Do(id, Act::Timeline)),
+        ));
+    }
     column![
         container(
-            row![
-                name,
-                back,
-                forward,
-                path_bar(browser, id, look),
-                tool(look, "open-menu-symbolic", Some(Message::MainMenu(id))),
-                close,
-            ]
-            .align_y(Center)
-            .spacing(4)
-            .padding([0, 8]),
+            tools
+                .push(tool(
+                    look,
+                    "open-menu-symbolic",
+                    Some(Message::MainMenu(id))
+                ))
+                .push(close),
         )
         .width(Fill)
         .height(Length::Fixed(HEADER))
@@ -166,6 +190,19 @@ fn header(browser: &Browser, id: window::Id, look: Colors) -> Element<'_, Messag
 /// The path of the folder as a button for each folder on the way to it, the last in bold, in a box
 /// of its own. A press between them, or Ctrl and L, makes it a field to type a path in.
 fn path_bar(browser: &Browser, id: window::Id, look: Colors) -> Element<'_, Message> {
+    if let Some(query) = &browser.search {
+        return container(wide_field(
+            look,
+            "Search this folder",
+            &query.words,
+            search_id(browser.number),
+            move |typed| Message::SearchTyped(id, typed),
+            Message::SearchEntered(id),
+        ))
+        .width(Fill)
+        .padding([0, 6])
+        .into();
+    }
     if let Some(typed) = &browser.typing {
         return container(wide_field(
             look,
@@ -184,7 +221,7 @@ fn path_bar(browser: &Browser, id: window::Id, look: Colors) -> Element<'_, Mess
         Location::Trash => {
             crumbs = crumbs.push(crumb(look, "Trash".to_string(), true, None));
         }
-        Location::Folder(path) => {
+        Location::Folder(path) | Location::Moment { folder: path, .. } => {
             let parts = parts(path);
             let count = parts.len();
             let hidden_to = count.saturating_sub(CRUMBS - 2);
@@ -197,7 +234,7 @@ fn path_bar(browser: &Browser, id: window::Id, look: Colors) -> Element<'_, Mess
                         crumbs = crumbs.push(tool(
                             look,
                             "pan-start-symbolic",
-                            Some(Message::Go(id, Location::Folder(place))),
+                            Some(Message::Go(id, at_the_same_time(&browser.location, place))),
                         ));
                     }
                     continue;
@@ -210,7 +247,7 @@ fn path_bar(browser: &Browser, id: window::Id, look: Colors) -> Element<'_, Mess
                     look,
                     label,
                     last,
-                    Some(Message::Go(id, Location::Folder(place))),
+                    Some(Message::Go(id, at_the_same_time(&browser.location, place))),
                 ));
             }
         }
@@ -263,6 +300,127 @@ fn parts(path: &Path) -> Vec<(String, PathBuf)> {
     parts
 }
 
+/// A folder on the way to this one, as the window would show it: as it is now, or as it was at
+/// the moment the window is showing.
+fn at_the_same_time(location: &Location, folder: PathBuf) -> Location {
+    match location.at() {
+        Some(at) => Location::Moment {
+            at: at.to_string(),
+            folder,
+        },
+        None => Location::Folder(folder),
+    }
+}
+
+/// How far the first row of the list is from the top of the window: further down when a bar stands
+/// over it.
+#[must_use]
+pub fn list_top(state: &Files, browser: &Browser) -> f32 {
+    if bar_words(state, browser).is_some() {
+        LIST_TOP + BAR + 1.0
+    } else {
+        LIST_TOP
+    }
+}
+
+/// What the bar says, when there is one to draw.
+fn bar_words(state: &Files, browser: &Browser) -> Option<String> {
+    if let Some(at) = browser.location.at() {
+        return Some(moment_words(state, at));
+    }
+    let query = browser.search.as_ref()?;
+    match (&query.problem, query.meaning) {
+        (Some(why), _) => Some(why.clone()),
+        (None, true) => Some("Closest in meaning first.".to_string()),
+        (None, false) => None,
+    }
+}
+
+/// The bar under the header bar, when the window is showing something other than the folder as it
+/// is: a moment in the Timeline, with the way through the moments and back to now, or a sentence
+/// about a search by meaning.
+fn bar<'a>(
+    state: &'a Files,
+    id: window::Id,
+    browser: &'a Browser,
+    look: Colors,
+) -> Option<Element<'a, Message>> {
+    let said = bar_words(state, browser)?;
+    let buttons = if browser.location.at().is_some() {
+        moment_buttons(state, id, browser, look)
+    } else {
+        vec![action(
+            look,
+            "Back to the folder",
+            Some(Message::Escape(id)),
+        )]
+    };
+    let mut inside = row![
+        container(
+            text(said)
+                .size(TEXT_SIZE)
+                .color(look.text)
+                .wrapping(text::Wrapping::None)
+        )
+        .width(Fill)
+        .clip(true)
+    ]
+    .align_y(Center)
+    .spacing(8)
+    .padding([0, 12]);
+    for button in buttons {
+        inside = inside.push(button);
+    }
+    Some(
+        column![
+            container(inside)
+                .width(Fill)
+                .height(Length::Fixed(BAR))
+                .style(move |_: &Theme| fill(look.side)),
+            container(space().height(1.0).width(Fill)).style(move |_: &Theme| fill(look.line)),
+        ]
+        .into(),
+    )
+}
+
+/// What the bar says about a moment: the day and the time the snapshot was taken.
+fn moment_words(state: &Files, at: &str) -> String {
+    format!(
+        "As it was {}",
+        timeline::label(at, librift::time::now(), state.offset)
+    )
+}
+
+/// The buttons of a moment: through the moments Vault has, the one that puts things back, and the
+/// way out of the Timeline.
+fn moment_buttons<'a>(
+    state: &Files,
+    id: window::Id,
+    browser: &Browser,
+    look: Colors,
+) -> Vec<Element<'a, Message>> {
+    let at = browser.location.at().unwrap_or_default();
+    let step = |earlier: bool, label: &'static str| {
+        action(
+            look,
+            label,
+            timeline::step(&state.moments, at, earlier)
+                .map(|_| Message::Do(id, Act::Step { earlier })),
+        )
+    };
+    let selected = !browser.selected.is_empty();
+    vec![
+        step(true, "Earlier"),
+        step(false, "Later"),
+        action(
+            look,
+            timeline::restoring(selected),
+            browser.ready.then_some(Message::Do(id, Act::Bring)),
+        ),
+        primary(look, "Back to now", Some(Message::Do(id, Act::Now))),
+    ]
+}
+
 fn slash<'a>(look: Colors) -> Element<'a, Message> {
     text("/").size(TEXT_SIZE).color(look.dim).into()
 }
@@ -313,7 +471,8 @@ fn sidebar<'a>(
 ) -> Element<'a, Message> {
     let mut rows = column![].width(Fill).spacing(2).padding([8, 8]);
     for place in &state.places {
-        let here = browser.location.folder() == Some(place.path.as_path());
+        // a moment of a folder is still that folder, so its row stays marked in the Timeline
+        let here = browser.location.about() == Some(place.path.as_path());
         rows = rows.push(side_row(
             look,
             place.icon,
@@ -364,7 +523,7 @@ fn sidebar<'a>(
 fn under(browser: &Browser, mount: &Path) -> bool {
     browser
         .location
-        .folder()
+        .about()
         .is_some_and(|folder| folder.starts_with(mount))
 }
 

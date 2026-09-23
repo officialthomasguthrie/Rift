@@ -1,7 +1,7 @@
 //! The list of what is in a folder: a row for each thing, with its icon, its name, its size and
 //! when it last changed, under headings that put the list in their order. Only the rows on screen
 //! are drawn, so a folder of a hundred thousand files scrolls like one of ten. In the trash the
-//! columns are where each thing was and when it went.
+//! columns are where each thing was and when it went, and in a search the folder each one is in.
 
 use std::path::Path;
 
@@ -43,6 +43,12 @@ pub fn path_id(number: usize) -> String {
     format!("files-path-{number}")
 }
 
+/// The id of the search field of window `number`.
+#[must_use]
+pub fn search_id(number: usize) -> String {
+    format!("files-search-{number}")
+}
+
 /// The lines `--state` prints about a window.
 #[must_use]
 pub fn state(browser: &Browser) -> Vec<String> {
@@ -53,6 +59,20 @@ pub fn state(browser: &Browser) -> Vec<String> {
         format!("ready {}", if browser.ready { "yes" } else { "no" }),
         format!("rows {}", browser.rows.len()),
     ];
+    if let Some(at) = browser.location.at() {
+        lines.push(format!("moment {at}"));
+    }
+    if let Some(query) = &browser.search {
+        lines.push(format!("search {}", query.words));
+        lines.push(format!(
+            "search-kind {}",
+            if query.meaning { "meaning" } else { "name" }
+        ));
+        if let Some(why) = &query.problem {
+            lines.push(format!("search-problem {why}"));
+        }
+    }
+    let searching = browser.searching().is_some();
     for entry in browser.rows.iter().take(PRINTED) {
         match (&browser.location, browser.origins.get(&entry.name)) {
             (Location::Trash, Some(was)) => {
@@ -63,6 +83,12 @@ pub fn state(browser: &Browser) -> Vec<String> {
                     was.display()
                 ));
             }
+            _ if searching => lines.push(format!(
+                "row {} {} in {}",
+                entry.kind.word(),
+                entry.label,
+                Path::new(&entry.name).display()
+            )),
             _ => lines.push(format!("row {} {}", entry.kind.word(), entry.label)),
         }
     }
@@ -120,9 +146,15 @@ pub fn view<'a>(
     } else if let Some(problem) = &browser.problem {
         middle(look, problem.clone())
     } else if browser.rows.is_empty() {
+        // with a sentence in the bar about the index, the rows are still the ones the names found
+        let meaning = browser
+            .search
+            .as_ref()
+            .is_some_and(|query| query.meaning && query.problem.is_none());
         middle(
             look,
             match (&browser.location, browser.read.is_empty()) {
+                _ if browser.searching().is_some() => crate::find::nothing(meaning),
                 (Location::Trash, _) => "The trash is empty.",
                 (_, true) => "This folder is empty.",
                 (_, false) => "Everything here is hidden.",
@@ -206,6 +238,12 @@ fn heads<'a>(
             head("Original location", None, Length::Fixed(PLACE_COLUMN)),
             head("Deleted", Some(Sort::Modified), Length::Fixed(TIME_COLUMN)),
         ]
+    } else if browser.searching().is_some() {
+        row![
+            head("Name", Some(Sort::Name), Fill),
+            head("Folder", None, Length::Fixed(PLACE_COLUMN)),
+            head("Modified", Some(Sort::Modified), Length::Fixed(TIME_COLUMN)),
+        ]
     } else {
         row![
             head("Name", Some(Sort::Name), Fill),
@@ -262,7 +300,8 @@ fn line<'a>(
 ) -> Element<'a, Message> {
     let entry = &browser.rows[at];
     let selected = browser.selected.contains(&entry.name);
-    let folder = browser.location.folder();
+    let place = browser.location.place();
+    let folder = place.as_deref();
     let cut = files.clipboard.as_ref().is_some_and(|clip| {
         clip.cut && folder.is_some_and(|folder| clip.paths.contains(&folder.join(&entry.name)))
     });
@@ -291,6 +330,9 @@ fn line<'a>(
             .map(|path| where_words(files, path))
             .unwrap_or_default();
         dim(look, was, PLACE_COLUMN)
+    } else if browser.searching().is_some() {
+        let under = folder.map(|root| crate::find::under(root, entry));
+        dim(look, under.unwrap_or_default(), PLACE_COLUMN)
     } else {
         let size = match entry.kind {
             Kind::Folder => entry.items.map(files::items_words).unwrap_or_default(),

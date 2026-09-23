@@ -65,6 +65,7 @@ fn shortcut(letter: &str, shift: bool, trash: bool) -> Option<Press> {
         ("a", _) => Act::SelectAll,
         ("h", _) => Act::Hidden,
         ("l", _) => Act::Location,
+        ("f", _) => Act::Search,
         ("r", _) => Act::Reload,
         ("w" | "q", _) => Act::Close,
         ("c", _) if !trash => Act::Copy,

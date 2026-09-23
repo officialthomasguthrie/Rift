@@ -36,6 +36,17 @@ pub enum Work {
         /// Whether a name that is taken is replaced, what was there going to the trash.
         replace: bool,
     },
+    /// Bring these back out of a snapshot into the folder they were in, which is a copy out of a
+    /// read-only folder and follows the same rule: a name that is taken is only replaced when the
+    /// owner asks, and what was there goes to the trash.
+    Bring {
+        /// The files in the snapshot.
+        from: Vec<PathBuf>,
+        /// The folder in home they go back into.
+        into: PathBuf,
+        /// Whether a name that is taken is replaced, what was there going to the trash.
+        replace: bool,
+    },
     /// Move these into a folder.
     Move {
         /// What is moved.
@@ -149,6 +160,9 @@ impl Work {
             Self::Move { from, into, .. } => {
                 format!("Moving {} to {}", things(from), files::shown(into))
             }
+            Self::Bring { from, into, .. } => {
+                format!("Putting {} back in {}", things(from), files::shown(into))
+            }
             Self::Trash(from) => format!("Moving {} to the trash", things(from)),
             Self::Delete(from) => format!("Deleting {}", things(from)),
             Self::Restore(names) => format!("Putting back {}", count_words(names.len())),
@@ -177,6 +191,9 @@ impl Work {
             Self::Move { from, into, .. } => {
                 format!("Moved {} to {}", made(from), files::shown(into))
             }
+            Self::Bring { from, into, .. } => {
+                format!("Put {} back in {}", made(from), files::shown(into))
+            }
             Self::Trash(from) => format!("Moved {} to the trash", things(from)),
             Self::Delete(from) => format!("Deleted {}", things(from)),
             Self::Restore(_) if outcome.made.len() == 1 => format!(
@@ -197,16 +214,21 @@ impl Work {
         };
         match (outcome.stopped, outcome.made.is_empty(), self) {
             (true, true, Self::Move { .. }) => "Stopped. Nothing was moved.".to_string(),
+            (true, true, Self::Bring { .. }) => "Stopped. Nothing was put back.".to_string(),
             (true, true, _) => "Stopped. Nothing was copied.".to_string(),
             (true, false, _) => format!("Stopped. {what}.{old}"),
             (false, _, _) => format!("{what}.{old}"),
         }
     }
 
-    /// Whether it can be stopped halfway: a copy, and a move, which may copy.
+    /// Whether it can be stopped halfway: a copy, a move, which may copy, and a file brought back
+    /// out of a snapshot, which is a copy.
     #[must_use]
     pub const fn stoppable(&self) -> bool {
-        matches!(self, Self::Copy { .. } | Self::Move { .. })
+        matches!(
+            self,
+            Self::Copy { .. } | Self::Move { .. } | Self::Bring { .. }
+        )
     }
 }
 
@@ -287,6 +309,11 @@ fn run(work: &Work, stop: &AtomicBool, said: &mut Said, offset: i32) -> Outcome 
     let mut outcome = Outcome::default();
     match work {
         Work::Copy {
+            from,
+            into,
+            replace,
+        }
+        | Work::Bring {
             from,
             into,
             replace,

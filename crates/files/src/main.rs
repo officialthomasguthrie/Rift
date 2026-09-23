@@ -1,6 +1,9 @@
 //! rift-files: Files, the file manager. A window for each folder, with the places down the left,
 //! what is in the folder in a list, and the trash; files open with the apps that open their kind.
 //!
+//! The header bar searches the folder and what is under it, by name as it is typed and by meaning
+//! on Enter, and the Timeline shows the folder as it was at one of Vault's snapshots of home.
+//!
 //! `rift-files` opens a window on home, and `rift-files <folder>` one on that folder, or on the
 //! folder of a file with the file selected; with Files running, it asks that one for the window.
 //! `rift-files --set <name> <value>` does what pressing it would in the window in front, and
@@ -10,10 +13,12 @@ mod actions;
 mod browser;
 mod control;
 mod dialogs;
+mod find;
 mod jobs;
 mod keys;
 mod list;
 mod menus;
+mod timeline;
 mod ui;
 mod view;
 

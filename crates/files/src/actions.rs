@@ -14,14 +14,16 @@ use librift::apps::{self, App};
 use librift::defaults::{Found, entry_id};
 use librift::drives;
 use librift::files::trash::Trash;
-use librift::files::{self, Kind, Sort, free_name, mime};
+use librift::files::{self, Entry, Kind, Sort, free_name, mime};
 
-use crate::browser::{Browser, Location, Toast};
-use crate::dialogs::{Dialog, field_id};
+use crate::browser::{Browser, Location, Query, Toast};
+use crate::dialogs::{Dialog, Putting, field_id};
 use crate::jobs::{Step, Work};
 use crate::keys::{self, Press};
+use crate::list::search_id;
 use crate::list::{ROW, list_id, path_id};
 use crate::menus::{self, Menu, Opener, Which};
+use crate::timeline;
 use crate::ui::{self, Act, Clip, Files, Message};
 
 /// How long a toast stays.
@@ -258,6 +260,11 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
         }
         Act::Mount(drive) => disk(state, id, &drive, Doing::Mount),
         Act::Eject(drive) => disk(state, id, &drive, Doing::Eject),
+        Act::Timeline => timeline_of(state, id),
+        Act::Step { earlier } => step_to(state, id, earlier),
+        Act::Now => now(state, id),
+        Act::Bring => bring(state, id),
+        Act::Search => open_search(state, id),
         Act::SelectAll => {
             if let Some(browser) = state.windows.get_mut(&id) {
                 browser.select_all();
@@ -339,24 +346,31 @@ fn open(state: &mut Files, id: window::Id, with: Option<&str>) -> Task<Message> 
     let Some(browser) = state.windows.get(&id) else {
         return Task::none();
     };
-    let Some(folder) = browser.location.folder().map(Path::to_path_buf) else {
+    let Some(place) = browser.location.place() else {
         return Task::none();
     };
-    let chosen: Vec<(PathBuf, Kind, String)> = browser
+    let here = browser.location.clone();
+    let chosen: Vec<(OsString, Kind, String)> = browser
         .chosen()
         .iter()
-        .map(|entry| (folder.join(&entry.name), entry.kind, entry.mime.clone()))
+        .map(|entry| (entry.name.clone(), entry.kind, entry.mime.clone()))
         .collect();
     let (folders, files): (Vec<_>, Vec<_>) = chosen
         .into_iter()
         .partition(|(_, kind, _)| *kind == Kind::Folder);
+    // a folder in a moment opens at that same moment, and one a search found opens where it lies
+    let inside = |name: &OsStr| {
+        here.inside(name)
+            .unwrap_or(Location::Folder(place.join(name)))
+    };
     if with.is_none() && files.is_empty() && folders.len() == 1 {
-        return ui::go(state, id, Location::Folder(folders[0].0.clone()));
+        return ui::go(state, id, inside(&folders[0].0));
     }
     let mut tasks = Vec::new();
     if with.is_none() {
-        for (path, _, _) in folders {
-            tasks.push(ui::open_window(state, Location::Folder(path), None));
+        for (name, _, _) in folders {
+            let opening = inside(&name);
+            tasks.push(ui::open_window(state, opening, None));
         }
     }
     if files.is_empty() {
@@ -366,7 +380,8 @@ fn open(state: &mut Files, id: window::Id, with: Option<&str>) -> Task<Message> 
     let found = Found::read();
     let mut groups: Vec<(App, Vec<PathBuf>)> = Vec::new();
     let mut unopened: Vec<PathBuf> = Vec::new();
-    for (path, kind, mime) in files {
+    for (name, kind, mime) in files {
+        let path = place.join(&name);
         let app = match with {
             Some(wanted) => all.iter().find(|app| app.id == wanted).cloned(),
             None if kind == Kind::File => opener(&all, &found, &state.types, &mime),
@@ -405,21 +420,23 @@ fn open_windows(state: &mut Files, id: window::Id) -> Task<Message> {
     let Some(browser) = state.windows.get(&id) else {
         return Task::none();
     };
-    let folders: Vec<PathBuf> = browser
+    let place = browser.location.place();
+    let folders: Vec<Location> = browser
         .chosen()
         .iter()
         .filter(|entry| entry.kind == Kind::Folder)
         .filter_map(|entry| {
-            browser
-                .location
-                .folder()
-                .map(|folder| folder.join(&entry.name))
+            browser.location.inside(&entry.name).or_else(|| {
+                place
+                    .as_ref()
+                    .map(|place| Location::Folder(place.join(&entry.name)))
+            })
         })
         .collect();
     Task::batch(
         folders
             .into_iter()
-            .map(|path| ui::open_window(state, Location::Folder(path), None)),
+            .map(|folder| ui::open_window(state, folder, None)),
     )
 }
 
@@ -448,15 +465,21 @@ fn rename(state: &mut Files, id: window::Id) -> Task<Message> {
     let Some(browser) = state.windows.get_mut(&id) else {
         return Task::none();
     };
-    if browser.location == Location::Trash {
+    // nothing in the trash or in a moment is renamed where it lies
+    if browser.location.folder().is_none() {
         return Task::none();
     }
+    let Some(place) = browser.location.place() else {
+        return Task::none();
+    };
     let chosen = browser.chosen();
     let [entry] = chosen.as_slice() else {
         return Task::none();
     };
     let name = entry.label.clone();
-    let from = entry.name.clone();
+    let path = place.join(&entry.name);
+    let from = OsString::from(&name);
+    let inside = path.parent().unwrap_or(&place).to_path_buf();
     let folder = entry.kind == Kind::Folder;
     let stem = if folder {
         name.chars().count()
@@ -465,7 +488,12 @@ fn rename(state: &mut Files, id: window::Id) -> Task<Message> {
             .filter(|at| *at > 0)
             .map_or(name.chars().count(), |at| name[..at].chars().count())
     };
-    browser.dialog = Some(Dialog::Rename { from, name, folder });
+    browser.dialog = Some(Dialog::Rename {
+        from,
+        inside,
+        name,
+        folder,
+    });
     let field = field_id(browser.number);
     Task::batch([
         operation::focus(field.clone()),
@@ -536,43 +564,54 @@ pub fn pasted(state: &mut Files, id: window::Id, text: Option<&str>) -> Task<Mes
         .filter(|name| fs::symlink_metadata(into.join(name)).is_ok())
         .map(|name| name.to_string_lossy().into_owned())
         .collect();
+    let putting = if clip.cut {
+        Putting::Move
+    } else {
+        Putting::Copy
+    };
     if taken.is_empty() {
-        return transfer(state, id, clip.paths, into, clip.cut, false);
+        return transfer(state, id, clip.paths, into, &putting, false);
     }
     if let Some(browser) = state.windows.get_mut(&id) {
         browser.dialog = Some(Dialog::Replace {
             from: clip.paths,
             into,
-            moving: clip.cut,
+            putting,
             names: taken,
         });
     }
     Task::none()
 }
 
-/// Copy or move what was on the clipboard into a folder, and let the clipboard go when it was
-/// cut, since a cut is pasted once.
+/// Copy or move what was on the clipboard into a folder, or put back what a moment holds, and let
+/// the clipboard go when it was cut, since a cut is pasted once.
 fn transfer(
     state: &mut Files,
     id: window::Id,
     from: Vec<PathBuf>,
     into: PathBuf,
-    moving: bool,
+    putting: &Putting,
     replace: bool,
 ) -> Task<Message> {
-    let work = if moving {
-        state.clipboard = None;
-        Work::Move {
+    let work = match putting {
+        Putting::Move => {
+            state.clipboard = None;
+            Work::Move {
+                from,
+                into,
+                replace,
+            }
+        }
+        Putting::Copy => Work::Copy {
             from,
             into,
             replace,
-        }
-    } else {
-        Work::Copy {
+        },
+        Putting::Bring(_) => Work::Bring {
             from,
             into,
             replace,
-        }
+        },
     };
     ui::start_job(state, Some(id), work)
 }
@@ -630,10 +669,11 @@ fn location(state: &mut Files, id: window::Id) -> Task<Message> {
     let Some(browser) = state.windows.get_mut(&id) else {
         return Task::none();
     };
-    let typed = match &browser.location {
-        Location::Folder(path) => path.display().to_string(),
-        Location::Trash => String::new(),
-    };
+    let typed = browser
+        .location
+        .about()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
     browser.typing = Some(typed);
     let field = path_id(browser.number);
     Task::batch([
@@ -681,6 +721,223 @@ fn go_to_path(state: &mut Files, id: window::Id, path: &Path) -> Option<Task<Mes
     Some(task)
 }
 
+/// Show this folder as it was: Vault lists the moments on a thread of its own, since the answer
+/// comes over the bus, and the window goes to the newest of them.
+fn timeline_of(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(folder) = state
+        .windows
+        .get(&id)
+        .and_then(|browser| browser.location.about())
+        .map(Path::to_path_buf)
+    else {
+        return Task::none();
+    };
+    if !timeline::covers(&folder) {
+        return toast(state, id, NO_TIMELINE.to_string(), None);
+    }
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let _ = sender.send(Message::Moments(id, Box::new(timeline::moments())));
+    });
+    Task::perform(receiver, move |said| said.unwrap_or(Message::CloseMenu(id)))
+}
+
+/// What Vault answered: the window goes to the newest moment, or says why there is none.
+pub fn moments(
+    state: &mut Files,
+    id: window::Id,
+    listed: Result<Vec<String>, String>,
+) -> Task<Message> {
+    let found = match listed {
+        Ok(found) => found,
+        Err(why) => return toast(state, id, why, None),
+    };
+    let Some(newest) = found.last().cloned() else {
+        return toast(state, id, NO_MOMENTS.to_string(), None);
+    };
+    state.moments = found;
+    let Some(folder) = state
+        .windows
+        .get(&id)
+        .and_then(|browser| browser.location.about())
+        .map(Path::to_path_buf)
+    else {
+        return Task::none();
+    };
+    ui::go(state, id, Location::Moment { at: newest, folder })
+}
+
+/// The moment before this one, or the one after it.
+fn step_to(state: &mut Files, id: window::Id, earlier: bool) -> Task<Message> {
+    let Some(Location::Moment { at, folder }) = state
+        .windows
+        .get(&id)
+        .map(|browser| browser.location.clone())
+    else {
+        return Task::none();
+    };
+    let Some(step) = timeline::step(&state.moments, &at, earlier).cloned() else {
+        return Task::none();
+    };
+    ui::go(state, id, Location::Moment { at: step, folder })
+}
+
+/// Out of the Timeline and back to the folder as it is now.
+fn now(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(folder) = state
+        .windows
+        .get(&id)
+        .filter(|browser| browser.location.at().is_some())
+        .and_then(|browser| browser.location.about())
+        .map(Path::to_path_buf)
+    else {
+        return Task::none();
+    };
+    ui::go(state, id, Location::Folder(folder))
+}
+
+/// Put back what is selected in a moment, or everything in it when nothing is selected. A copy
+/// out of the snapshot, so a name that is taken is only replaced after the question, and what was
+/// there goes to the trash.
+fn bring(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(browser) = state.windows.get(&id) else {
+        return Task::none();
+    };
+    let (Some(at), Some(folder), Some(place)) = (
+        browser.location.at().map(ToString::to_string),
+        browser.location.about().map(Path::to_path_buf),
+        browser.location.place(),
+    ) else {
+        return Task::none();
+    };
+    let names: Vec<OsString> = browser
+        .chosen()
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect();
+    let (from, taken) = timeline::bringing(&place, &folder, &names);
+    if from.is_empty() {
+        return toast(
+            state,
+            id,
+            "There is nothing here to put back.".to_string(),
+            None,
+        );
+    }
+    let putting = Putting::Bring(timeline::label(&at, librift::time::now(), state.offset));
+    if taken.is_empty() {
+        return transfer(state, id, from, folder, &putting, false);
+    }
+    if let Some(browser) = state.windows.get_mut(&id) {
+        browser.dialog = Some(Dialog::Replace {
+            from,
+            into: folder,
+            putting,
+            names: taken,
+        });
+    }
+    Task::none()
+}
+
+/// The search field in the header bar, with the words that are in it selected.
+fn open_search(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    browser.typing = None;
+    if browser.search.is_none() {
+        browser.search = Some(Query {
+            words: String::new(),
+            meaning: false,
+            problem: None,
+        });
+    }
+    let field = search_id(browser.number);
+    Task::batch([
+        operation::focus(field.clone()),
+        operation::select_all(field),
+    ])
+}
+
+/// What is typed in the search field: the list follows every letter. An empty field brings the
+/// folder itself back.
+pub fn search_typed(state: &mut Files, id: window::Id, typed: String) -> Task<Message> {
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    browser.search = Some(Query {
+        words: typed,
+        meaning: false,
+        problem: None,
+    });
+    // the rows are about to be the ones the names find, in the list's own order again
+    browser.ranked = false;
+    browser.select_none();
+    ui::read(state, id)
+}
+
+/// Enter in the search field: the same words, by meaning this time.
+pub fn search_entered(state: &mut Files, id: window::Id) -> Task<Message> {
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    let Some(query) = browser.search.as_mut() else {
+        return Task::none();
+    };
+    if query.words.trim().is_empty() {
+        return Task::none();
+    }
+    query.meaning = true;
+    query.problem = None;
+    ui::read(state, id)
+}
+
+/// What a search found. An answer for words the field no longer holds is let go, since a walk
+/// and a question to Quasar both take their own time.
+pub fn searched(
+    state: &mut Files,
+    id: window::Id,
+    words: &str,
+    meaning: bool,
+    found: Result<Vec<Entry>, String>,
+) -> Task<Message> {
+    let options = state.options;
+    let Some(browser) = state.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    // what the names found is worth showing under the sentence a search by meaning could not run,
+    // so it is taken as well, as long as the words are still the ones in the field and the rows
+    // are not already the ones the index found
+    let asked = browser.search.as_ref().is_some_and(|query| {
+        query.words.trim() == words && (query.meaning == meaning || (!meaning && !browser.ranked))
+    });
+    if !asked {
+        return Task::none();
+    }
+    match found {
+        Ok(rows) => {
+            // only an answer by meaning takes the sentence away, since what the names found can
+            // arrive after it and would otherwise clear it
+            if meaning && let Some(query) = browser.search.as_mut() {
+                query.problem = None;
+            }
+            browser.show_found(rows, meaning, options);
+        }
+        // the rows the names found stay under the sentence that says why there are no others
+        Err(why) => {
+            if let Some(query) = browser.search.as_mut() {
+                query.problem = Some(why);
+            }
+        }
+    }
+    Task::none()
+}
+
+/// What a folder with no snapshots behind it says.
+const NO_TIMELINE: &str = "Only your home folder is snapshotted, so this folder has no Timeline.";
+/// What a drive with no snapshots yet says.
+const NO_MOMENTS: &str = "Vault has taken no snapshots of your home folder yet.";
+
 /// Take back what a job did: what it moved to the trash comes back, once.
 fn undo(state: &mut Files, id: window::Id, number: u64) -> Task<Message> {
     let files = state
@@ -724,14 +981,13 @@ pub fn confirm(state: &mut Files, id: window::Id) -> Task<Message> {
                 Err(e) => toast(state, id, format!("Could not make {name}: {e}."), None),
             }
         }
-        Dialog::Rename { from, name, .. } => {
-            let Some(folder) = folder else {
-                return Task::none();
-            };
+        Dialog::Rename {
+            from, inside, name, ..
+        } => {
             if from == OsStr::new(&name) {
                 return Task::none();
             }
-            match crate::jobs::rename_new(&folder.join(&from), &folder.join(&name)) {
+            match crate::jobs::rename_new(&inside.join(&from), &inside.join(&name)) {
                 Ok(()) => reread_selecting(state, id, OsString::from(name)),
                 Err(e) => toast(
                     state,
@@ -753,8 +1009,11 @@ pub fn confirm(state: &mut Files, id: window::Id) -> Task<Message> {
         }
         // its default button keeps both, which is what the job does when nothing is replaced
         Dialog::Replace {
-            from, into, moving, ..
-        } => transfer(state, id, from, into, moving, false),
+            from,
+            into,
+            putting,
+            ..
+        } => transfer(state, id, from, into, &putting, false),
     }
 }
 
@@ -762,7 +1021,10 @@ pub fn confirm(state: &mut Files, id: window::Id) -> Task<Message> {
 /// and the new one takes its name.
 pub fn replace(state: &mut Files, id: window::Id) -> Task<Message> {
     let Some(Dialog::Replace {
-        from, into, moving, ..
+        from,
+        into,
+        putting,
+        ..
     }) = state
         .windows
         .get_mut(&id)
@@ -770,7 +1032,7 @@ pub fn replace(state: &mut Files, id: window::Id) -> Task<Message> {
     else {
         return Task::none();
     };
-    transfer(state, id, from, into, moving, true)
+    transfer(state, id, from, into, &putting, true)
 }
 
 /// Read the folder again now, and select a name in it once it has been read.
@@ -873,6 +1135,10 @@ pub fn escape(state: &mut Files, id: window::Id) -> Task<Message> {
         || browser.typing.take().is_some()
     {
         return Task::none();
+    }
+    // the field goes, and the folder itself comes back under it
+    if browser.search.take().is_some() {
+        return reload(state, id);
     }
     browser.select_none();
     Task::none()
@@ -1000,6 +1266,8 @@ pub fn set(state: &mut Files, name: &str, value: &str) -> Task<Message> {
         ("activate", Some(at)) => Message::Twice(id, at),
         ("select-none", _) => Message::Blank(id),
         ("menu", _) => return set_menu(state, id, value),
+        ("search", _) => return search_for(state, id, value, false),
+        ("meaning", _) => return search_for(state, id, value, true),
         ("new-folder" | "rename", _) => return typed_dialog(state, id, name, value),
         ("type", _) => Message::Typed(id, value.to_string()),
         ("confirm", _) => Message::Confirm(id),
@@ -1071,8 +1339,24 @@ fn named_act(word: &str, value: &str) -> Option<Act> {
         "window" => Act::NewWindow,
         "close" => Act::Close,
         "reload" => Act::Reload,
+        "timeline" => Act::Timeline,
+        "earlier" => Act::Step { earlier: true },
+        "later" => Act::Step { earlier: false },
+        "now" => Act::Now,
+        "bring" => Act::Bring,
         _ => return None,
     })
+}
+
+/// `--set search <words>` and `--set meaning <words>`: the field opens with the words in it, and
+/// the list follows, by name or by meaning.
+fn search_for(state: &mut Files, id: window::Id, words: &str, meaning: bool) -> Task<Message> {
+    let opened = open_search(state, id);
+    let typed = search_typed(state, id, words.to_string());
+    if !meaning {
+        return Task::batch([opened, typed]);
+    }
+    Task::batch([opened, typed, search_entered(state, id)])
 }
 
 /// What a press on a disk in the sidebar starts.
@@ -1189,6 +1473,10 @@ fn set_menu(state: &mut Files, id: window::Id, word: &str) -> Task<Message> {
     if which == Which::Main {
         return main_menu(state, id);
     }
+    let top = state
+        .windows
+        .get(&id)
+        .map_or(0.0, |browser| crate::view::list_top(state, browser));
     let at = state.windows.get(&id).map(|browser| {
         let chosen = browser
             .cursor
@@ -1197,10 +1485,7 @@ fn set_menu(state: &mut Files, id: window::Id, word: &str) -> Task<Message> {
             .unwrap_or(0);
         #[allow(clippy::cast_precision_loss)]
         let row = (chosen as f32 + 0.5) * ROW - browser.scroll;
-        Point::new(
-            crate::view::SIDEBAR + 240.0,
-            crate::view::LIST_TOP + row.max(0.0),
-        )
+        Point::new(crate::view::SIDEBAR + 240.0, top + row.max(0.0))
     });
     open_menu(state, id, which, at);
     Task::none()

@@ -69,6 +69,11 @@ pub fn items(files: &Files, browser: &Browser, id: window::Id, menu: &Menu) -> V
         files.options.hidden,
         Message::Do(id, Act::Hidden),
     );
+    // nothing in a moment can be changed: a snapshot is read only, and what it holds is brought
+    // back into the folder rather than worked on where it lies
+    if let Some(items) = in_a_moment(browser, id, menu.which) {
+        return items;
+    }
     match (menu.which, in_trash) {
         (Which::Selection, false) => selection(browser, id, menu),
         (Which::Selection, true) => vec![
@@ -94,14 +99,28 @@ pub fn items(files: &Files, browser: &Browser, id: window::Id, menu: &Menu) -> V
             ),
             Item::new("Select all", act(Act::SelectAll)),
         ],
-        (Which::Main, false) => vec![
-            Item::new("New window", act(Act::NewWindow)),
-            Item::new("New folder", act(Act::NewFolder)),
-            Item::Line,
-            hidden,
-            Item::Line,
-            Item::new("Open in terminal", act(Act::Terminal)),
-        ],
+        (Which::Main, false) => {
+            let mut items = vec![
+                Item::new("New window", act(Act::NewWindow)),
+                Item::new("New folder", act(Act::NewFolder)),
+                Item::Line,
+                Item::new("Search", act(Act::Search)),
+            ];
+            if browser
+                .location
+                .about()
+                .is_some_and(crate::timeline::covers)
+            {
+                items.push(Item::new("Timeline", act(Act::Timeline)));
+            }
+            items.extend([
+                Item::Line,
+                hidden,
+                Item::Line,
+                Item::new("Open in terminal", act(Act::Terminal)),
+            ]);
+            items
+        }
         (Which::Main, true) => vec![
             Item::new("New window", act(Act::NewWindow)),
             Item::new(
@@ -110,6 +129,31 @@ pub fn items(files: &Files, browser: &Browser, id: window::Id, menu: &Menu) -> V
             ),
         ],
     }
+}
+
+/// The menus of a moment in the Timeline: what is selected is opened as it was or put back, and
+/// the folder itself can be put back whole. `None` when the window is not in one.
+fn in_a_moment(browser: &Browser, id: window::Id, which: Which) -> Option<Vec<Item<Message>>> {
+    browser.location.at()?;
+    let act = |act: Act| Some(Message::Do(id, act));
+    let items = match which {
+        Which::Selection => vec![
+            Item::new("Open", act(Act::Open)),
+            Item::Line,
+            Item::new("Restore", act(Act::Bring)),
+        ],
+        Which::Folder => vec![
+            Item::new("Restore everything", act(Act::Bring)),
+            Item::new("Select all", act(Act::SelectAll)),
+        ],
+        Which::Main => vec![
+            Item::new("New window", act(Act::NewWindow)),
+            Item::new("Restore everything", act(Act::Bring)),
+            Item::Line,
+            Item::new("Back to now", act(Act::Now)),
+        ],
+    };
+    Some(items)
 }
 
 /// What can be done with the selection in a folder: open it, with the app it opens with or
