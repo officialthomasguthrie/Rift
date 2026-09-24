@@ -156,6 +156,7 @@ where the answer shows up as rows under it.
 """
 
 import argparse
+import base64
 import collections
 import functools
 import glob
@@ -244,6 +245,37 @@ def qmp(path, *commands):
         replies.append(reply["return"])
     sock.close()
     return replies[1:]
+
+
+def pdf_bytes(pages):
+    """A small PDF, one page for each list of lines. The streams are not compressed and the xref
+    table holds every object, which is all a program that reads PDFs needs. The lines hold no
+    brackets or backslashes, which a PDF string would take as its own."""
+    objects = [(1, "<< /Type /Catalog /Pages 2 0 R >>")]
+    font = 3 + len(pages) * 2
+    kids = " ".join(f"{3 + at * 2} 0 R" for at in range(len(pages)))
+    objects.append((2, f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>"))
+    for at, lines in enumerate(pages):
+        page = 3 + at * 2
+        drawn = ("BT /F1 12 Tf 72 720 Td 16 TL\n"
+                 + "".join(f"({line}) Tj T*\n" for line in lines) + "ET")
+        objects.append((page, f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                              f"/Resources << /Font << /F1 {font} 0 R >> >> "
+                              f"/Contents {page + 1} 0 R >>"))
+        objects.append((page + 1, f"<< /Length {len(drawn)} >>\nstream\n{drawn}\nendstream"))
+    objects.append((font, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"))
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+    for number, body in objects:
+        offsets[number] = len(out)
+        out += f"{number} 0 obj\n{body}\nendobj\n".encode("ascii")
+    started = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("ascii")
+    for number in range(1, len(objects) + 1):
+        out += f"{offsets[number]:010d} 00000 n \n".encode("ascii")
+    out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{started}\n%%EOF\n").encode("ascii")
+    return bytes(out)
 
 
 def read_ppm(path):
@@ -421,6 +453,17 @@ FILES_FOLDERS = ["Documents", "Downloads", "Music", "Pictures", "Videos"]
 FILES_NOTE = "notes.txt"
 FILES_RENAMED = "minutes.txt"
 FILES_FOLDER = "Plans"
+# the pdf step 4c writes into ~/notes: its pages, the words that find it by meaning with none of
+# theirs in it, and the page those words are on, which a row names instead of a line
+SEARCH_PDF = "letter.pdf"
+SEARCH_PDF_PAGES = [
+    ["A letter from Green Lane", "Reference 4471"],
+    ["Your appointment with the dentist is on Tuesday at half past nine.",
+     "Please bring your insurance card, and tell us a day before if you cannot come."],
+]
+SEARCH_PDF_WORDS = "teeth checkup booking"
+SEARCH_PDF_PAGE = 2
+SEARCH_PDF_PHRASE = "insurance card"
 # the Timeline and the search field: the file that changes between a snapshot and now, the one that
 # is deleted after it, the one under another folder a search by name finds, and the words the search
 # by meaning takes, which step 4c wrote ~/notes/bike.txt for
@@ -2727,9 +2770,12 @@ def main():
             "backup.py": ["import shutil", "", "def copy_to_disk(source, target):",
                           "    shutil.copytree(source, target, dirs_exist_ok=True)"],
         }
-        searches = {"bicycle repair": "bike.txt", "duplicate folders onto a drive": "backup.py"}
+        searches = {"bicycle repair": "bike.txt", "duplicate folders onto a drive": "backup.py",
+                    SEARCH_PDF_WORDS: SEARCH_PDF}
+        wording = {name: " ".join(lines) for name, lines in documents.items()}
+        wording[SEARCH_PDF] = " ".join(line for page in SEARCH_PDF_PAGES for line in page)
         for words, name in searches.items():
-            text = (name + " " + " ".join(documents[name])).lower()
+            text = (name + " " + wording[name]).lower()
             shared = [word for word in words.split() if len(word) > 3 and word in text]
             if shared:
                 fail(f"the search for {words!r} shares {shared} with {name}, it would not be by meaning")
@@ -2739,6 +2785,34 @@ def main():
             status, output = run(f"printf '%s\\n' {quoted} > {notes}/{name}", f"{notes}/{name}")
             if status != 0:
                 fail(f"{notes}/{name} could not be written: {without_console(output).strip()!r}")
+
+        # and a pdf, which holds its text the way it is drawn on a page. it goes in as base64 in
+        # pieces the serial console takes, since the shell cannot type the bytes themselves
+        letter = pdf_bytes(SEARCH_PDF_PAGES)
+        encoded = base64.b64encode(letter).decode("ascii")
+        run(f"rm -f {notes}/letter.base64", "anything left of an earlier pdf")
+        for at in range(0, len(encoded), 300):
+            status, output = run(f"printf '%s' '{encoded[at:at + 300]}' >> {notes}/letter.base64",
+                                 f"a piece of {SEARCH_PDF}")
+            if status != 0:
+                fail(f"{SEARCH_PDF} could not be written: {without_console(output).strip()!r}")
+        status, output = run(f"base64 -d {notes}/letter.base64 > {notes}/{SEARCH_PDF}; "
+                             f"and rm {notes}/letter.base64; and stat -c 'pdf=%s' {notes}/{SEARCH_PDF}",
+                             f"{notes}/{SEARCH_PDF}")
+        if status != 0 or f"pdf={len(letter)}" not in without_console(output):
+            fail(f"{notes}/{SEARCH_PDF} is not the {len(letter)} bytes it was written from: "
+                 f"{without_console(output).strip()!r}")
+
+        # pdftotext reads it in a sandbox with no network, which is the one place a pdf is parsed.
+        # the form feed it puts between pages is what makes a part of the index a page
+        status, printed = run(f"airlock text {notes}/{SEARCH_PDF} | tr '\\f' '@'",
+                              f"the text of {SEARCH_PDF} out of the sandbox")
+        printed = without_console(printed)
+        print(f"\nboot-test: airlock text {SEARCH_PDF} printed:\n{printed}", flush=True)
+        if status != 0 or SEARCH_PDF_PHRASE not in printed or "@" not in printed:
+            fail(f"airlock text exited with {status} and did not write out {SEARCH_PDF_PHRASE!r} "
+                 f"with a form feed between the pages: {printed[-300:]!r}")
+        ok(f"airlock text wrote out the text of {SEARCH_PDF} in a sandbox, page by page")
 
         # the timer's unit, started now instead of ten minutes after login. start waits for a oneshot
         status, output = run("systemctl --user start quasar-index.service", "the index of home")
@@ -2761,20 +2835,27 @@ def main():
         counted = re.search(r"(\d+) files? (?:is|are) in the index\. (\d+) (?:was|were) new or changed", printed)
         if status != 0 or not counted:
             fail(f"rift ai index exited with {status}: {printed!r}")
-        if int(counted.group(1)) < len(documents) or counted.group(2) != "0":
-            fail(f"rift ai index says {counted.group(0)!r}, expected the {len(documents)} files and none read again")
+        indexed = len(documents) + 1
+        if int(counted.group(1)) < indexed or counted.group(2) != "0":
+            fail(f"rift ai index says {counted.group(0)!r}, expected the {indexed} files and none read again")
 
+        best = {}
         for words, name in searches.items():
             status, printed = run(f"rift ai search {words}", f"a search for {words}")
             printed = without_console(printed)
             print(f"\nboot-test: rift ai search {words} printed:\n{printed}", flush=True)
-            rows = re.findall(r"^(~/\S+):(\d+)[ \t]+(\d{4}-\d{2}-\d{2})[ \t]*$", printed, re.M)
+            rows = re.findall(r"^(~/\S+):(page \d+|\d+)[ \t]+(\d{4}-\d{2}-\d{2})[ \t]*$", printed, re.M)
             if status != 0 or not rows:
                 fail(f"rift ai search {words} exited with {status} and listed no files")
             if rows[0][0] != f"~/notes/{name}":
                 fail(f"rift ai search {words} put {rows[0][0]} first, expected ~/notes/{name}")
+            best[name] = rows[0][1]
         ok("rift ai search found " + " and ".join(f"{name} for {words!r}" for words, name in searches.items())
            + ", by meaning")
+        # a pdf has pages and no lines, so its row says which page the words are on
+        if best[SEARCH_PDF] != f"page {SEARCH_PDF_PAGE}":
+            fail(f"the row for {SEARCH_PDF} says {best[SEARCH_PDF]!r}, expected page {SEARCH_PDF_PAGE}")
+        ok(f"the row for {SEARCH_PDF} names page {SEARCH_PDF_PAGE}, where the words it was found by are")
 
     # 4b. `rift doctor`: no check fails, and orbit and quasar each have a row. with the model
     # loaded, quasar's row has to pass
@@ -6575,6 +6656,34 @@ def main():
                 shot(f"{stem}-files-meaning{extension}", "files-meaning")
                 ok(f"the search for {FILES_MEANING!r} put {FILES_FOUND} first, by meaning, from the index "
                    "Quasar's model made of home")
+
+                # the pdf of step 4c the same way: its text came out of the sandbox pdftotext ran
+                # in, so the index holds its pages and the field finds it like any other file. no
+                # name in home holds these words, so the list is empty by name and every row that
+                # comes after is the answer to this search and not the one before it
+                files_set("escape", "now", "Escape, which closes the field")
+                files_until(30, lambda lines: files_value(lines, "search-kind") is None,
+                            "the field closed before the next search")
+                files_set("search", SEARCH_PDF_WORDS, f"the field with {SEARCH_PDF_WORDS} in it")
+                files_until(60, lambda lines: files_value(lines, "search-kind") == "name"
+                            and not any(line.startswith("row ") for line in lines),
+                            "no name in home with those words in it")
+                files_set("meaning", SEARCH_PDF_WORDS, f"a search for {SEARCH_PDF_WORDS}")
+                files_pdf = files_until(180, lambda lines: files_value(lines, "search-kind") == "meaning"
+                                        and (files_value(lines, "search-problem") is not None
+                                             or any(line.startswith("row ") for line in lines)),
+                                        f"what the index found for {SEARCH_PDF_WORDS}")
+                files_pdf_why = files_value(files_pdf, "search-problem")
+                if files_pdf_why:
+                    fail(f"the search by meaning said {files_pdf_why!r}, and step 4c wrote {SEARCH_PDF}")
+                files_pdf_rows = [line for line in files_pdf if line.startswith("row ")]
+                if not files_pdf_rows or not files_pdf_rows[0].endswith(f" in notes/{SEARCH_PDF}"):
+                    fail(f"the search for {SEARCH_PDF_WORDS!r} put {files_pdf_rows[:1]} first, "
+                         f"expected notes/{SEARCH_PDF}")
+                point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
+                shot(f"{stem}-files-pdf{extension}", "files-pdf")
+                ok(f"the search field put {SEARCH_PDF} first for {SEARCH_PDF_WORDS!r}, out of the pages "
+                   "of the pdf")
                 files_set("escape", "now", "Escape, which closes the field")
 
             # 5q. pictures. the grid is the other way to show a folder: a tile for each thing with
