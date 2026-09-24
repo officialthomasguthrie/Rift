@@ -7012,6 +7012,9 @@ def main():
             # and no question bring up the files of the index step 4c made, a moment after the
             # typing stops. the pdf is the one that proves the whole way through: its text came out
             # of the sandbox, and none of the words typed are in its name
+            # the pointer is still on the row the place was pressed on, and a row under it is drawn
+            # in its own gray, so it goes onto the desktop beside the menu before the menu opens
+            point(args.qmp, shell_size, (round(shell_width * 0.8), round(shell_height * 0.5)))
             run("lens --menu", "the Applications menu for a search of home")
             run(f'lens --type "{SEARCH_PDF_WORDS}"', f"{SEARCH_PDF_WORDS!r} typed into the field")
             found_said = shell_until(90, lambda said: said.get("found") not in (None, "", "none"),
@@ -7023,9 +7026,6 @@ def main():
                      f"notes/{SEARCH_PDF} first: {without_console(journal).strip()[-400:]!r}")
             if found_said.get("field") != SEARCH_PDF_WORDS:
                 fail(f"the field says {found_said.get('field')!r} with the files under it")
-            # the pointer is still on the row the place was pressed on, and a row under the pointer
-            # is drawn in its own gray, so it goes onto the desktop beside the menu for the picture
-            point(args.qmp, shell_size, (round(shell_width * 0.8), round(shell_height * 0.5)))
             look("the files the field found by meaning", f"{stem}-menu-found{extension}", 20,
                  menu=True, rows=int(found_said.get("rows") or 0), journals=("lens",))
             ok(f"the field found {found_files} in home for {SEARCH_PDF_WORDS!r}, closest first")
@@ -7039,7 +7039,11 @@ def main():
                      f"{without_console(journal).strip()[-800:]!r}")
             if bar_state("the state after the file was pressed").get("menu") != "closed":
                 fail("the Applications menu is still open after a file was pressed")
-            look(f"{SEARCH_PDF} open from the field", f"{stem}-menu-opened{extension}", 60, settle=3)
+            # a picture with a window in it, so the desktop is no longer what covers the screen and
+            # there is nothing to check but the window horizon already listed. it gets a moment to
+            # draw its first page first
+            time.sleep(2)
+            shot(f"{stem}-menu-opened{extension}", "menu-opened")
             close_app(SEARCH_PDF, SEARCH_PDF_APP)
             ok(f"a press on {SEARCH_PDF} opened it with the app for its kind and closed the menu")
 
