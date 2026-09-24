@@ -50,7 +50,7 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ),
     (
         "ai",
-        "Ask Quasar a question, or search home by meaning",
+        "Ask Quasar a question, search home by meaning, or say words out loud",
         "Phase 1",
     ),
     ("run", "Run a command inside a Airlock sandbox", "Phase 2"),
