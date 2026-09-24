@@ -6814,8 +6814,10 @@ def main():
             shot(f"{stem}-dock-places{extension}", "dock-places")
             # and a press on it opens the trash in Files
             click(args.qmp, shell_size, shell_place_point("trash", shell_said))
+            # a row of the trash says where the file was, the way 5n reads them
             files_until(60, lambda lines: files_value(lines, "location") == "trash"
-                        and f"row file {FILES_NOTE}" in lines, "the trash open in Files")
+                        and f"row file {FILES_NOTE} from {shell_document}" in lines,
+                        "the trash open in Files")
             ok(f"the trash stood at the right end of the dock with {FILES_NOTE} in it, and a press "
                "opened it in Files")
             # emptying it takes the place away again, since there is nothing left to open
