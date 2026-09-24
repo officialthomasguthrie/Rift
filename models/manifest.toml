@@ -122,14 +122,18 @@ size_gb = 1.6
 license = "MIT"
 shipped = false
 
-# text to speech
+# text to speech. quasar says a sentence with the first voice on the drive. the file is the piper
+# voice sherpa-onnx reads: the same weights rhasspy trained, with the sample rate and the rest of
+# what the program needs written into the model's own metadata, and the phonemes beside it
 
 [[tts]]
 id = "piper-en-us-lessac-medium"
 file = "en_US-lessac-medium.onnx"
-url = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-config_url = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
-sha256 = ""
+tokens = "en_US-lessac-medium.tokens.txt"
+url = "https://huggingface.co/csukuangfj/vits-piper-en_US-lessac-medium/resolve/main/en_US-lessac-medium.onnx"
+tokens_url = "https://huggingface.co/csukuangfj/vits-piper-en_US-lessac-medium/resolve/main/tokens.txt"
+sha256 = "ea793a648ce0370665f99fbf891eae3b3a973565c72b08534bb5b2c04e8f2332"
+tokens_sha256 = "87c8ef66eae5473ed0cc0366b3964c736ca6c5f676c979522ea31234e47430b9"
 size_gb = 0.06
 license = "MIT"
 shipped = true

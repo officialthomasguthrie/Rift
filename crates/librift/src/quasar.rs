@@ -19,6 +19,10 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(300);
 #[cfg(feature = "bus")]
 const EMBED_TIMEOUT: Duration = Duration::from_secs(150);
 
+/// How long a sentence said out loud may take. quasard gives the voice two minutes.
+#[cfg(feature = "bus")]
+const SAY_TIMEOUT: Duration = Duration::from_secs(150);
+
 /// What a reply to `Ask` means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
@@ -47,6 +51,12 @@ pub struct Status {
     pub embedding_model: String,
     /// Why search by meaning cannot run, in a sentence. Empty when the embedding model runs.
     pub embedding_error: String,
+    /// The voice's state, for words said out loud: `none` or `ready`.
+    pub voice_state: String,
+    /// Manifest id of the voice that says words out loud. Empty when there is none.
+    pub voice: String,
+    /// Why nothing can say words out loud, in a sentence. Empty when a voice is on the drive.
+    pub voice_error: String,
 }
 
 /// What the two strings `Ask` returned mean.
@@ -107,7 +117,25 @@ pub fn status() -> Result<Status, String> {
         embedding_state: get("EmbeddingState")?,
         embedding_model: get("EmbeddingModel")?,
         embedding_error: get("EmbeddingError")?,
+        voice_state: get("VoiceState")?,
+        voice: get("Voice")?,
+        voice_error: get("VoiceError")?,
     })
+}
+
+/// The words said out loud by the voice on the drive, as a wav.
+///
+/// # Errors
+///
+/// A sentence when the bus or Quasar is not there, or no voice could say the words.
+#[cfg(feature = "bus")]
+pub fn say(text: &str) -> Result<Vec<u8>, String> {
+    let quasar = Component::Quasar;
+    let connection = bus::connect(SAY_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, quasar)?;
+    proxy
+        .call("Say", &(text,))
+        .map_err(|e| bus::sentence(quasar, e))
 }
 
 /// A connection to quasard that stays open for many calls, such as the vectors for every part of

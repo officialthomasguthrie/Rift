@@ -16,6 +16,9 @@ pub struct Manifest {
     /// Embedding models, for search by meaning.
     #[serde(default)]
     pub embedding: Vec<Embedding>,
+    /// Voices, for saying words out loud.
+    #[serde(default)]
+    pub tts: Vec<Voice>,
 }
 
 /// One chat model from the manifest.
@@ -76,6 +79,17 @@ pub struct Embedding {
     /// What goes in front of a text that is searched.
     #[serde(default)]
     pub document_prefix: String,
+}
+
+/// One voice from the manifest, for saying words out loud.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Voice {
+    /// Short name.
+    pub id: String,
+    /// File name under the models directory.
+    pub file: String,
+    /// The phonemes the voice was trained on, in a file beside it.
+    pub tokens: String,
 }
 
 /// Memory a model needs, in gigabytes.
@@ -258,6 +272,25 @@ pub fn on_drive(models_dir: &Path, file: &str) -> bool {
 }
 
 impl Manifest {
+    /// Picks the voice that says words out loud: the first one the manifest lists whose files are
+    /// both on the drive.
+    ///
+    /// # Errors
+    ///
+    /// A sentence that says why nothing can say the words.
+    pub fn pick_voice(&self, on_drive: impl Fn(&str) -> bool) -> Result<&Voice, String> {
+        self.tts
+            .iter()
+            .find(|voice| on_drive(&voice.file) && on_drive(&voice.tokens))
+            .ok_or_else(|| match self.tts.first() {
+                Some(voice) => format!(
+                    "Saying words out loud needs {}, which is not on the drive.",
+                    voice.file
+                ),
+                None => "The model manifest has no voice.".into(),
+            })
+    }
+
     /// Picks the embedding model to run: the first one the manifest lists that is on the drive.
     /// One is as good as another for a machine of any size, they are all small.
     ///
@@ -357,6 +390,27 @@ file = "embed.gguf"
             Err("Search by meaning needs a.gguf, which is not on the drive.".to_string())
         );
         assert!(Manifest::default().pick_embedding(|_| true).is_err());
+    }
+
+    #[test]
+    fn a_voice_runs_when_both_its_files_are_on_the_drive() {
+        let manifest = Manifest::parse(
+            "[[tts]]\nid = \"a\"\nfile = \"a.onnx\"\ntokens = \"a.tokens.txt\"\n\n\
+             [[tts]]\nid = \"b\"\nfile = \"b.onnx\"\ntokens = \"b.tokens.txt\"\n",
+        )
+        .unwrap();
+        let id = |files| {
+            manifest
+                .pick_voice(drive(files))
+                .map(|voice| voice.id.as_str())
+        };
+        assert_eq!(id(&["a.onnx", "a.tokens.txt", "b.onnx"]), Ok("a"));
+        assert_eq!(id(&["a.onnx", "b.onnx", "b.tokens.txt"]), Ok("b"));
+        assert_eq!(
+            id(&["a.onnx"]),
+            Err("Saying words out loud needs a.onnx, which is not on the drive.".to_string())
+        );
+        assert!(Manifest::default().pick_voice(|_| true).is_err());
     }
 
     #[test]
@@ -509,5 +563,11 @@ file = "embed.gguf"
         assert_eq!(embedding.id, "nomic-embed-text-v1.5-q8");
         assert_eq!(embedding.query_prefix, "search_query: ");
         assert_eq!(embedding.document_prefix, "search_document: ");
+
+        // the voice that says words out loud, and the phonemes beside it
+        let voice = manifest.pick_voice(|_| true).unwrap();
+        assert_eq!(voice.id, "piper-en-us-lessac-medium");
+        assert_eq!(voice.file, "en_US-lessac-medium.onnx");
+        assert_eq!(voice.tokens, "en_US-lessac-medium.tokens.txt");
     }
 }

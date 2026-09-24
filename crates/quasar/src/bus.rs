@@ -3,6 +3,8 @@
 //! `Ask` takes a question and returns two strings, a kind and a text: `answer` and the answer in
 //! words, or `action` and the words of one of Lens's OS commands. It runs nothing. `Embed` turns
 //! texts into vectors for search by meaning; whoever calls it reads the files, Quasar never does.
+//! `Say` turns words into a wav and hands the caller the audio itself, for the same reason: what
+//! is done with it is the caller's, and Quasar writes into nobody's files.
 //! The properties say which models run, for which tier, and whether they answer yet; every change
 //! to them is signalled, so a client can wait for `ready` without polling.
 
@@ -13,7 +15,7 @@ use librift::Component;
 use zbus::fdo;
 
 use crate::backend::{State, Status};
-use crate::{chat, embed};
+use crate::{chat, embed, voice};
 use librift::models::Embedding;
 
 /// The longest question `Ask` takes, in characters.
@@ -23,6 +25,9 @@ const MOST_TEXTS: usize = 32;
 /// The longest text `Embed` takes, in characters. A part of a file is at most 1500, and 4000 is
 /// still well inside the embedding model's context at one token a character.
 const LONGEST_TEXT: usize = 4000;
+/// The longest text `Say` takes, in characters. About a minute of speech, which is as much as
+/// anyone wants read out in one go and keeps the wav well inside what a bus message carries.
+const LONGEST_SAY: usize = 1000;
 
 /// The object that answers on the bus.
 pub struct Quasar {
@@ -36,6 +41,12 @@ pub struct Quasar {
     pub embedding_socket: PathBuf,
     /// The embedding models in the manifest, for the words that go in front of each text.
     pub embeddings: Vec<Embedding>,
+    /// The voice's state. There is no server for it, so it is ready as soon as one is on the drive.
+    pub voice: Arc<Mutex<Status>>,
+    /// How to run the voice.
+    pub speaker: Arc<voice::Voice>,
+    /// The voices in the manifest, for the files the one that runs reads.
+    pub voices: Vec<librift::models::Voice>,
 }
 
 fn now(status: &Mutex<Status>) -> Status {
@@ -70,6 +81,25 @@ impl Quasar {
         let texts = admit_texts(kind, texts, &status, model)?;
         let socket = self.embedding_socket.clone();
         blocking::unblock(move || embed::vectors(&socket, &texts))
+            .await
+            .map_err(fdo::Error::Failed)
+    }
+
+    /// The words as a wav, said with the voice on the drive.
+    #[zbus(out_args("wav"))]
+    async fn say(&self, text: String) -> fdo::Result<Vec<u8>> {
+        let status = now(&self.voice);
+        let text = admit_words(&text, &status)?;
+        let voice = self
+            .voices
+            .iter()
+            .find(|voice| voice.id == status.model)
+            .cloned()
+            .ok_or_else(|| {
+                fdo::Error::Failed("The voice that runs is not in the manifest.".into())
+            })?;
+        let speaker = Arc::clone(&self.speaker);
+        blocking::unblock(move || speaker.say(&voice, &text))
             .await
             .map_err(fdo::Error::Failed)
     }
@@ -115,6 +145,24 @@ impl Quasar {
     fn embedding_error(&self) -> String {
         now(&self.embedding).error
     }
+
+    /// Manifest id of the voice that says words out loud. Empty when there is none.
+    #[zbus(property)]
+    fn voice(&self) -> String {
+        now(&self.voice).model
+    }
+
+    /// The voice's state: `none` or `ready`. Nothing runs between sentences, so it never loads.
+    #[zbus(property)]
+    fn voice_state(&self) -> String {
+        now(&self.voice).state.name().to_string()
+    }
+
+    /// Why nothing can say words out loud, in a sentence. Empty when a voice is on the drive.
+    #[zbus(property)]
+    fn voice_error(&self) -> String {
+        now(&self.voice).error
+    }
 }
 
 /// The question as it goes to the model, or why it cannot go now.
@@ -134,6 +182,23 @@ fn admit(question: &str, status: &Status) -> fdo::Result<String> {
             "The model is still loading. Try again in a moment.".into(),
         )),
         State::NoModel | State::Failed => Err(fdo::Error::Failed(status.error.clone())),
+    }
+}
+
+/// The words as they go to the voice, or why they cannot go now.
+fn admit_words(text: &str, status: &Status) -> fdo::Result<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(fdo::Error::InvalidArgs("Say needs words to say.".into()));
+    }
+    if text.chars().count() > LONGEST_SAY {
+        return Err(fdo::Error::InvalidArgs(format!(
+            "Say takes at most {LONGEST_SAY} characters at a time."
+        )));
+    }
+    match status.state {
+        State::Ready => Ok(text.to_string()),
+        _ => Err(fdo::Error::Failed(status.error.clone())),
     }
 }
 
@@ -226,7 +291,10 @@ pub fn announce(connection: &zbus::blocking::Connection) -> zbus::Result<()> {
         quasar.error_changed(emitter).await?;
         quasar.embedding_state_changed(emitter).await?;
         quasar.embedding_model_changed(emitter).await?;
-        quasar.embedding_error_changed(emitter).await
+        quasar.embedding_error_changed(emitter).await?;
+        quasar.voice_state_changed(emitter).await?;
+        quasar.voice_changed(emitter).await?;
+        quasar.voice_error_changed(emitter).await
     })
 }
 
@@ -356,6 +424,35 @@ mod tests {
         assert!(matches!(
             admit_texts("query", texts(&["a"]), &ready, None),
             Err(fdo::Error::Failed(why)) if why.contains("not in the manifest")
+        ));
+    }
+
+    #[test]
+    fn words_go_to_the_voice_once_one_is_on_the_drive() {
+        let ready = Status {
+            model: "piper-en-us-lessac-medium".into(),
+            ..status(State::Ready, "")
+        };
+        assert_eq!(
+            admit_words("  Rift says this out loud.\n", &ready).unwrap(),
+            "Rift says this out loud."
+        );
+        assert!(matches!(
+            admit_words(" \n", &ready),
+            Err(fdo::Error::InvalidArgs(_))
+        ));
+        let long = "a".repeat(LONGEST_SAY + 1);
+        assert!(matches!(
+            admit_words(&long, &ready),
+            Err(fdo::Error::InvalidArgs(_))
+        ));
+        let none = status(
+            State::NoModel,
+            "Saying words out loud needs en_US-lessac-medium.onnx, which is not on the drive.",
+        );
+        assert!(matches!(
+            admit_words("hello", &none),
+            Err(fdo::Error::Failed(why)) if why.starts_with("Saying words out loud needs")
         ));
     }
 

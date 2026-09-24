@@ -1,9 +1,10 @@
 //! `rift ai`: a question for Quasar from the terminal. An answer is printed. A command Quasar
 //! proposes is printed as well and follows the rule Lens's field follows: one that only reads
 //! runs at once, one that changes something runs after a yes. Without a question it prints
-//! Quasar's state. `rift ai index` and `rift ai search` are search by meaning in home.
+//! Quasar's state. `rift ai index` and `rift ai search` are search by meaning in home, and
+//! `rift ai say` reads words out loud with the voice on the drive.
 
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use librift::os::{self, Action};
 use librift::quasar::{self, Reply, Status};
@@ -12,7 +13,8 @@ use crate::{search, text};
 
 const USAGE: &str = "Usage: rift ai [--yes] [question]
        rift ai index
-       rift ai search <words>";
+       rift ai search <words>
+       rift ai say [--wav <file>] <words>";
 
 const HELP: &str =
     "Asks Quasar a question and prints the answer. When Quasar proposes a command that \
@@ -20,7 +22,11 @@ changes something, it runs only after you confirm it, or at once with --yes. Wit
 shows which models Quasar runs and whether they are ready.
 
   index    bring the search index of your home folder up to date. It also runs every 15 minutes.
-  search   list the files in your home folder closest in meaning to the words, best first.";
+  search   list the files in your home folder closest in meaning to the words, best first.
+  say      read the words out loud. With --wav the audio goes into that file instead.";
+
+/// The program that plays the wav.
+const PLAYER: &str = "pw-play";
 
 pub fn run(args: &[String]) -> ExitCode {
     let (yes, words) = match args.first().map(String::as_str) {
@@ -30,6 +36,7 @@ pub fn run(args: &[String]) -> ExitCode {
         }
         Some("index") => return search::index(&args[1..]),
         Some("search") => return search::search(&args[1..]),
+        Some("say") => return say(&args[1..]),
         Some("--yes" | "-y") => (true, &args[1..]),
         _ => (false, args),
     };
@@ -49,6 +56,87 @@ pub fn run(args: &[String]) -> ExitCode {
         Reply::Action(action) => act(&action, yes),
         Reply::Refused(why) => {
             eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `rift ai say`: the words out loud, or into a wav file of the caller's choosing.
+fn say(args: &[String]) -> ExitCode {
+    let (wav, words) = if args.first().is_some_and(|arg| arg == "--wav") {
+        let Some(file) = args.get(1) else {
+            eprintln!("--wav needs a file to write.");
+            return ExitCode::FAILURE;
+        };
+        (Some(file.clone()), &args[2..])
+    } else {
+        (None, args)
+    };
+    let text = words.join(" ");
+    if text.trim().is_empty() {
+        eprintln!("rift ai say needs words to say.");
+        return ExitCode::FAILURE;
+    }
+    let audio = match quasar::say(&text) {
+        Ok(audio) => audio,
+        Err(why) => {
+            eprintln!("{why}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match wav {
+        Some(file) => match std::fs::write(&file, &audio) {
+            Ok(()) => {
+                println!("{}", wrote(&file, audio.len()));
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Could not write {file}: {e}.");
+                ExitCode::FAILURE
+            }
+        },
+        None => play(&audio),
+    }
+}
+
+/// The line that says where the audio went and how long it is.
+fn wrote(file: &str, bytes: usize) -> String {
+    format!("Wrote {} to {file}.", seconds(bytes))
+}
+
+/// How long a wav of this many bytes is, as the voice writes them: one channel of 16 bit samples
+/// at 22050 a second, after a header of 44 bytes.
+fn seconds(bytes: usize) -> String {
+    let samples = bytes.saturating_sub(44) / 2;
+    #[expect(clippy::cast_precision_loss, reason = "a wav of seconds, not of hours")]
+    let seconds = samples as f64 / 22050.0;
+    format!("{seconds:.1} seconds")
+}
+
+/// Plays the wav on the machine's speakers. The player reads a file, so the audio goes into the
+/// caller's own runtime directory for as long as it plays and is gone afterwards.
+fn play(audio: &[u8]) -> ExitCode {
+    let file = std::env::var_os("XDG_RUNTIME_DIR")
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from)
+        .join(format!("rift-say-{}.wav", std::process::id()));
+    if let Err(e) = std::fs::write(&file, audio) {
+        eprintln!("Could not write the words to {}: {e}.", file.display());
+        return ExitCode::FAILURE;
+    }
+    let played = Command::new(PLAYER)
+        .arg(&file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status();
+    let _ = std::fs::remove_file(&file);
+    match played {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => {
+            eprintln!("{PLAYER} ended with {status}.");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("Could not play the words: {e}.");
             ExitCode::FAILURE
         }
     }
@@ -92,6 +180,15 @@ fn rows(status: &Status) -> Vec<(&'static str, String)> {
     if !status.embedding_error.is_empty() {
         rows.push(("Search error", status.embedding_error.clone()));
     }
+    let voice = if status.voice.is_empty() {
+        status.voice_state.clone()
+    } else {
+        format!("{}, {}", status.voice_state, status.voice)
+    };
+    rows.push(("Voice", voice));
+    if !status.voice_error.is_empty() {
+        rows.push(("Voice error", status.voice_error.clone()));
+    }
     rows
 }
 
@@ -130,7 +227,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ready_models_are_four_rows() {
+    fn ready_models_are_five_rows() {
         let ready = Status {
             state: "ready".into(),
             model: "qwen3-0.6b-q8_0".into(),
@@ -139,11 +236,26 @@ mod tests {
             embedding_state: "ready".into(),
             embedding_model: "nomic-embed-text-v1.5-q8".into(),
             embedding_error: String::new(),
+            voice_state: "ready".into(),
+            voice: "piper-en-us-lessac-medium".into(),
+            voice_error: String::new(),
         };
         assert_eq!(
             text::table(&rows(&ready)),
             "State:  ready\nModel:  qwen3-0.6b-q8_0\nTier:   small\n\
-             Search: ready, nomic-embed-text-v1.5-q8\n"
+             Search: ready, nomic-embed-text-v1.5-q8\n\
+             Voice:  ready, piper-en-us-lessac-medium\n"
+        );
+    }
+
+    #[test]
+    fn a_wav_is_as_long_as_the_samples_in_it() {
+        assert_eq!(seconds(44), "0.0 seconds");
+        assert_eq!(seconds(44 + 22050 * 2), "1.0 seconds");
+        assert_eq!(seconds(44 + 22050 * 2 * 5), "5.0 seconds");
+        assert_eq!(
+            wrote("said.wav", 44 + 22050 * 2 * 3),
+            "Wrote 3.0 seconds to said.wav."
         );
     }
 
@@ -159,6 +271,11 @@ mod tests {
             embedding_error:
                 "Search by meaning needs nomic-embed-text-v1.5.Q8_0.gguf, which is not on the drive."
                     .into(),
+            voice_state: "none".into(),
+            voice: String::new(),
+            voice_error: "Saying words out loud needs en_US-lessac-medium.onnx, which is not on \
+                          the drive."
+                .into(),
         };
         assert_eq!(
             rows(&none),
@@ -175,6 +292,13 @@ mod tests {
                     "Search error",
                     "Search by meaning needs nomic-embed-text-v1.5.Q8_0.gguf, which is not on \
                      the drive."
+                        .to_string()
+                ),
+                ("Voice", "none".to_string()),
+                (
+                    "Voice error",
+                    "Saying words out loud needs en_US-lessac-medium.onnx, which is not on the \
+                     drive."
                         .to_string()
                 ),
             ]

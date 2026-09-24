@@ -15,6 +15,9 @@ let
   busName = "dev.rift.Quasar";
   # the embedding model quasard runs for search by meaning. the index waits for its file
   embedding = builtins.head (lib.importTOML ../../models/manifest.toml).embedding;
+  # the voice turns words into phonemes with espeak's data. the screen reader in basics.nix uses
+  # the same build, so this is one store path, not two
+  espeak = pkgs.espeak-ng.override { mbrolaSupport = false; };
   # anyone on the machine may ask and read the properties. only quasar's own user owns the name
   policy = pkgs.writeTextFile {
     name = "quasar-dbus-policy";
@@ -50,6 +53,12 @@ in
       type = lib.types.package;
       default = pkgs.llama-cpp.override { vulkanSupport = true; };
       description = "llama.cpp build used for inference. Vulkan so it works on any GPU vendor.";
+    };
+
+    voice = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.sherpa-onnx;
+      description = "The program that says words out loud. It reads the piper voice in the manifest.";
     };
 
     modelsDir = lib.mkOption {
@@ -114,6 +123,8 @@ in
             "--socket /run/quasar/llama.sock"
             "--embedding-socket /run/quasar/embed.sock"
             "--ctx-size ${toString cfg.contextSize}"
+            "--voice ${cfg.voice}/bin/sherpa-onnx-offline-tts"
+            "--voice-data ${espeak}/share/espeak-ng-data"
           ]
           ++ lib.optional (cfg.model != null) "--model ${cfg.model}"
         );

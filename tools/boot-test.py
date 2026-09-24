@@ -97,7 +97,8 @@ on the system bus until quasard has loaded the model it picked for orbit's tier,
 one in the directory, asks the local api for a short completion and asks quasar a question over the bus
 and through `rift ai`.
 The local api has to refuse the same completion when the request comes with a web page's Origin or
-Host header, and the owner must not reach llama-server's socket behind it.
+Host header, and the owner must not reach llama-server's socket behind it. The voice in the manifest
+says a sentence into a wav, which the test reads back as 22050 Hz mono speech.
 
 With --splash the test also takes a screendump through the qemu monitor while the luks prompt, or the
 first boot's first question, is up and checks that Liftoff's boot screen is on it. The text style, the
@@ -2858,6 +2859,73 @@ def main():
         if best[SEARCH_PDF] != f"page {SEARCH_PDF_PAGE}":
             fail(f"the row for {SEARCH_PDF} says {best[SEARCH_PDF]!r}, expected page {SEARCH_PDF_PAGE}")
         ok(f"the row for {SEARCH_PDF} names page {SEARCH_PDF_PAGE}, where the words it was found by are")
+
+        # 4d. words out loud. the voice is a model on the drive like the others, and nothing runs
+        # between sentences, so it is ready as soon as its files are there. the sound card of this
+        # vm plays nowhere, so the test reads the wav instead of listening to it
+        with open(manifest_path, "rb") as f:
+            say_voice = tomllib.load(f)["tts"][0]["id"]
+        say_deadline = time.monotonic() + args.quasar_timeout
+        while True:
+            say_state = quasar_prop("VoiceState")
+            if say_state == "ready":
+                break
+            if say_state == "none" or time.monotonic() > say_deadline:
+                why = quasar_prop("VoiceError")
+                fail(f"quasar's voice is {say_state or 'not on the bus'} after {since()}: {why}")
+            time.sleep(2)
+        if quasar_prop("Voice") != say_voice:
+            fail(f"quasar's voice is {quasar_prop('Voice')}, the manifest's voice is {say_voice}")
+        status, printed = run("rift ai", "the voice row of rift ai")
+        printed = without_console(printed)
+        if status != 0 or not re.search(rf"^Voice:[ \t]+ready, {re.escape(say_voice)}[ \t]*$", printed, re.M):
+            fail(f"rift ai does not say the voice is ready with {say_voice}: {printed!r}")
+        ok(f"quasar says words out loud with {say_voice}")
+
+        say_words = "Rift runs the model on the drive and says this out loud."
+        say_file = "/home/rift/said.wav"
+        status, printed = run(f'rift ai say --wav {say_file} "{say_words}"', "a sentence out loud")
+        printed = without_console(printed)
+        print(f"\nboot-test: rift ai say printed:\n{printed}", flush=True)
+        said = re.search(r"Wrote ([\d.]+) seconds to " + re.escape(say_file), printed)
+        if status != 0 or not said:
+            fail(f"rift ai say exited with {status} and wrote no wav: {printed!r}")
+
+        # the wav itself: a header the test reads byte by byte, since the file cannot leave the vm
+        _, output = run(f"od -A n -v -t u1 -N 64 {say_file}", "the head of the wav")
+        head = bytes(int(n) for n in re.findall(r"\d+", without_console(output)))
+        if len(head) < 64 or head[:4] != b"RIFF" or head[8:12] != b"WAVE" or head[12:16] != b"fmt ":
+            fail(f"{say_file} does not start like a wav: {head[:16]!r}")
+        say_format, say_channels = int.from_bytes(head[20:22], "little"), int.from_bytes(head[22:24], "little")
+        say_rate, say_bits = int.from_bytes(head[24:28], "little"), int.from_bytes(head[34:36], "little")
+        at = head.find(b"data")
+        if at < 0:
+            fail(f"{say_file} has no data chunk in its first 64 bytes: {head!r}")
+        say_bytes = int.from_bytes(head[at + 4:at + 8], "little")
+        if (say_format, say_channels, say_rate, say_bits) != (1, 1, 22050, 16):
+            fail(f"{say_file} is format {say_format}, {say_channels} channels, {say_rate} Hz, {say_bits} bits, "
+                 "expected plain 22050 Hz mono of 16 bit samples")
+        say_seconds = say_bytes / (say_rate * say_channels * say_bits // 8)
+        if not 2.0 <= say_seconds <= 10.0:
+            fail(f"{say_file} holds {say_seconds:.1f} seconds of audio for {len(say_words)} characters")
+        if abs(say_seconds - float(said.group(1))) > 0.1:
+            fail(f"rift ai say said {said.group(1)} seconds, the wav holds {say_seconds:.1f}")
+
+        # and it is speech, not a file of silence: a wav of nothing but zeros is nothing but zeros
+        _, output = run(f"tr -d '\\0' < {say_file} | wc -c", "the bytes of the wav that are not zero")
+        say_loud = re.search(r"^\s*(\d+)\s*$", without_console(output), re.M)
+        if not say_loud or int(say_loud.group(1)) < say_bytes // 5:
+            fail(f"{say_file} is {say_loud and say_loud.group(1)} bytes of {say_bytes} that are not zero, "
+                 "which is silence, not speech")
+        ok(f"rift ai say wrote {say_seconds:.1f} seconds of 22050 Hz mono speech to {say_file}")
+
+        # the same sentence with no file named goes to the speakers, which this vm has and hears
+        # nothing through
+        status, printed = run('rift ai say "Ready."', "a sentence through the speakers")
+        if status != 0:
+            fail(f"rift ai say exited with {status}: {without_console(printed).strip()!r}")
+        run(f"rm -f {say_file}", "the wav the test wrote")
+        ok("rift ai say played a sentence through the machine's own speakers")
 
     # 4b. `rift doctor`: no check fails, and orbit and quasar each have a row. with the model
     # loaded, quasar's row has to pass

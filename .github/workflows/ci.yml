@@ -409,8 +409,9 @@ jobs:
         run: |
           if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; ls -l /dev/kvm; else echo "no /dev/kvm, qemu will use tcg"; fi
       - name: Read the test models from the manifest
-        # the chat model marked test, and the embedding model the image runs for search by meaning.
-        # every file in models/cache goes into the models subvolume
+        # the chat model marked test, the embedding model the image runs for search by meaning, and
+        # the voice that says words out loud, which is two files. every file in models/cache goes
+        # into the models subvolume
         id: model
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
@@ -419,11 +420,13 @@ jobs:
               manifest = tomllib.load(f)
           [chat] = [m for m in manifest["chat"] if m.get("test")]
           embedding = manifest["embedding"][0]
-          models = [chat, embedding]
+          voice = manifest["tts"][0]
+          files = [(m["sha256"], m["file"], m["url"]) for m in (chat, embedding, voice)]
+          files.append((voice["tokens_sha256"], voice["tokens"], voice["tokens_url"]))
           with open("models/test-models.txt", "w") as f:
-              for model in models:
-                  f.write(f"{model['sha256']} {model['file']} {model['url']}\n")
-          print("key=" + "-".join(model["sha256"][:16] for model in models))
+              for sha256, name, url in files:
+                  f.write(f"{sha256} {name} {url}\n")
+          print("key=" + "-".join(sha256[:16] for sha256, _, _ in files))
           EOF
       - name: Cache the test models
         id: model-cache

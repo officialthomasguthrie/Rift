@@ -1,7 +1,8 @@
 //! quasard: Quasar's daemon. It picks a chat model from the manifest for the tier Orbit reports,
 //! runs llama-server on a unix socket as its child, serves the local api on the loopback address in
 //! front of it, and answers questions on the system bus as `dev.rift.Quasar`. When the manifest's
-//! embedding model is on the drive, a second llama-server runs it for search by meaning.
+//! embedding model is on the drive, a second llama-server runs it for search by meaning, and when
+//! one of its voices is there, `Say` reads words out loud with it.
 
 mod api;
 mod backend;
@@ -9,6 +10,7 @@ mod bus;
 mod chat;
 mod embed;
 mod http;
+mod voice;
 
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -31,6 +33,10 @@ const EMBEDDING_SOCKET: &str = "/run/quasar/embed.sock";
 const CTX_SIZE: u32 = 8192;
 /// The embedding model's context in tokens, the one nomic-embed-text was trained with.
 const EMBEDDING_CTX_SIZE: u32 = 2048;
+/// The program that says words out loud.
+const VOICE: &str = "sherpa-onnx-offline-tts";
+/// The espeak-ng data the voice turns words into phonemes with.
+const VOICE_DATA: &str = "/run/current-system/sw/share/espeak-ng-data";
 
 struct Args {
     manifest: PathBuf,
@@ -42,6 +48,8 @@ struct Args {
     ctx_size: u32,
     model: Option<String>,
     tier: Option<Tier>,
+    voice: PathBuf,
+    voice_data: PathBuf,
     print: bool,
 }
 
@@ -71,18 +79,12 @@ fn main() -> ExitCode {
     };
 
     if args.print {
-        let on_drive = |file: &str| backend.models_dir.join(file).is_file();
-        return match manifest.pick(args.tier, args.model.as_deref(), on_drive) {
-            Ok(pick) => {
-                println!("{}", pick.reason);
-                println!("{}", backend.models_dir.join(&pick.chat.file).display());
-                ExitCode::SUCCESS
-            }
-            Err(why) => {
-                println!("{why}");
-                ExitCode::FAILURE
-            }
-        };
+        return print_pick(
+            &manifest,
+            &backend.models_dir,
+            args.tier,
+            args.model.as_deref(),
+        );
     }
 
     let status = Arc::new(Mutex::new(Status::default()));
@@ -101,12 +103,21 @@ fn main() -> ExitCode {
         let status = Arc::clone(&status);
         thread::spawn(move || api::serve(&listener, &socket, &status));
     }
+    let voice = Arc::new(Mutex::new(Status::default()));
+    let speaker = Arc::new(voice::Voice {
+        program: args.voice,
+        models_dir: args.models_dir.clone(),
+        data_dir: args.voice_data,
+    });
     let quasar = bus::Quasar {
         status: Arc::clone(&status),
         socket: backend.socket.clone(),
         embedding: Arc::clone(&embedding),
         embedding_socket: args.embedding_socket.clone(),
         embeddings: manifest.embedding.clone(),
+        voice: Arc::clone(&voice),
+        speaker: Arc::clone(&speaker),
+        voices: manifest.tts.clone(),
     };
     let connection = match bus::connect(quasar) {
         Ok(connection) => connection,
@@ -135,6 +146,7 @@ fn main() -> ExitCode {
         role: Role::Embedding,
     };
     search_by_meaning(embedder, manifest.clone(), embedding, connection.clone());
+    words_out_loud(speaker, manifest.clone(), voice, connection.clone());
     let named = args.model.as_deref();
     let pick = |on_drive: &dyn Fn(&str) -> bool| {
         manifest.pick(tier, named, on_drive).map(|pick| Picked {
@@ -144,6 +156,27 @@ fn main() -> ExitCode {
         })
     };
     backend.supervise(&pick, &status, &|| signal(&connection))
+}
+
+/// `--print`: the model that would run, and where its weights are.
+fn print_pick(
+    manifest: &Manifest,
+    models_dir: &Path,
+    tier: Option<Tier>,
+    named: Option<&str>,
+) -> ExitCode {
+    let on_drive = |file: &str| models_dir.join(file).is_file();
+    match manifest.pick(tier, named, on_drive) {
+        Ok(pick) => {
+            println!("{}", pick.reason);
+            println!("{}", models_dir.join(&pick.chat.file).display());
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            println!("{why}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// The tier Orbit reports, or none when it does not say one quasar knows.
@@ -182,6 +215,17 @@ fn search_by_meaning(
     });
 }
 
+/// Keeps the voice's properties current on a thread of its own. Nothing runs between sentences,
+/// so this only looks for the voice's files.
+fn words_out_loud(
+    speaker: Arc<voice::Voice>,
+    manifest: Manifest,
+    status: Arc<Mutex<Status>>,
+    connection: zbus::blocking::Connection,
+) {
+    thread::spawn(move || speaker.watch(&manifest, &status, &|| signal(&connection)));
+}
+
 /// Tells the bus the properties changed.
 fn signal(connection: &zbus::blocking::Connection) {
     if let Err(e) = bus::announce(connection) {
@@ -201,6 +245,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, St
         ctx_size: CTX_SIZE,
         model: None,
         tier: None,
+        voice: PathBuf::from(VOICE),
+        voice_data: PathBuf::from(VOICE_DATA),
         print: false,
     };
     while let Some(arg) = args.next() {
@@ -213,6 +259,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, St
             "--embedding-socket" => parsed.embedding_socket = socket(&mut args, &arg)?,
             "--ctx-size" => parsed.ctx_size = number(&value(&mut args, &arg, "a size")?, &arg)?,
             "--model" => parsed.model = Some(value(&mut args, &arg, "a model id or file")?),
+            "--voice" => parsed.voice = value(&mut args, &arg, "a program")?.into(),
+            "--voice-data" => parsed.voice_data = value(&mut args, &arg, "a directory")?.into(),
             "--tier" => {
                 let word = value(&mut args, &arg, "a tier")?;
                 parsed.tier = Some(
@@ -281,6 +329,8 @@ fn usage() {
         "  --embedding-socket <file>  the embedding model's unix socket (default {EMBEDDING_SOCKET})"
     );
     println!("  --ctx-size <tokens>        the chat model's context size (default {CTX_SIZE})");
+    println!("  --voice <program>          the program that says words out loud (default {VOICE})");
+    println!("  --voice-data <dir>         the espeak-ng data it reads (default {VOICE_DATA})");
     println!("  --model <id or file>       run this model instead of the one the tier picks");
     println!("  --tier <tier>              small, medium or large instead of asking orbit");
     println!("  --print                    print the model that would run and exit");
@@ -308,6 +358,11 @@ mod tests {
         assert_eq!(args.ctx_size, 8192);
         assert_eq!(args.model, None);
         assert_eq!(args.tier, None);
+        assert_eq!(args.voice, PathBuf::from("sherpa-onnx-offline-tts"));
+        assert_eq!(
+            args.voice_data,
+            PathBuf::from("/run/current-system/sw/share/espeak-ng-data")
+        );
         assert!(!args.print);
     }
 
@@ -332,6 +387,10 @@ mod tests {
             "qwen3-4b-q4_k_m",
             "--tier",
             "medium",
+            "--voice",
+            "/bin/say-it",
+            "--voice-data",
+            "/tmp/espeak-ng-data",
             "--print",
         ])
         .unwrap()
@@ -345,6 +404,8 @@ mod tests {
         assert_eq!(args.ctx_size, 4096);
         assert_eq!(args.model.as_deref(), Some("qwen3-4b-q4_k_m"));
         assert_eq!(args.tier, Some(Tier::Medium));
+        assert_eq!(args.voice, PathBuf::from("/bin/say-it"));
+        assert_eq!(args.voice_data, PathBuf::from("/tmp/espeak-ng-data"));
         assert!(args.print);
     }
 

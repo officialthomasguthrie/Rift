@@ -37,6 +37,15 @@ with no network and sees that one file, so a file from the internet cannot do an
 machine, and a PDF in the answer says which page the words are on:</p>
 <pre><code>~/notes/letter.pdf:page 2  2026-09-24</code></pre>
 
+<h2>Words out loud</h2>
+<p>Rift can read words out loud in a voice that came with it. Nothing is sent anywhere for this
+either, and it works with the network unplugged:</p>
+<pre><code>rift ai say "the kettle has boiled"</code></pre>
+<p>The words come out of the speakers. To keep the sound instead of playing it, name a file:</p>
+<pre><code>rift ai say --wav kettle.wav "the kettle has boiled"</code></pre>
+<p>The voice is one of the files on your side of the drive, the same as the models, and
+<code>rift ai</code> says which one it is.</p>
+
 <h2>Other programs on the machine</h2>
 <p>The model is also served to programs on the machine at <code>127.0.0.1:11434</code>, in the shape
 most tools expect. A request that comes from a web page is refused, so a page in the browser cannot
