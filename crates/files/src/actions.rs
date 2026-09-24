@@ -11,7 +11,7 @@ use iced::futures::channel::oneshot;
 use iced::widget::operation::{self, AbsoluteOffset};
 use iced::{Point, Task, window};
 use librift::apps::{self, App};
-use librift::defaults::{Found, entry_id};
+use librift::defaults::Found;
 use librift::drives;
 use librift::files::trash::Trash;
 use librift::files::{self, Entry, Kind, Sort, free_name, mime};
@@ -163,7 +163,7 @@ fn openers(state: &Files, id: window::Id) -> (Option<Opener>, Vec<Opener>) {
     };
     let apps = apps::load();
     let found = Found::read();
-    let default = opener(&apps, &found, &state.types, &first.mime);
+    let default = found.opener(&first.mime, &apps, &state.types, Some(ui::APP_ID));
     let others = others(
         &apps,
         &state.types,
@@ -174,20 +174,6 @@ fn openers(state: &Files, id: window::Id) -> (Option<Opener>, Vec<Opener>) {
         default.map(|app| (app.id, app.name)),
         others.into_iter().map(|app| (app.id, app.name)).collect(),
     )
-}
-
-/// The app that opens a kind of file: the default for it, or else for a kind it is a kind of, found
-/// the way xdg-mime finds a default. Files itself opens folders, never files.
-#[must_use]
-pub fn opener(apps: &[App], found: &Found, types: &mime::Database, kind: &str) -> Option<App> {
-    std::iter::once(types.canonical(kind).to_string())
-        .chain(types.parents(kind))
-        .find_map(|mime| found.default_for(&mime, apps))
-        .and_then(|desktop| {
-            apps.iter()
-                .find(|app| app.id == entry_id(&desktop) && app.id != ui::APP_ID)
-                .cloned()
-        })
 }
 
 /// The apps that say they open a kind of file, or a kind it is a kind of, besides the default, by
@@ -402,7 +388,7 @@ fn open(state: &mut Files, id: window::Id, with: Option<&str>) -> Task<Message> 
         let path = place.join(&name);
         let app = match with {
             Some(wanted) => all.iter().find(|app| app.id == wanted).cloned(),
-            None if kind == Kind::File => opener(&all, &found, &state.types, &mime),
+            None if kind == Kind::File => found.opener(&mime, &all, &state.types, Some(ui::APP_ID)),
             None => None,
         };
         match app {
@@ -1756,16 +1742,19 @@ mod tests {
             caches: Vec::new(),
         };
         // a type's own associations come first, the way xdg-mime and GLib look
-        let python = opener(&all, &found, &types, "text/x-python").map(|app| app.id);
-        assert_eq!(python.as_deref(), Some("hx"));
-        let plain = opener(&all, &found, &types, "text/plain").map(|app| app.id);
-        assert_eq!(plain.as_deref(), Some("zed"));
+        let opens = |kind: &str| {
+            found
+                .opener(kind, &all, &types, Some(ui::APP_ID))
+                .map(|app| app.id)
+        };
+        assert_eq!(opens("text/x-python").as_deref(), Some("hx"));
+        assert_eq!(opens("text/plain").as_deref(), Some("zed"));
         let rest: Vec<String> = others(&all, &types, "text/x-python", Some("hx"))
             .into_iter()
             .map(|app| app.id)
             .collect();
         assert_eq!(rest, ["zed"]);
         // Files opens folders and never a file
-        assert!(opener(&all, &found, &types, "inode/directory").is_none());
+        assert!(opens("inode/directory").is_none());
     }
 }

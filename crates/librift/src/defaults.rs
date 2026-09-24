@@ -13,6 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::apps::App;
+use crate::files::mime;
 
 /// A kind of file, or of link, that one app opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +277,28 @@ impl Found {
             .collect();
         saying.sort_by(|one, other| one.id.cmp(&other.id));
         saying.first().map(|app| format!("{}.desktop", app.id))
+    }
+
+    /// The app that opens a kind of file: the default for the kind itself, or else for a kind it
+    /// is a kind of, the way xdg-mime looks. `besides` is an app that never counts as the answer,
+    /// which is how the file manager keeps from opening a file with itself. `None` when no app
+    /// installed here opens it.
+    #[must_use]
+    pub fn opener(
+        &self,
+        kind: &str,
+        apps: &[App],
+        types: &mime::Database,
+        besides: Option<&str>,
+    ) -> Option<App> {
+        std::iter::once(types.canonical(kind).to_string())
+            .chain(types.parents(kind))
+            .find_map(|mime| self.default_for(&mime, apps))
+            .and_then(|desktop| {
+                apps.iter()
+                    .find(|app| app.id == entry_id(&desktop) && Some(app.id.as_str()) != besides)
+                    .cloned()
+            })
     }
 
     /// What opens each kind, with the apps that say they open it.
