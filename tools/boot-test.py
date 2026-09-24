@@ -464,6 +464,8 @@ SEARCH_PDF_PAGES = [
 SEARCH_PDF_WORDS = "teeth checkup booking"
 SEARCH_PDF_PAGE = 2
 SEARCH_PDF_PHRASE = "insurance card"
+# what the app that opens a pdf, from DEFAULT_APPS, has in the app id of its window
+SEARCH_PDF_APP = "papers"
 # the Timeline and the search field: the file that changes between a snapshot and now, the one that
 # is deleted after it, the one under another folder a search by name finds, and the words the search
 # by meaning takes, which step 4c wrote ~/notes/bike.txt for
@@ -492,7 +494,7 @@ PICTURES = ("Harbour at dusk", "Coast road", "Pine ridge")
 WINDOW = re.compile(r'\{"id":(\d+),"title":(?:null|"(?:[^"\\]|\\.)*"),"app_id":(?:null|"([^"]*)"),'
                     r'"pid":(?:null|\d+),"workspace_id":(?:null|\d+),"is_focused":(true|false)')
 # the words lens --state prints, and how the bar writes the time
-STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "battery", "menu", "field", "rows", "error", "notice",
+STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "battery", "menu", "field", "rows", "found", "error", "notice",
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
               "recording", "screen-reader", "keyboard", "layout", "dock-position", "dock-extend",
@@ -7005,6 +7007,38 @@ def main():
             if not wait_for(60, lambda: not app_windows(FILES_APP_ID, "Files' windows at the end")):
                 fail("Files' window did not close")
             ok("the shell opens every place there is in Files, and Files closed again")
+
+            # and the field looks through home by meaning. plain words that are no app, no command
+            # and no question bring up the files of the index step 4c made, a moment after the
+            # typing stops. the pdf is the one that proves the whole way through: its text came out
+            # of the sandbox, and none of the words typed are in its name
+            run("lens --menu", "the Applications menu for a search of home")
+            run(f'lens --type "{SEARCH_PDF_WORDS}"', f"{SEARCH_PDF_WORDS!r} typed into the field")
+            found_said = shell_until(90, lambda said: said.get("found") not in (None, "", "none"),
+                                     "the files the field found")
+            found_files = (found_said.get("found") or "").split()
+            if found_files[:1] != [f"notes/{SEARCH_PDF}"]:
+                _, journal = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
+                fail(f"the field found {found_files} for {SEARCH_PDF_WORDS!r}, expected "
+                     f"notes/{SEARCH_PDF} first: {without_console(journal).strip()[-400:]!r}")
+            if found_said.get("field") != SEARCH_PDF_WORDS:
+                fail(f"the field says {found_said.get('field')!r} with the files under it")
+            look("the files the field found by meaning", f"{stem}-menu-found{extension}", 20,
+                 menu=True, rows=int(found_said.get("rows") or 0), journals=("lens",))
+            ok(f"the field found {found_files} in home for {SEARCH_PDF_WORDS!r}, closest first")
+
+            # the first row is the name of the section and the second is the closest file, which
+            # opens with the app its kind opens with, in a scope of its own, the way a place does
+            click(args.qmp, shell_size, shell_menu_row(1))
+            if not wait_for(180, lambda: app_windows(SEARCH_PDF_APP, f"the window for {SEARCH_PDF}")):
+                _, journal = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"a press on {SEARCH_PDF} opened no {SEARCH_PDF_APP} window: "
+                     f"{without_console(journal).strip()[-800:]!r}")
+            if bar_state("the state after the file was pressed").get("menu") != "closed":
+                fail("the Applications menu is still open after a file was pressed")
+            look(f"{SEARCH_PDF} open from the field", f"{stem}-menu-opened{extension}", 60, settle=3)
+            close_app(SEARCH_PDF, SEARCH_PDF_APP)
+            ok(f"a press on {SEARCH_PDF} opened it with the app for its kind and closed the menu")
 
             # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again
