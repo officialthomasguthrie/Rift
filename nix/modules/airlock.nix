@@ -56,6 +56,9 @@ in
         environment.systemPackages = [
           pkgs.bubblewrap
           pkgs.nftables
+          # pdftotext, which airlock text runs in a sandbox of its own to write out the text of a
+          # pdf for the search index. poppler itself is in the image already, for the pdf viewer
+          pkgs.poppler-utils
         ];
         services.dbus.packages = [ policy ];
 

@@ -146,6 +146,13 @@ in
     systemd.user.services.quasar-index = {
       description = "Quasar, the search index of home";
       unitConfig.ConditionPathExists = "${cfg.modelsDir}/${embedding.file}";
+      # airlock and bwrap for the pdfs in home, whose text is written out in a sandbox, and
+      # pdftotext, which is what runs in it
+      path = [
+        cfg.daemon
+        pkgs.bubblewrap
+        pkgs.poppler-utils
+      ];
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${cfg.daemon}/bin/rift ai index";
