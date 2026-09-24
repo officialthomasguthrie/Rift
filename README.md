@@ -64,7 +64,7 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 ### Desktop
 
 - Horizon, a Wayland compositor derived from niri, arranges windows as columns on a horizontally scrolling strip for each display.
-- Lens, the desktop shell, draws a top bar with a clock menu that holds a calendar, the notifications received so far and a Do not disturb switch, a system menu for sound, brightness, wired and Wi-Fi networks, Bluetooth, the battery and the session, and the keyboard layout in use when there is more than one; an applications menu that lists the home directory and its folders over the installed applications by category, with a search field that also runs system commands, evaluates Nushell pipelines and passes requests written in plain language to the local assistant; and a dock that holds pinned and running applications, the trash and mounted disks, and the workspaces.
+- Lens, the desktop shell, draws a top bar with a clock menu that holds a calendar, the notifications received so far and a Do not disturb switch, a system menu for sound, brightness, wired and Wi-Fi networks, Bluetooth, the battery and the session, and the keyboard layout in use when there is more than one; an applications menu that lists the home directory and its folders over the installed applications by category, with a search field that also runs system commands, evaluates Nushell pipelines and passes requests written in plain language to the local assistant; and a dock that holds pinned and running applications, the trash and mounted disks, and the workspaces. Plain words typed into that field also list the files of the home directory closest to them in meaning, a moment after the typing stops, and a click opens one in the application its kind opens with.
 - Lens is the notification server of the session, following the freedesktop.org notification specification, and shows the level when a volume or brightness key is pressed.
 - A drop-down terminal and a lock screen are built into the compositor.
 - The Print key takes a screenshot, and Ctrl, Alt, Shift and R start and stop a screen recording. Recordings are encoded in software and written as MP4 files, so they do not depend on the graphics hardware of the machine.
@@ -111,7 +111,7 @@ The image includes the following software, so a new drive is usable without a ne
 - Models from the Qwen3 family, licensed under Apache-2.0, are selected by tier according to host memory. Each model is declared with its checksum in `models/manifest.toml`, and weights are stored on the encrypted volume.
 - An OpenAI-compatible API on `127.0.0.1:11434` makes the models available to local programs. Requests that originate from web pages are refused.
 - A request made through the shell returns either an answer or a proposed action, and no action runs until it is confirmed.
-- Files in the home directory can be searched by meaning rather than by exact wording, through an embedding index that is built and kept on the drive. The file manager and the command line both search it.
+- Files in the home directory can be searched by meaning rather than by exact wording, through an embedding index that is built and kept on the drive. The file manager, the shell's search field and the command line all search it.
 - Text files, source code and PDFs are indexed. The text of a PDF is read out by pdftotext running in a sandbox with no network access that is given the one file and nothing else, and a result in a PDF names the page it was found on.
 
 ### Application sandboxing
