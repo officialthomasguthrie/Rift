@@ -3,6 +3,9 @@
 //! for the words and ranks files by their closest part. Quasar turns text into vectors and never
 //! reads home, whoever runs this does.
 //!
+//! A PDF is not text, so the program that reads one writes its text out first, page by page. It is
+//! untrusted input to a parser written in C, so that runs in a sandbox: `airlock text`.
+//!
 //! The index is one flat file, little endian: [`HEADER`], the model's id, the number of dimensions,
 //! then for each file its path relative to home, its modified time and size, and for each of its
 //! parts the line the part starts on and the normalized vector.
@@ -19,10 +22,18 @@ pub const EXTENSIONS: &[&str] = &[
     "cpp", "hpp", "java", "kt", "swift", "rb", "php", "lua", "sh", "fish", "nu", "zig", "nix",
     "toml", "yaml", "yml", "json", "html", "css",
 ];
+/// Extensions of the files whose text another program writes out, in lower case. A PDF holds text
+/// the way it is drawn on a page, so `airlock text` runs pdftotext on it in a sandbox.
+pub const DOCUMENTS: &[&str] = &["pdf"];
 /// Folders the walk does not go into, besides hidden ones. Builds and package managers fill them.
 pub const SKIPPED: &[&str] = &["node_modules", "target", "__pycache__"];
 /// The largest file that is indexed, in bytes.
 pub const LARGEST_FILE: u64 = 1 << 20;
+/// The largest of the files in [`DOCUMENTS`] that is indexed, in bytes. A PDF carries its pictures
+/// and its fonts, so it is far bigger than a note of the same length.
+pub const LARGEST_DOCUMENT: u64 = 32 << 20;
+/// How many characters of one of their texts are indexed, about fifty pages of prose.
+pub const LONGEST_TEXT: usize = 100_000;
 /// The longest part, in characters. Even at a token a character it fits the model's context.
 pub const LONGEST_PART: usize = 1500;
 /// A part this long ends at the next blank line.
@@ -66,10 +77,24 @@ pub struct Found {
 /// True when a file with this name is indexed.
 #[must_use]
 pub fn indexable(name: &str) -> bool {
+    extension(name).is_some_and(|extension| {
+        EXTENSIONS.contains(&extension.as_str()) || DOCUMENTS.contains(&extension.as_str())
+    })
+}
+
+/// True when the text of a file with this name is written out by another program, instead of being
+/// read as text here.
+#[must_use]
+pub fn document(name: &str) -> bool {
+    extension(name).is_some_and(|extension| DOCUMENTS.contains(&extension.as_str()))
+}
+
+/// A name's extension in lower case.
+fn extension(name: &str) -> Option<String> {
     Path::new(name)
         .extension()
         .and_then(OsStr::to_str)
-        .is_some_and(|extension| EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+        .map(str::to_ascii_lowercase)
 }
 
 /// The files in `home` that are indexed, by path. Hidden files and folders, the folders in
@@ -105,7 +130,12 @@ pub fn walk(home: &Path) -> Vec<Found> {
                 let Ok(metadata) = entry.metadata() else {
                     continue;
                 };
-                if metadata.len() <= LARGEST_FILE {
+                let largest = if document(name) {
+                    LARGEST_DOCUMENT
+                } else {
+                    LARGEST_FILE
+                };
+                if metadata.len() <= largest {
                     let modified = metadata
                         .modified()
                         .ok()
@@ -191,6 +221,40 @@ pub fn parts(text: &str) -> Vec<Part> {
     }
     end(&mut parts, &mut current, &mut length, start);
     parts
+}
+
+/// A document's text cut into parts, a page at a time. `text` is what the program that reads the
+/// document wrote, with a form feed between pages, so a part's number is the page it is on and no
+/// part holds two pages.
+#[must_use]
+pub fn pages(text: &str) -> Vec<Part> {
+    let mut out = Vec::new();
+    for (number, page) in (1u32..).zip(text.split('\u{c}')) {
+        out.extend(parts(page).into_iter().map(|part| Part {
+            line: number,
+            text: part.text,
+        }));
+    }
+    out
+}
+
+/// `text` cut to at most `most` characters.
+fn shorter(text: &str, most: usize) -> &str {
+    match text.char_indices().nth(most) {
+        Some((at, _)) => &text[..at],
+        None => text,
+    }
+}
+
+/// Where in a file something was found, for a row a person reads: the line its part starts on, or
+/// the page when the file's text was written out a page at a time.
+#[must_use]
+pub fn spot(path: &str, line: u32) -> String {
+    if document(path) {
+        format!("page {line}")
+    } else {
+        line.to_string()
+    }
 }
 
 /// The index of one home.
@@ -392,6 +456,9 @@ pub struct Update {
     pub read: usize,
     /// How many files of the old index are no longer in home.
     pub removed: usize,
+    /// How many of the files that were read are documents whose text no program could write out.
+    /// They are in the index with no parts, so they are not tried again until they change.
+    pub unread: usize,
     /// Why the update stopped before it read every new or changed file. The index then has the
     /// files that were read and the ones that did not change.
     pub error: Option<String>,
@@ -401,9 +468,21 @@ pub struct Update {
 /// stands in for it.
 pub type Embedder<'a> = dyn FnMut(Kind, &[String]) -> Result<Vec<Vec<f64>>, String> + 'a;
 
+/// Writes out the text of a document, a file that does not hold its text as text: `airlock text`,
+/// which runs pdftotext in a sandbox, or something that stands in for it. The pages come back with
+/// a form feed between them.
+pub type Extractor<'a> = dyn FnMut(&Path) -> Result<String, String> + 'a;
+
 /// Brings the index of `home` up to date for `model`. A file whose size and modified time did not
-/// change keeps its parts; an index of another model starts over.
-pub fn update(home: &Path, old: Option<Index>, model: &str, embed: &mut Embedder<'_>) -> Update {
+/// change keeps its parts; an index of another model starts over. `extract` writes out the text of
+/// the files that do not hold theirs as text.
+pub fn update(
+    home: &Path,
+    old: Option<Index>,
+    model: &str,
+    embed: &mut Embedder<'_>,
+    extract: &mut Extractor<'_>,
+) -> Update {
     let mut kept: HashMap<String, File> = old
         .filter(|old| old.model == model)
         .map(|old| {
@@ -415,6 +494,7 @@ pub fn update(home: &Path, old: Option<Index>, model: &str, embed: &mut Embedder
         .unwrap_or_default();
     let mut files = Vec::new();
     let mut read = 0;
+    let mut unread = 0;
     let mut error = None;
     for found in walk(home) {
         let before = kept.remove(&found.path);
@@ -427,7 +507,21 @@ pub fn update(home: &Path, old: Option<Index>, model: &str, embed: &mut Embedder
         if error.is_some() {
             continue;
         }
-        match read_file(&home.join(&found.path), found, embed) {
+        let full = home.join(&found.path);
+        // a document's text comes from the program that reads it, in a sandbox; anything else is
+        // read here. a document that program cannot read gets no parts, as a file that is not text
+        // does, so one damaged file does not stop the walk
+        let cut = if document(&found.path) {
+            if let Ok(text) = extract(&full) {
+                pages(shorter(&text, LONGEST_TEXT))
+            } else {
+                unread += 1;
+                Vec::new()
+            }
+        } else {
+            parts(&text_of(&full))
+        };
+        match embedded(found, &cut, embed) {
             Ok(file) => {
                 files.push(file);
                 read += 1;
@@ -442,21 +536,26 @@ pub fn update(home: &Path, old: Option<Index>, model: &str, embed: &mut Embedder
         },
         read,
         removed: kept.len(),
+        unread,
         error,
     }
 }
 
-/// Reads a file, cuts it into parts and gets their vectors. A file that cannot be read, is empty
-/// or is not UTF-8 text gets no parts, so it is not read again until it changes.
-fn read_file(full: &Path, found: Found, embed: &mut Embedder<'_>) -> Result<File, String> {
-    let text = fs::read(full)
+/// A file read as text. One that cannot be read, is empty or is not UTF-8 gives nothing, so it
+/// ends up in the index with no parts and is not read again until it changes.
+fn text_of(full: &Path) -> String {
+    fs::read(full)
         .ok()
         .filter(|bytes| !bytes.contains(&0))
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Gets a vector for each part of a file and makes what the index keeps of it.
+fn embedded(found: Found, parts: &[Part], embed: &mut Embedder<'_>) -> Result<File, String> {
     let name = found.path.rsplit('/').next().unwrap_or_default();
     let mut stored = Vec::new();
-    for batch in parts(&text).chunks(PARTS_PER_CALL) {
+    for batch in parts.chunks(PARTS_PER_CALL) {
         // the file's name goes with every part, so a part is found by the name as well
         let texts: Vec<String> = batch
             .iter()
@@ -643,13 +742,64 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
-    fn text_and_code_are_indexed_by_extension() {
-        for name in ["notes.md", "bike.TXT", "backup.py", "flake.nix", "main.rs"] {
+    fn text_code_and_documents_are_indexed_by_extension() {
+        for name in [
+            "notes.md",
+            "bike.TXT",
+            "backup.py",
+            "flake.nix",
+            "main.rs",
+            "taxes.PDF",
+        ] {
             assert!(indexable(name), "{name}");
         }
-        for name in ["photo.jpg", "taxes.pdf", "README", "archive.tar.gz", ".md"] {
+        for name in ["photo.jpg", "README", "archive.tar.gz", ".md"] {
             assert!(!indexable(name), "{name}");
         }
+        assert!(document("taxes.pdf") && document("taxes.PDF"));
+        for name in ["notes.md", "main.rs", "photo.jpg"] {
+            assert!(!document(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_documents_parts_are_its_pages() {
+        let text = "Green Lane\nReference 4471\n\n\u{c}Tuesday at nine.\n\n\u{c}";
+        assert_eq!(
+            pages(text),
+            [
+                Part {
+                    line: 1,
+                    text: "Green Lane\nReference 4471".into()
+                },
+                Part {
+                    line: 2,
+                    text: "Tuesday at nine.".into()
+                }
+            ]
+        );
+        assert_eq!(pages("one page").first().map(|part| part.line), Some(1));
+        assert!(pages("\u{c}\u{c}").is_empty());
+        // every part of one page is on that page
+        let long = format!("\u{c}{}", "word ".repeat(1000));
+        let lines: Vec<u32> = pages(&long).iter().map(|part| part.line).collect();
+        assert!(
+            lines.len() > 2 && lines.iter().all(|&line| line == 2),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_row_names_the_page_of_a_document_and_the_line_of_a_text_file() {
+        assert_eq!(spot("notes/letter.pdf", 2), "page 2");
+        assert_eq!(spot("notes/bike.txt", 12), "12");
+    }
+
+    #[test]
+    fn a_text_is_cut_by_characters() {
+        assert_eq!(shorter("abcdef", 3), "abc");
+        assert_eq!(shorter("abc", 9), "abc");
+        assert_eq!(shorter(&"\u{e9}".repeat(4), 2), "\u{e9}\u{e9}");
     }
 
     #[test]
@@ -727,6 +877,11 @@ mod tests {
         home.write("notes/garden.md", b"Tomatoes");
         home.write("bike.txt", b"Oil the chain");
         home.write("photo.jpg", b"\xff\xd8");
+        home.write("letter.pdf", b"%PDF-1.4");
+        home.write(
+            "scan.pdf",
+            &vec![b'a'; usize::try_from(LARGEST_DOCUMENT).unwrap() + 1],
+        );
         home.write(".config/zed/settings.json", b"{}");
         home.write("code/app/node_modules/left/index.js", b"module");
         home.write("code/app/target/debug/build.rs", b"fn main() {}");
@@ -740,7 +895,12 @@ mod tests {
         let paths: Vec<String> = walk(&home.0).into_iter().map(|found| found.path).collect();
         assert_eq!(
             paths,
-            ["bike.txt", "code/app/src/main.rs", "notes/garden.md"]
+            [
+                "bike.txt",
+                "code/app/src/main.rs",
+                "letter.pdf",
+                "notes/garden.md"
+            ]
         );
         let found = walk(&home.0);
         assert_eq!(found[0].size, 13);
@@ -774,8 +934,9 @@ mod tests {
             calls.borrow_mut().push((kind, texts.to_vec()));
             Ok(words(texts))
         };
+        let mut nothing = |_: &Path| Err("no sandbox here".to_string());
 
-        let first = update(&home.0, None, "model", &mut embed);
+        let first = update(&home.0, None, "model", &mut embed, &mut nothing);
         assert_eq!(
             (first.read, first.removed, first.error.as_deref()),
             (3, 0, None)
@@ -796,7 +957,13 @@ mod tests {
         calls.borrow_mut().clear();
         home.write("soup.txt", b"soup and more soup");
         fs::remove_file(home.0.join("bike.txt")).unwrap();
-        let second = update(&home.0, Some(first.index.clone()), "model", &mut embed);
+        let second = update(
+            &home.0,
+            Some(first.index.clone()),
+            "model",
+            &mut embed,
+            &mut nothing,
+        );
         assert_eq!((second.read, second.removed), (1, 1));
         assert_eq!(calls.borrow().len(), 1);
         let paths: Vec<&str> = second
@@ -816,9 +983,57 @@ mod tests {
         assert_eq!(rank(&second.index, &query, 1).len(), 1);
 
         // another model starts over
-        let other = update(&home.0, Some(second.index), "other", &mut embed);
+        let other = update(
+            &home.0,
+            Some(second.index),
+            "other",
+            &mut embed,
+            &mut nothing,
+        );
         assert_eq!((other.read, other.removed), (3, 0));
         assert_eq!(other.index.model, "other");
+    }
+
+    #[test]
+    fn a_documents_text_comes_from_the_program_that_writes_it_out() {
+        let home = Home::new("document");
+        home.write("letter.pdf", b"%PDF-1.4 not a real one");
+        home.write("broken.pdf", b"%PDF-1.4 nor this one");
+        let asked = RefCell::new(Vec::new());
+        let mut embed = |_: Kind, texts: &[String]| Ok(words(texts));
+        let mut extract = |path: &Path| {
+            asked.borrow_mut().push(path.to_path_buf());
+            if path.ends_with("letter.pdf") {
+                Ok("tax and tax\n\n\u{c}soup on the second page\n\n\u{c}".to_string())
+            } else {
+                Err("pdftotext exited with 1.".to_string())
+            }
+        };
+        let made = update(&home.0, None, "model", &mut embed, &mut extract);
+        assert_eq!(
+            (made.read, made.unread, made.error.as_deref()),
+            (2, 1, None)
+        );
+        assert_eq!(asked.borrow().len(), 2);
+        let file = |path: &str| {
+            made.index
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap_or_else(|| panic!("{path} is not in the index"))
+        };
+        let lines: Vec<u32> = file("letter.pdf")
+            .parts
+            .iter()
+            .map(|part| part.line)
+            .collect();
+        assert_eq!(lines, [1, 2]);
+        assert!(file("broken.pdf").parts.is_empty());
+        // the page about soup is the second one, and a row for it names the page
+        let query = normalized(&words(&["soup".to_string()])[0]);
+        let hits = rank(&made.index, &query, 10);
+        assert_eq!((hits[0].path.as_str(), hits[0].line), ("letter.pdf", 2));
+        assert_eq!(spot(&hits[0].path, hits[0].line), "page 2");
     }
 
     #[test]
@@ -827,11 +1042,18 @@ mod tests {
         home.write("a.txt", b"garden");
         home.write("b.txt", b"bike");
         let mut working = |_: Kind, texts: &[String]| Ok(words(texts));
-        let first = update(&home.0, None, "model", &mut working);
+        let mut nothing = |_: &Path| Err("no sandbox here".to_string());
+        let first = update(&home.0, None, "model", &mut working, &mut nothing);
         home.write("b.txt", b"bike bike");
         home.write("c.txt", b"soup");
         let mut broken = |_: Kind, _: &[String]| Err("Quasar is not running.".to_string());
-        let second = update(&home.0, Some(first.index), "model", &mut broken);
+        let second = update(
+            &home.0,
+            Some(first.index),
+            "model",
+            &mut broken,
+            &mut nothing,
+        );
         assert_eq!(second.error.as_deref(), Some("Quasar is not running."));
         assert_eq!(second.read, 0);
         let paths: Vec<&str> = second
