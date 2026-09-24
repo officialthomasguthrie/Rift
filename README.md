@@ -112,11 +112,13 @@ The image includes the following software, so a new drive is usable without a ne
 - An OpenAI-compatible API on `127.0.0.1:11434` makes the models available to local programs. Requests that originate from web pages are refused.
 - A request made through the shell returns either an answer or a proposed action, and no action runs until it is confirmed.
 - Files in the home directory can be searched by meaning rather than by exact wording, through an embedding index that is built and kept on the drive. The file manager and the command line both search it.
+- Text files, source code and PDFs are indexed. The text of a PDF is read out by pdftotext running in a sandbox with no network access that is given the one file and nothing else, and a result in a PDF names the page it was found on.
 
 ### Application sandboxing
 
 - Command-line programs can be run in a bubblewrap sandbox confined by Landlock filesystem rules and a seccomp filter.
 - A per-application network switch, implemented with nftables, removes network access from a sandboxed program.
+- Documents are parsed in a sandbox of their own, with no network namespace, no socket of any kind and nothing on the filesystem but the system's programs and the one file being read.
 - Flatpak applications run in their own sandboxes and reach the desktop through portals.
 
 ### Privacy

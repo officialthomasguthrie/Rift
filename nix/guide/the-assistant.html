@@ -30,7 +30,10 @@ where there is room, and the graphics card is used when it can be. To see what i
 file by what it was about:</p>
 <pre><code>rift ai search "the letter about the flat"</code></pre>
 <p>The index is brought up to date every fifteen minutes, and <code>rift ai index</code> does it
-now.</p>
+now. Notes, letters, code and PDFs all go into it. A PDF is read by a program that runs in a sandbox
+with no network and sees that one file, so a file from the internet cannot do anything else on the
+machine, and a PDF in the answer says which page the words are on:</p>
+<pre><code>~/notes/letter.pdf:page 2  2026-09-24</code></pre>
 
 <h2>Other programs on the machine</h2>
 <p>The model is also served to programs on the machine at <code>127.0.0.1:11434</code>, in the shape
