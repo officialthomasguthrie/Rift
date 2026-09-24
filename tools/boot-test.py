@@ -2892,9 +2892,13 @@ def main():
             fail(f"rift ai say exited with {status} and wrote no wav: {printed!r}")
 
         # the wav itself: a header the test reads byte by byte, since the file cannot leave the vm
-        _, output = run(f"od -A n -v -t u1 -N 64 {say_file}", "the head of the wav")
-        head = bytes(int(n) for n in re.findall(r"\d+", without_console(output)))
-        if len(head) < 64 or head[:4] != b"RIFF" or head[8:12] != b"WAVE" or head[12:16] != b"fmt ":
+        _, output = run(f"printf 'wav='; and od -A n -v -t x1 -N 64 {say_file} | tr -d ' \\n'; and echo",
+                        "the head of the wav")
+        head = re.search(r"wav=([0-9a-f]{128})", without_console(output))
+        if not head:
+            fail(f"the head of {say_file} did not come back: {without_console(output).strip()!r}")
+        head = bytes.fromhex(head.group(1))
+        if head[:4] != b"RIFF" or head[8:12] != b"WAVE" or head[12:16] != b"fmt ":
             fail(f"{say_file} does not start like a wav: {head[:16]!r}")
         say_format, say_channels = int.from_bytes(head[20:22], "little"), int.from_bytes(head[22:24], "little")
         say_rate, say_bits = int.from_bytes(head[24:28], "little"), int.from_bytes(head[34:36], "little")
@@ -2912,8 +2916,9 @@ def main():
             fail(f"rift ai say said {said.group(1)} seconds, the wav holds {say_seconds:.1f}")
 
         # and it is speech, not a file of silence: a wav of nothing but zeros is nothing but zeros
-        _, output = run(f"tr -d '\\0' < {say_file} | wc -c", "the bytes of the wav that are not zero")
-        say_loud = re.search(r"^\s*(\d+)\s*$", without_console(output), re.M)
+        _, output = run(f"printf 'loud='; and tr -d '\\0' < {say_file} | wc -c",
+                        "the bytes of the wav that are not zero")
+        say_loud = re.search(r"loud=(\d+)", without_console(output))
         if not say_loud or int(say_loud.group(1)) < say_bytes // 5:
             fail(f"{say_file} is {say_loud and say_loud.group(1)} bytes of {say_bytes} that are not zero, "
                  "which is silence, not speech")
