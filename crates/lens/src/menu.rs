@@ -49,8 +49,9 @@ const FIELD_PAD: u16 = 7;
 const FIELD_ID: &str = "field";
 /// The list's widget id, for the scroll operation.
 const LIST_ID: &str = "list";
-/// What the field says when it is empty.
-const PLACEHOLDER: &str = "Type an app, a command or a question";
+/// What the field says when it is empty. It names all of what the field does, the files of home
+/// included, since the field is the only place that teaches them.
+const PLACEHOLDER: &str = "Type an app, a command, a question or what a file is about";
 
 /// A row of the list under the field.
 #[derive(Debug, Clone)]

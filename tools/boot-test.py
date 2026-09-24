@@ -7023,6 +7023,9 @@ def main():
                      f"notes/{SEARCH_PDF} first: {without_console(journal).strip()[-400:]!r}")
             if found_said.get("field") != SEARCH_PDF_WORDS:
                 fail(f"the field says {found_said.get('field')!r} with the files under it")
+            # the pointer is still on the row the place was pressed on, and a row under the pointer
+            # is drawn in its own gray, so it goes onto the desktop beside the menu for the picture
+            point(args.qmp, shell_size, (round(shell_width * 0.8), round(shell_height * 0.5)))
             look("the files the field found by meaning", f"{stem}-menu-found{extension}", 20,
                  menu=True, rows=int(found_said.get("rows") or 0), journals=("lens",))
             ok(f"the field found {found_files} in home for {SEARCH_PDF_WORDS!r}, closest first")
