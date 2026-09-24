@@ -17,59 +17,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: What this machine says about user namespaces
+        run: |
+          set -x
+          cat /etc/os-release | head -3
+          uname -r
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+          cat /proc/sys/kernel/unprivileged_userns_clone || true
+          cat /proc/self/attr/apparmor/current || true
+          aa-enabled || true
+          ls /etc/apparmor.d/ | head -20 || true
       - name: A small pdf
         run: python3 tools/probe-pdf.py letter.pdf
-      - name: What pdftotext writes with no sandbox at all
+      - name: Can an unprivileged user namespace bring up loopback at all
         run: |
           set -x
-          pdftotext=$(nix shell --inputs-from . nixpkgs#poppler-utils -c sh -c 'command -v pdftotext')
-          echo "pdftotext=$pdftotext"
-          "$pdftotext" -q -enc UTF-8 -eol unix -l 200 letter.pdf - | od -c | tail -5
-      - name: In the sandbox, the store alone
-        run: |
-          set -x
-          pdftotext=$(nix shell --inputs-from . nixpkgs#poppler-utils -c sh -c 'command -v pdftotext')
-          pdftotext=$(readlink -f "$pdftotext")
-          bwrap=$(nix shell --inputs-from . nixpkgs#bubblewrap -c sh -c 'command -v bwrap')
-          file=$PWD/letter.pdf
           set +e
-          "$bwrap" --unshare-all --unshare-user --disable-userns --die-with-parent --new-session \
-            --ro-bind /nix/store /nix/store --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home \
-            --ro-bind "$file" "$file" --chdir /tmp \
-            -- "$pdftotext" -q -enc UTF-8 -eol unix -l 200 "$file" - > store-only.txt 2> store-only.err
-          echo "exit=$?"
-          set -e
-          echo "--- stdout"
-          od -c store-only.txt | tail -6
-          echo "--- stderr"
-          cat store-only.err
-          grep -q "insurance card" store-only.txt && echo "STORE ONLY: the text came out"
-      - name: In the sandbox with /etc as well, for comparison
+          unshare -U -r -n sh -c 'ip link set lo up; echo "lo up=$?"'
+          echo "unshare exit=$?"
+      - name: The sandbox as it is, before anything is changed
         run: |
           set -x
-          pdftotext=$(nix shell --inputs-from . nixpkgs#poppler-utils -c sh -c 'command -v pdftotext')
-          pdftotext=$(readlink -f "$pdftotext")
-          bwrap=$(nix shell --inputs-from . nixpkgs#bubblewrap -c sh -c 'command -v bwrap')
-          file=$PWD/letter.pdf
+          bash tools/probe-sandbox.sh store-only
+          echo "store only exit=$?"
+      - name: The same with apparmor's restriction on user namespaces off
+        run: |
+          set -x
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           set +e
-          "$bwrap" --unshare-all --unshare-user --disable-userns --die-with-parent --new-session \
-            --ro-bind /nix/store /nix/store --ro-bind-try /etc /etc --proc /proc --dev /dev \
-            --tmpfs /tmp --tmpfs /home \
-            --ro-bind "$file" "$file" --chdir /tmp \
-            -- "$pdftotext" -q -enc UTF-8 -eol unix -l 200 "$file" - > with-etc.txt 2> with-etc.err
-          echo "exit=$?"
-          set -e
-          echo "--- stdout"
-          od -c with-etc.txt | tail -6
-          echo "--- stderr"
-          cat with-etc.err
-      - name: No network in there, and nothing else of home
+          bash tools/probe-sandbox.sh free-store-only
+          echo "store only exit=$?"
+          bash tools/probe-sandbox.sh with-etc --ro-bind-try /etc /etc
+          echo "with etc exit=$?"
+      - name: And nothing else in there, with the restriction still off
         run: |
           set -x
           bwrap=$(nix shell --inputs-from . nixpkgs#bubblewrap -c sh -c 'command -v bwrap')
           curl=$(readlink -f "$(nix shell --inputs-from . nixpkgs#curl -c sh -c 'command -v curl')")
-          coreutils=$(nix shell --inputs-from . nixpkgs#coreutils -c sh -c 'command -v ls')
-          coreutils=$(readlink -f "$coreutils")
+          coreutils=$(readlink -f "$(nix shell --inputs-from . nixpkgs#coreutils -c sh -c 'command -v ls')")
           file=$PWD/letter.pdf
           set +e
           "$bwrap" --unshare-all --unshare-user --disable-userns --die-with-parent --new-session \
