@@ -28,8 +28,15 @@ fn folder(name: &str) -> PathBuf {
 /// Runs a command under `airlock enter`, or `None` on a kernel older than the Landlock airlock
 /// needs, which the test then says and skips.
 fn enter(read: &[&Path], write: &[&Path], command: &[&str]) -> Option<Output> {
+    entered(read, write, true, command)
+}
+
+fn entered(read: &[&Path], write: &[&Path], network: bool, command: &[&str]) -> Option<Output> {
     let mut enter = Command::new(env!("CARGO_BIN_EXE_airlock"));
     enter.arg("enter");
+    if !network {
+        enter.arg("--no-network");
+    }
     for path in SYSTEM.iter().map(Path::new).chain(read.iter().copied()) {
         enter.arg("--read").arg(path);
     }
@@ -98,6 +105,26 @@ fn no_new_privileges_a_seccomp_filter_and_no_writes_to_proc() {
     assert!(printed.contains("NoNewPrivs:\t1"), "{printed}");
     assert!(printed.contains("Seccomp:\t2"), "{printed}");
     assert!(!printed.contains("written"), "{printed}");
+}
+
+#[test]
+fn with_no_network_it_cannot_make_a_socket() {
+    // python is in the image and on every machine these tests run on, and it says what happened
+    let script = "import socket\ntry:\n socket.socket()\n print('made a socket')\nexcept \
+                  OSError as e:\n print(f'refused with {e.errno}')\n";
+    let Some(open) = entered(&[], &[], true, &["python3", "-c", script]) else {
+        return;
+    };
+    if !text(&open.stdout).contains("made a socket") {
+        eprintln!("skipped: no python3 to make a socket with");
+        return;
+    }
+    let shut = entered(&[], &[], false, &["python3", "-c", script]).unwrap();
+    let printed = text(&shut.stdout);
+    assert!(
+        printed.contains(&format!("refused with {}", libc::EPERM)),
+        "{printed}"
+    );
 }
 
 #[test]

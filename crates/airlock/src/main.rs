@@ -4,13 +4,15 @@
 //! cuts the scope's first when it does not, and starts bwrap. bwrap builds the sandbox, with mounts,
 //! process ids and a user namespace of its own, and starts `airlock enter` inside it, which adds
 //! Landlock rules and a seccomp filter and runs the command. `airlock serve` is Airlock on the
-//! bus, keeping the switch in nftables. Flatpak's permissions come later.
+//! bus, keeping the switch in nftables. `airlock text` is a sandbox of its own, for the program
+//! that writes out the text of a document. Flatpak's permissions come later.
 
 #[cfg(target_os = "linux")]
 mod confine;
 mod net;
 mod policy;
 mod serve;
+mod text;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::process::CommandExt;
@@ -41,6 +43,7 @@ fn main() -> ExitCode {
         Some("start") => start(rest),
         Some("enter") => enter(rest),
         Some("serve") => serve(rest),
+        Some("text") => text::text(rest),
         Some("--version" | "-V") => {
             println!("airlock {}", librift::VERSION);
             ExitCode::SUCCESS
@@ -48,8 +51,9 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "airlock runs commands in a sandbox for rift run --sandbox and keeps their \
-                 network switch for rift net.\n{USAGE}\n       airlock serve [--state <folder>] \
-                 [--cgroups <folder>]"
+                 network switch for rift net.\n{USAGE}\n       {}\n       airlock serve \
+                 [--state <folder>] [--cgroups <folder>]",
+                text::USAGE
             );
             ExitCode::from(2)
         }
@@ -223,23 +227,27 @@ fn start(args: &[String]) -> ExitCode {
 struct Enter {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
+    network: bool,
     program: String,
     arguments: Vec<String>,
 }
 
 fn parse_enter(args: &[String]) -> Result<Enter, String> {
     let (mut read, mut write) = (Vec::new(), Vec::new());
+    let mut network = true;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--read" => read.push(value(&mut rest, arg)?.into()),
             "--write" => write.push(value(&mut rest, arg)?.into()),
+            "--no-network" => network = false,
             "--" => {
                 let mut command = rest.cloned();
                 let program = command.next().ok_or("a command is needed after --")?;
                 return Ok(Enter {
                     read,
                     write,
+                    network,
                     program,
                     arguments: command.collect(),
                 });
@@ -258,7 +266,7 @@ fn enter(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(why) = confine(&enter.read, &enter.write) {
+    if let Err(why) = confine(&enter.read, &enter.write, enter.network) {
         eprintln!("{why} Nothing was run.");
         return ExitCode::from(126);
     }
@@ -273,13 +281,13 @@ fn enter(args: &[String]) -> ExitCode {
 }
 
 #[cfg(target_os = "linux")]
-fn confine(read: &[PathBuf], write: &[PathBuf]) -> Result<(), String> {
+fn confine(read: &[PathBuf], write: &[PathBuf], network: bool) -> Result<(), String> {
     confine::landlock(read, write)?;
-    confine::seccomp()
+    confine::seccomp(network)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn confine(_read: &[PathBuf], _write: &[PathBuf]) -> Result<(), String> {
+fn confine(_read: &[PathBuf], _write: &[PathBuf], _network: bool) -> Result<(), String> {
     Err("A sandbox needs Linux.".to_string())
 }
 
@@ -427,8 +435,19 @@ mod tests {
             Ok(Enter {
                 read: vec![PathBuf::from("/usr")],
                 write: vec![PathBuf::from("/tmp")],
+                network: true,
                 program: "sh".to_string(),
                 arguments: args(&["-c", "true"]),
+            })
+        );
+        assert_eq!(
+            parse_enter(&args(&["--no-network", "--", "pdftotext"])),
+            Ok(Enter {
+                read: Vec::new(),
+                write: Vec::new(),
+                network: false,
+                program: "pdftotext".to_string(),
+                arguments: Vec::new(),
             })
         );
         assert!(parse_enter(&args(&["--read", "/usr"])).is_err());

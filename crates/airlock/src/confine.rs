@@ -69,6 +69,16 @@ const REFUSED: &[libc::c_long] = &[
 /// console. ioctl refuses these and allows every other request.
 const TERMINAL: &[u64] = &[libc::TIOCSTI, libc::TIOCLINUX];
 
+/// What a sandbox with no network refuses as well. Without `socket` there is no socket of any kind
+/// to reach the network with, and the other three are there for one handed in from outside. A pair
+/// of sockets made with `socketpair` still works, since it goes nowhere but between the two ends.
+const SOCKETS: &[libc::c_long] = &[
+    libc::SYS_socket,
+    libc::SYS_connect,
+    libc::SYS_bind,
+    libc::SYS_listen,
+];
+
 /// From here on this process and what it starts can read what is under `read` and change what is
 /// under `write`, and nothing else. A path that is not there is left out.
 pub fn landlock(read: &[PathBuf], write: &[PathBuf]) -> Result<(), String> {
@@ -91,10 +101,11 @@ fn restrict(read: &[PathBuf], write: &[PathBuf]) -> Result<RestrictionStatus, Ru
         .restrict_self()
 }
 
-/// Adds the seccomp filter to this process and what it starts.
-pub fn seccomp() -> Result<(), String> {
+/// Adds the seccomp filter to this process and what it starts. Without `network` it refuses the
+/// calls that make a socket as well.
+pub fn seccomp(network: bool) -> Result<(), String> {
     let program =
-        program().map_err(|error| format!("Could not make the seccomp filter: {error}."))?;
+        program(network).map_err(|error| format!("Could not make the seccomp filter: {error}."))?;
     seccompiler::apply_filter(&program)
         .map_err(|error| format!("Could not add the seccomp filter: {error}."))?;
     #[cfg(target_arch = "x86_64")]
@@ -105,9 +116,12 @@ pub fn seccomp() -> Result<(), String> {
 
 /// The filter for this computer's architecture. A system call made as another architecture's, a
 /// 32-bit one on x86-64, ends the process.
-fn program() -> Result<BpfProgram, BackendError> {
+fn program(network: bool) -> Result<BpfProgram, BackendError> {
+    let refused = REFUSED
+        .iter()
+        .chain(if network { [].iter() } else { SOCKETS.iter() });
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
-        REFUSED.iter().map(|&number| (number, Vec::new())).collect();
+        refused.map(|&number| (number, Vec::new())).collect();
     let terminal = TERMINAL
         .iter()
         .map(|&request| {
@@ -174,11 +188,22 @@ mod tests {
 
     #[test]
     fn the_filter_has_every_refusal() {
-        let program = program().unwrap();
+        let program = program(true).unwrap();
         // the architecture check, then a comparison, two jumps, the refusal and the fall through for
         // each call, and more for ioctl's requests
         assert!(program.len() > 3 + REFUSED.len() * 5, "{}", program.len());
         for &number in REFUSED {
+            let number = u32::try_from(number).unwrap();
+            assert!(program.iter().any(|line| line.k == number), "{number}");
+        }
+        let socket = u32::try_from(libc::SYS_socket).unwrap();
+        assert!(!program.iter().any(|line| line.k == socket));
+    }
+
+    #[test]
+    fn a_sandbox_with_no_network_cannot_make_a_socket() {
+        let program = program(false).unwrap();
+        for &number in REFUSED.iter().chain(SOCKETS) {
             let number = u32::try_from(number).unwrap();
             assert!(program.iter().any(|line| line.k == number), "{number}");
         }
