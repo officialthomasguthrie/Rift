@@ -1,83 +1,63 @@
 #!/usr/bin/env bash
-# probe: can sherpa-onnx say a sentence with the piper voice the manifest already declares,
-# using the espeak-ng data the image already has, and what does the wav look like
+# probe round two: the piper lessac voice as sherpa-onnx reads it, with the espeak data the image
+# already has. round one showed the stock rhasspy onnx carries no sample_rate in its metadata
 set -x
 set +e
 
-onnx=https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx
-json=$onnx.json
-
-curl -fL --retry 3 -o voice.onnx "$onnx"
-curl -fL --retry 3 -o voice.onnx.json "$json"
-ls -l voice.onnx voice.onnx.json
-sha256sum voice.onnx voice.onnx.json
-
-# what piper's own config says about the voice
-python3 - <<'EOF'
-import json
-c = json.load(open("voice.onnx.json"))
-print("sample_rate", c["audio"]["sample_rate"])
-print("keys", sorted(c.keys()))
-print("inference", c.get("inference"))
-print("phoneme_type", c.get("phoneme_type"), "espeak", c.get("espeak"))
-print("num_symbols", c.get("num_symbols"), "num_speakers", c.get("num_speakers"))
-ids = c["phoneme_id_map"]
-print("phoneme_id_map size", len(ids))
-print("first ten", list(ids.items())[:10])
-EOF
-
-# sherpa-onnx wants a tokens file, one "<phoneme> <id>" a line, which is piper's own map flattened
-python3 - <<'EOF'
-import json
-c = json.load(open("voice.onnx.json"))
-with open("tokens.txt", "w", encoding="utf-8") as f:
-    for symbol, ids in c["phoneme_id_map"].items():
-        f.write(f"{symbol} {ids[0]}\n")
-EOF
-head -5 tokens.txt | cat -A | head -5
+repo=https://huggingface.co/csukuangfj/vits-piper-en_US-lessac-medium/resolve/main
+curl -fL --retry 3 -o voice.onnx "$repo/en_US-lessac-medium.onnx"
+curl -fL --retry 3 -o tokens.txt "$repo/tokens.txt"
+ls -l voice.onnx tokens.txt
+sha256sum voice.onnx tokens.txt
 wc -l tokens.txt
+head -4 tokens.txt | cat -A
 
-echo "=== what sherpa-onnx ships ==="
 sherpa=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#sherpa-onnx)
-echo "$sherpa"
-ls "$sherpa/bin"
-du -sh "$sherpa"
-
-echo "=== the espeak the image has, without mbrola ==="
 voice=$(nix build --no-link --print-out-paths --impure --expr \
   '(builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.x86_64-linux.espeak-ng.override { mbrolaSupport = false; }')
-echo "$voice"
-ls "$voice/share/espeak-ng-data" | head -10
-du -sh "$voice/share/espeak-ng-data"
+ls "$sherpa/bin"
 
-echo "=== help ==="
-"$sherpa/bin/sherpa-onnx-offline-tts" --help 2>&1 | head -80
+say() {
+  time "$sherpa/bin/sherpa-onnx-offline-tts" \
+    --vits-model=voice.onnx --vits-tokens=tokens.txt --num-threads=2 \
+    "$@"
+  echo "exit=$?"
+}
 
-echo "=== say a sentence ==="
-time "$sherpa/bin/sherpa-onnx-offline-tts" \
-  --vits-model=voice.onnx \
-  --vits-tokens=tokens.txt \
-  --vits-data-dir="$voice/share/espeak-ng-data" \
-  --num-threads=2 \
-  --output-filename=out.wav \
-  "Rift says this sentence out loud, with the voice that came on the drive."
-echo "tts exit=$?"
-ls -l out.wav
-python3 - <<'EOF'
-import wave
-w = wave.open("out.wav")
-print("channels", w.getnchannels(), "rate", w.getframerate(), "width", w.getsampwidth(),
-      "frames", w.getnframes(), "seconds", round(w.getnframes() / w.getframerate(), 2))
+look() {
+  python3 - "$1" <<'EOF'
+import sys, wave
+w = wave.open(sys.argv[1])
 raw = w.readframes(w.getnframes())
 peak = max(abs(int.from_bytes(raw[i:i+2], "little", signed=True)) for i in range(0, len(raw), 2))
-print("peak", peak)
+print(sys.argv[1], "channels", w.getnchannels(), "rate", w.getframerate(), "width", w.getsampwidth(),
+      "frames", w.getnframes(), "seconds", round(w.getnframes() / w.getframerate(), 2), "peak", peak)
 EOF
+  head -c 16 "$1" | xxd
+}
 
-echo "=== the same voice with no data dir, to see whether it needs one ==="
-"$sherpa/bin/sherpa-onnx-offline-tts" --vits-model=voice.onnx --vits-tokens=tokens.txt \
-  --output-filename=nodata.wav "A short test." 2>&1 | tail -20
-echo "no data dir exit=$?"
+echo "=== with the espeak data the image has ==="
+say --vits-data-dir="$voice/share/espeak-ng-data" --output-filename=image-data.wav \
+  "Rift says this sentence out loud, with the voice that came on the drive."
+look image-data.wav
 
-echo "=== whisper-cpp, for part two ==="
-whisper=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#whisper-cpp)
-ls "$whisper/bin"
+echo "=== with no data dir at all ==="
+say --output-filename=nodata.wav "Rift says this sentence out loud."
+look nodata.wav
+
+echo "=== a long one, for the time it takes ==="
+long=$(python3 -c 'print("The quick brown fox jumps over the lazy dog. " * 20)')
+say --vits-data-dir="$voice/share/espeak-ng-data" --output-filename=long.wav "$long"
+look long.wav
+echo "characters: ${#long}"
+
+echo "=== an empty text, and one with a quote and a newline in it ==="
+say --vits-data-dir="$voice/share/espeak-ng-data" --output-filename=empty.wav ""
+ls -l empty.wav
+say --vits-data-dir="$voice/share/espeak-ng-data" --output-filename=odd.wav \
+  "It said \"go left\", then it said 'go right'.
+And then nothing."
+look odd.wav
+
+echo "=== the whole help, and the stdout of one run on its own ==="
+"$sherpa/bin/sherpa-onnx-offline-tts" --help 2>&1 | sed -n '/^Options:/,$p' | head -60
