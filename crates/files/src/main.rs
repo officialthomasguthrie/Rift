@@ -94,13 +94,7 @@ fn serve() -> ExitCode {
 /// Open a window for each path, or on home with none, or ask the Files that is running for them. A
 /// window that is only there to have its picture taken opens whatever else is running.
 fn open(given: &[&str], screenshot: Option<PathBuf>) -> ExitCode {
-    let paths: Vec<PathBuf> = given
-        .iter()
-        .map(|given| {
-            let path = librift::files::path_of(given);
-            std::path::absolute(&path).unwrap_or(path)
-        })
-        .collect();
+    let paths: Vec<PathBuf> = given.iter().map(|given| path_of(given)).collect();
     if screenshot.is_none() && control::already_open() {
         if paths.is_empty() {
             return tell(&Command::Open(String::new()));
@@ -120,6 +114,17 @@ fn open(given: &[&str], screenshot: Option<PathBuf>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => fail(&format!("rift-files: {why}")),
     }
+}
+
+/// What a path on the command line names. The trash's own address is passed on as it is, since it
+/// is no place on a disk; anything else is made absolute, so a folder named from a terminal is the
+/// one that was meant wherever the app is started from.
+fn path_of(given: &str) -> PathBuf {
+    let path = librift::files::path_of(given);
+    if librift::files::is_trash(&path) {
+        return path;
+    }
+    std::path::absolute(&path).unwrap_or(path)
 }
 
 /// Send one line to the Files that is running.

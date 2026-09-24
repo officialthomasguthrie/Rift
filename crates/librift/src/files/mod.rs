@@ -817,6 +817,17 @@ pub fn path_of(given: &str) -> PathBuf {
     PathBuf::from(given)
 }
 
+/// The address every desktop uses for the trash. It is not a place on a disk: the file manager
+/// knows what it means, and nothing else is to be done to it.
+pub const TRASH_URI: &str = "trash:///";
+
+/// Whether this names the trash rather than a folder: its own address, or the short form of it
+/// that a command line takes.
+#[must_use]
+pub fn is_trash(path: &Path) -> bool {
+    path.as_os_str() == "trash:" || path.as_os_str() == TRASH_URI
+}
+
 /// The top of the file system a path is on: the folder over it that something is mounted at,
 /// found by walking up while the file system stays the same. `/` for anything on the root file
 /// system. The trash specification calls it the top directory, and a drive keeps its own trash

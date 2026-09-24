@@ -434,7 +434,7 @@ fn home_location() -> Location {
 /// A window on a folder, or on the folder a file is in with the file selected. The trash's own
 /// address opens the trash.
 pub fn open_path(state: &mut Files, path: &Path) -> Task<Message> {
-    if path.as_os_str() == "trash:" || path.as_os_str() == "trash:///" {
+    if files::is_trash(path) {
         return open_window(state, Location::Trash, None);
     }
     if path.as_os_str().is_empty() {

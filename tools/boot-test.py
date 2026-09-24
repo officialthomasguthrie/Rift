@@ -6860,7 +6860,12 @@ def main():
                 ok("the disk that was unlocked stood in the dock, a press opened it in Files, and "
                    "Eject in its menu unmounted it and shut it")
 
-            # the places in the Applications menu, over the apps, and a press opens one in Files
+            # the places in the Applications menu, over the apps, and a press opens one in Files.
+            # the last window closes first, so the desktop behind the menu is the desktop, and the
+            # press starts Files again the way the call on the bus did
+            files_set("close", "now", "the last window before the menu")
+            if not wait_for(60, lambda: not app_windows(FILES_APP_ID, "Files' windows before the menu")):
+                fail("Files' windows did not close")
             run("lens --menu", "the Applications menu with the places in it")
             shell_said = shell_until(20, lambda said: said.get("menu") == "open"
                                      and "home" in (said.get("places") or "").split(), "the menu open")
@@ -6876,18 +6881,17 @@ def main():
                  20, menu=True, rows=int(shell_said.get("rows") or 0), journals=("lens",))
             # the first row is the name of the section and the second is home
             click(args.qmp, shell_size, shell_menu_row(1))
-            files_until(120, lambda lines: files_value(lines, "windows") == "2"
-                        and files_value(lines, "location") == files_home, "home open in Files")
+            files_until(180, lambda lines: files_value(lines, "windows") == "1"
+                        and files_value(lines, "location") == files_home
+                        and files_value(lines, "ready") == "yes", "home open in Files")
             if bar_state("the state after the place was pressed").get("menu") != "closed":
                 fail("the Applications menu is still open after a place was pressed")
             ok(f"the Applications menu lists {len(shell_places)} places over the apps, and a press "
                "on home opened it in Files")
 
             files_set("close", "now", "the window on home")
-            files_until(30, lambda lines: files_value(lines, "windows") == "1", "one window left")
-            files_set("close", "now", "the last window")
             if not wait_for(60, lambda: not app_windows(FILES_APP_ID, "Files' windows at the end")):
-                fail("Files' windows did not close")
+                fail("Files' window did not close")
             ok("the shell opens every place there is in Files, and Files closed again")
 
             # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon

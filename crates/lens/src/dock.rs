@@ -138,11 +138,9 @@ impl Item {
     }
 }
 
-/// What names the trash in the dock and in the state, and what the file manager is given to open
-/// it: its own address, the one every desktop uses for it.
+/// What names the trash in the dock and in the state. What the file manager is given to open it is
+/// its own address, `librift::files::TRASH_URI`.
 pub const TRASH: &str = "trash";
-/// The address of the trash.
-pub const TRASH_PLACE: &str = "trash:///";
 
 /// A place at the right end of the dock: the trash while there is something in it, and a disk
 /// while it is mounted. A press opens it in the file manager, and a right click on a disk offers
@@ -185,7 +183,7 @@ pub fn places(trash: bool, drives: &[Volume]) -> Vec<Place> {
             key: TRASH.to_string(),
             name: "Trash".to_string(),
             icon: "user-trash-full-symbolic",
-            address: TRASH_PLACE.to_string(),
+            address: librift::files::TRASH_URI.to_string(),
             drive: None,
         });
     }
