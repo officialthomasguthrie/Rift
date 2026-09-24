@@ -3876,9 +3876,10 @@ def main():
             scale = dock_rows / DOCK_HEIGHT
 
             def titled_apps(what, png, colors):
-                """Start the titled apps from the dock, left to right, and look for their title bars."""
-                for place, app in enumerate(TITLED_APPS):
-                    click(args.qmp, size, dock_point(place))
+                """Start the titled apps from the dock, each at its own place in it, and look for their
+                title bars."""
+                for app in TITLED_APPS:
+                    click(args.qmp, size, dock_point(DOCK_KEPT.index(app)))
                     if not wait_for(120, lambda: [win for win in open_windows(f"{app}'s window")
                                                   if win[1] == app]):
                         _, output = run("journalctl --user -u lens -b -o cat -n 20 | cat", "the shell's log")
