@@ -1,6 +1,7 @@
 //! `rift ai index` and `rift ai search`: search by meaning in home. The index is the owner's
 //! own file in their cache folder, which nobody else reads; Quasar only turns text into vectors and
-//! never sees a file.
+//! never sees a file. A PDF does not hold its text as text, so `airlock text` writes it out in a
+//! sandbox first.
 
 use std::env;
 use std::fmt::Write as _;
@@ -8,7 +9,7 @@ use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -90,15 +91,38 @@ fn update() -> Result<(), String> {
     let old = fs::read(&path)
         .ok()
         .and_then(|bytes| Index::decode(&bytes).ok());
-    let update = search::update(&home, old, &model, &mut |kind, texts| {
-        client.embed(kind.name(), texts)
-    });
+    let update = search::update(
+        &home,
+        old,
+        &model,
+        &mut |kind, texts| client.embed(kind.name(), texts),
+        &mut extract,
+    );
     save(&update.index, &path).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
     println!(
         "{}",
-        summary(update.index.files.len(), update.read, update.removed)
+        summary(
+            update.index.files.len(),
+            update.read,
+            update.removed,
+            update.unread
+        )
     );
     update.error.map_or(Ok(()), Err)
+}
+
+/// The text of a document, from `airlock text`, which runs the program that reads it in a sandbox
+/// with no network where it sees that one file and nothing else.
+fn extract(file: &Path) -> Result<String, String> {
+    let out = Command::new("airlock")
+        .arg("text")
+        .arg(file)
+        .output()
+        .map_err(|e| format!("Could not run airlock text: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn find(words: &str) -> Result<Vec<Hit>, String> {
@@ -188,25 +212,29 @@ fn save(index: &Index, path: &Path) -> io::Result<()> {
     fs::rename(&new, path)
 }
 
-fn summary(files: usize, read: usize, removed: usize) -> String {
+fn summary(files: usize, read: usize, removed: usize, unread: usize) -> String {
     let (noun, verb) = if files == 1 {
         ("file", "is")
     } else {
         ("files", "are")
     };
     let was = |count: usize| if count == 1 { "was" } else { "were" };
-    format!(
+    let mut line = format!(
         "{files} {noun} {verb} in the index. {read} {} new or changed, {removed} {} removed.",
         was(read),
         was(removed)
-    )
+    );
+    if unread > 0 {
+        let _ = write!(line, " {unread} of them could not be read.");
+    }
+    line
 }
 
 /// A row for each file: where in home, with the line, and the day it last changed.
 fn rows(hits: &[Hit]) -> String {
     let places: Vec<String> = hits
         .iter()
-        .map(|hit| format!("~/{}:{}", hit.path, hit.line))
+        .map(|hit| format!("~/{}:{}", hit.path, search::spot(&hit.path, hit.line)))
         .collect();
     let width = places
         .iter()
@@ -227,12 +255,17 @@ mod tests {
     #[test]
     fn the_summary_counts_in_words() {
         assert_eq!(
-            summary(4, 4, 0),
+            summary(4, 4, 0, 0),
             "4 files are in the index. 4 were new or changed, 0 were removed."
         );
         assert_eq!(
-            summary(1, 1, 1),
+            summary(1, 1, 1, 0),
             "1 file is in the index. 1 was new or changed, 1 was removed."
+        );
+        assert_eq!(
+            summary(4, 2, 0, 1),
+            "4 files are in the index. 2 were new or changed, 0 were removed. 1 of them could not \
+             be read."
         );
     }
 
@@ -250,6 +283,11 @@ mod tests {
                 hit("code/backup.py", 12, 0),
             ]),
             "~/notes/bike.txt:1   2026-09-12\n~/code/backup.py:12  1970-01-01\n"
+        );
+        // a pdf has pages, not lines
+        assert_eq!(
+            rows(&[hit("notes/letter.pdf", 2, 0)]),
+            "~/notes/letter.pdf:page 2  1970-01-01\n"
         );
     }
 }
