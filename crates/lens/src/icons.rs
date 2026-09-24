@@ -39,6 +39,17 @@ pub fn picture<'a, Message: 'a>(text: Color, path: &Path, size: f32) -> Element<
     }
 }
 
+/// The drawing of a file's kind at this size, the first of `names` a theme has, the one that fits
+/// best first, in its own colours, or a symbolic one painted in `text` when no theme has one in
+/// colour. A row of a search draws a file this way, the same as a row of Files.
+#[must_use]
+pub fn of_file<'a, Message: 'a>(text: Color, names: &[String], size: f32) -> Element<'a, Message> {
+    match librift::icons::file(names) {
+        Some(path) => picture(text, &path, size),
+        None => space().width(size).height(size).into(),
+    }
+}
+
 /// A symbolic icon by name at this size, painted in one colour, or the same space left empty when no
 /// theme on the machine has it.
 #[must_use]

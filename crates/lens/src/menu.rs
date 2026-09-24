@@ -1,14 +1,15 @@
 //! The Applications menu: the surface that hangs under the Applications button. The field is at
 //! the top of it, and under the field the places and the apps in their sections, or what the field
-//! matched, printed or answered.
+//! matched, found in home, printed or answered.
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
 use iced::{Border, Color, Element, Font, Length, Shadow, Theme, window};
 use librift::apps::Category;
 use librift::files::places::Place;
 use librift::os::Action;
 
 use crate::bar;
+use crate::find::File;
 use crate::icons;
 use crate::launcher::App;
 use crate::route;
@@ -60,10 +61,16 @@ pub enum Row {
     Place(Place),
     /// An app, with its own icon at the left. Enter starts the one that is selected.
     App(App),
+    /// A file of home a search by meaning found. A click opens it with the app its kind opens
+    /// with.
+    File(File),
 }
 
 /// The name of the section the places are in, over the app sections.
 pub const PLACES: &str = "Places";
+/// The name of the section the files a search found are in. They are the whole list while they are
+/// up, since a line of plain words matches no app.
+pub const FILES: &str = "Your files";
 
 /// The places, then every app in its section, the sections in the menu's order. A section with
 /// nothing in it has no header.
@@ -135,7 +142,7 @@ impl Results {
         };
         rows.iter().filter_map(|row| match row {
             Row::App(app) => Some(app),
-            Row::Header(_) | Row::Place(_) => None,
+            Row::Header(_) | Row::Place(_) | Row::File(_) => None,
         })
     }
 }
@@ -200,20 +207,45 @@ impl Menu {
         }
         // only an app shows a list while typing. a command or a pipeline has nothing to show
         // until it has run, and a list that does not agree with what Enter does is a trap
-        self.results = match route::route(&self.input, apps) {
-            route::Interpretation::Launch(_) => {
-                let mut found = route::matches(&self.input, apps);
-                found.truncate(LIST_ROWS);
-                Results::Apps(found.into_iter().cloned().map(Row::App).collect())
-            }
-            _ => Results::None,
-        };
-        self.selected = (!self.results.is_empty()).then_some(0);
+        if let route::Interpretation::Launch(_) = route::route(&self.input, apps) {
+            let mut found = route::matches(&self.input, apps);
+            found.truncate(LIST_ROWS);
+            self.results = Results::Apps(found.into_iter().cloned().map(Row::App).collect());
+        } else if self.files().next().is_none() || route::searched(&self.input, apps).is_none() {
+            // the files a search found stay up while the words they were found for are typed on,
+            // since the answer for the words in the field now is what replaces them. a line that
+            // is no longer one to look with takes them away at once
+            self.results = Results::None;
+        }
+        self.selected = self.results.apps().next().is_some().then_some(0);
     }
 
     /// Empty field, the app list back, nothing pending.
     pub fn clear(&mut self, apps: &[App]) {
         self.typed(apps, String::new());
+    }
+
+    /// The files a search of home came back with: a section of their own under the field, in place
+    /// of whatever was there. The arrows and Enter walk the apps, not these, so nothing is
+    /// selected; a file is pressed, the way a place is.
+    pub fn found(&mut self, files: Vec<File>) {
+        let mut rows = vec![Row::Header(FILES)];
+        rows.extend(files.into_iter().map(Row::File));
+        self.results = Results::Apps(rows);
+        self.selected = None;
+        self.top = 0;
+    }
+
+    /// The files a search found, in the order they are listed.
+    pub fn files(&self) -> impl Iterator<Item = &File> {
+        let rows: &[Row] = match &self.results {
+            Results::Apps(rows) => rows,
+            _ => &[],
+        };
+        rows.iter().filter_map(|row| match row {
+            Row::File(file) => Some(file),
+            Row::Header(_) | Row::Place(_) | Row::App(_) => None,
+        })
     }
 
     /// Whether there is anything to clear before the menu closes. The app list is what the menu
@@ -378,7 +410,7 @@ fn list(look: Palette, menu: &Menu) -> Element<'_, Message> {
     match &menu.results {
         Results::None => {}
         Results::Apps(listed) => {
-            let (mut at, mut place) = (0, 0);
+            let (mut at, mut place, mut found) = (0, 0, 0);
             for row in listed {
                 match row {
                     Row::Header(name) => rows = rows.push(header(look, name)),
@@ -389,6 +421,10 @@ fn list(look: Palette, menu: &Menu) -> Element<'_, Message> {
                     Row::App(app) => {
                         rows = rows.push(app_row(look, app, at, menu.selected == Some(at)));
                         at += 1;
+                    }
+                    Row::File(file) => {
+                        rows = rows.push(file_row(look, file, found));
+                        found += 1;
                     }
                 }
             }
@@ -469,6 +505,51 @@ fn place_row(look: Palette, place: &Place, at: usize) -> Element<'static, Messag
         .height(ROW)
         .padding([0, 4])
         .on_press(Message::PickPlace(at))
+        .style(move |_: &Theme, status| button::Style {
+            background: match status {
+                button::Status::Hovered | button::Status::Pressed => Some(look.press.into()),
+                _ => None,
+            },
+            text_color: look.text,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 4.0.into(),
+            },
+            shadow: Shadow::default(),
+            snap: true,
+        })
+        .into()
+}
+
+/// One file a search found: the drawing of its kind, its name, and the folder it is in at the
+/// right. A click opens it with the app that kind opens with. Like a place, it is only ever
+/// pressed, never the row Enter takes.
+fn file_row(look: Palette, file: &File, at: usize) -> Element<'static, Message> {
+    let body = row![
+        icons::of_file(look.text, &file.icons, ICON),
+        text(file.name.clone())
+            .size(bar::TEXT_SIZE)
+            .color(look.text)
+            .wrapping(iced::widget::text::Wrapping::None),
+        space().width(Length::Fill),
+        text(file.folder.clone())
+            .size(bar::TEXT_SIZE)
+            .color(look.dim)
+            .wrapping(iced::widget::text::Wrapping::None),
+    ]
+    .spacing(ICON_GAP)
+    .align_y(iced::Center);
+    let inside = container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_y(iced::Center)
+        .clip(true);
+    button(inside)
+        .width(Length::Fill)
+        .height(ROW)
+        .padding([0, 4])
+        .on_press(Message::PickFile(at))
         .style(move |_: &Theme, status| button::Style {
             background: match status {
                 button::Status::Hovered | button::Status::Pressed => Some(look.press.into()),
@@ -625,8 +706,20 @@ mod tests {
                 Row::Header(name) => format!("[{name}]"),
                 Row::Place(place) => place.name.clone(),
                 Row::App(app) => app.name.clone(),
+                Row::File(file) => file.name.clone(),
             })
             .collect()
+    }
+
+    fn file(name: &str, folder: &str) -> File {
+        File {
+            name: name.to_string(),
+            folder: folder.to_string(),
+            under: format!("{folder}/{name}"),
+            path: std::path::PathBuf::from(format!("/home/rift/{folder}/{name}")),
+            mime: "text/plain".to_string(),
+            icons: vec!["text-plain".to_string()],
+        }
     }
 
     #[test]
@@ -692,6 +785,39 @@ mod tests {
         // the arrows and Enter walk the apps, so a place is not one of them
         let listed = Results::Apps(rows);
         assert_eq!(listed.apps().count(), apps().len());
+    }
+
+    #[test]
+    fn the_files_a_search_found_are_a_section_the_arrows_do_not_walk() {
+        let known = apps();
+        let mut menu = Menu::new(window::Id::unique(), &known, &[]);
+        menu.typed(&known, "teeth checkup booking".into());
+        // plain words match no app, so the list is empty until the search answers
+        assert!(menu.results.is_empty());
+        menu.found(vec![file("letter.pdf", "notes"), file("bike.txt", "notes")]);
+        assert_eq!(
+            names(&rows_of(&menu)),
+            ["[Your files]", "letter.pdf", "bike.txt"]
+        );
+        assert_eq!(menu.wanted_height(), height(3, false));
+        // Enter still asks Quasar: no file row is ever the selected one
+        menu.step(1);
+        assert!(menu.selected_app().is_none());
+        assert_eq!(
+            menu.files()
+                .map(|file| file.under.as_str())
+                .collect::<Vec<_>>(),
+            ["notes/letter.pdf", "notes/bike.txt"]
+        );
+        // typing on keeps them up, since the answer for the new words is what replaces them
+        menu.typed(&known, "teeth checkup bookings".into());
+        assert_eq!(menu.files().count(), 2);
+        // a line that is not one to look with takes them away at once, and so does an empty field
+        menu.typed(&known, "teeth checkup booking?".into());
+        assert!(menu.results.is_empty());
+        menu.found(vec![file("letter.pdf", "notes")]);
+        menu.clear(&known);
+        assert_eq!(menu.files().count(), 0);
     }
 
     #[test]

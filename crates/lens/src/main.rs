@@ -1,5 +1,7 @@
 //! lens: the shell. The top bar along the top of the screen, the Applications menu under it,
 //! and four interpreters behind its field: the app launcher, the OS commands, nushell and Quasar.
+//! Plain words also bring up the files of home closest to them in meaning, from the index Quasar's
+//! model made.
 //!
 //! `lens` draws the bar, the dock, the menus and the dialogs as layer-shell surfaces on the running
 //! session. `lens
@@ -32,6 +34,7 @@ mod datemenu;
 mod dialog;
 #[cfg(target_os = "linux")]
 mod dock;
+mod find;
 mod horizon;
 #[cfg(target_os = "linux")]
 mod icons;

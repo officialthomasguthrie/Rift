@@ -37,6 +37,7 @@ use crate::control::{self, Command, Level, Recording};
 use crate::datemenu;
 use crate::dialog::{self, Ask, Dialog};
 use crate::dock::{self, Dock};
+use crate::find;
 use crate::horizon::{self, Open};
 use crate::launcher::{self, App};
 use crate::menu::{self, Menu, Results};
@@ -233,6 +234,12 @@ pub enum Message {
     Pick(usize),
     /// A click on a place over the apps: it opens in the file manager.
     PickPlace(usize),
+    /// The typing in the field has stopped for these words: home is looked through for them.
+    Search(String),
+    /// What a search of home came back with, and the words it was made for.
+    Found(String, Result<Vec<find::File>, String>),
+    /// A click on a file a search found: it opens with the app its kind opens with.
+    PickFile(usize),
     /// Escape: clear the field, or close the menu when it is already empty.
     Escape,
     /// Close the menu, whatever surface it is on.
@@ -868,19 +875,14 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             Some(Ask::Command(_)) => dialog_event(state, dialog::Event::Confirm),
             _ => Task::none(),
         },
-        Message::Input(value) => write(state, value),
-        Message::Submit => submit(state),
-        Message::Move(step) => state.menu.as_mut().map_or_else(Task::none, |menu| {
-            menu.step(step);
-            menu.scroll()
-        }),
-        Message::Pick(at) => {
-            if let Some(menu) = state.menu.as_mut() {
-                menu.selected = Some(at);
-            }
-            submit(state)
-        }
-        Message::PickPlace(at) => pick_place(state, at),
+        Message::Input(_)
+        | Message::Submit
+        | Message::Move(_)
+        | Message::Pick(_)
+        | Message::PickPlace(_)
+        | Message::Search(_)
+        | Message::Found(..)
+        | Message::PickFile(_) => field(state, message),
         Message::Trashed(anything) => trashed(state, anything),
         Message::Drives(found) => plugged(state, found),
         Message::Escape => escape(state),
@@ -1918,14 +1920,120 @@ fn record(state: &mut Lens, recording: &Recording) -> Task<Message> {
     }
 }
 
+/// The field and the list under it: a line typed or entered, the arrows, a row pressed, and the
+/// search of home that plain words start.
+fn field(state: &mut Lens, message: Message) -> Task<Message> {
+    match message {
+        Message::Input(value) => write(state, value),
+        Message::Submit => submit(state),
+        Message::Move(step) => state.menu.as_mut().map_or_else(Task::none, |menu| {
+            menu.step(step);
+            menu.scroll()
+        }),
+        Message::Pick(at) => {
+            if let Some(menu) = state.menu.as_mut() {
+                menu.selected = Some(at);
+            }
+            submit(state)
+        }
+        Message::PickPlace(at) => pick_place(state, at),
+        Message::Search(words) => search(state, words),
+        Message::Found(words, result) => found(state, &words, result),
+        Message::PickFile(at) => pick_file(state, at),
+        _ => Task::none(),
+    }
+}
+
 /// New words in the field. The list is shorter or longer for them, so it goes back to its top,
-/// which the widget itself does not do when its contents change.
+/// which the widget itself does not do when its contents change. Plain words also start the wait
+/// before home is looked through for them.
 fn write(state: &mut Lens, words: String) -> Task<Message> {
     let Lens { apps, menu, .. } = state;
     menu.as_mut().map_or_else(Task::none, |menu| {
         menu.typed(apps, words);
-        menu.scroll()
+        let scrolling = menu.scroll();
+        match route::searched(&menu.input, apps) {
+            Some(words) => Task::batch([scrolling, later(find::PAUSE, Message::Search(words))]),
+            None => scrolling,
+        }
     })
+}
+
+/// The wait after the last key is over. The words are looked for in the index of home on a thread
+/// of its own, since reading the index and asking Quasar for a vector both take a moment, and
+/// nothing is said in the menu while it runs. A wait for words the field has moved on from is
+/// dropped: the one for what is in it now is on its way.
+fn search(state: &Lens, words: String) -> Task<Message> {
+    if state
+        .menu
+        .as_ref()
+        .is_none_or(|menu| menu.input.trim() != words)
+    {
+        return Task::none();
+    }
+    Task::perform(
+        async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            let asked = words.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(find::look(&asked));
+            });
+            let found = receiver
+                .await
+                .unwrap_or_else(|_| Err("The search stopped before it finished.".to_string()));
+            (words, found)
+        },
+        |(words, found)| Message::Found(words, found),
+    )
+}
+
+/// What the search came back with. Files go in a section of their own under the field; nothing
+/// close to the words leaves the menu as it was, since the line is a question for Quasar as well.
+/// A search that could not run at all says why on the line under the field, in the gray a notice
+/// has: the shell asked by itself, so it is not a person's mistake.
+fn found(state: &mut Lens, words: &str, result: Result<Vec<find::File>, String>) -> Task<Message> {
+    let Some(menu) = state.menu.as_mut() else {
+        return Task::none();
+    };
+    if menu.input.trim() != words {
+        return Task::none();
+    }
+    match result {
+        Ok(files) if files.is_empty() => Task::none(),
+        Ok(files) => {
+            menu.found(files);
+            menu.scroll()
+        }
+        Err(why) => {
+            eprintln!("lens: the search for {words:?} could not run: {why}");
+            menu.notice = Some(why);
+            Task::none()
+        }
+    }
+}
+
+/// A press on a file a search found: it opens with the app its kind opens with, in a scope of its
+/// own, and the menu closes, the way it does when a place or an app row is pressed. A kind no app
+/// on the machine opens leaves the menu up and says so.
+fn pick_file(state: &mut Lens, at: usize) -> Task<Message> {
+    let file = state
+        .menu
+        .as_ref()
+        .and_then(|menu| menu.files().nth(at).cloned());
+    let Some(file) = file else {
+        return Task::none();
+    };
+    let Some(app) = find::opens(&file, &state.apps) else {
+        if let Some(menu) = state.menu.as_mut() {
+            menu.error = Some(format!("No app opens {}.", file.name));
+        }
+        return Task::none();
+    };
+    report(librift::apps::launch(
+        &app,
+        std::slice::from_ref(&file.path),
+    ));
+    close(state)
 }
 
 /// Ask the compositor for a taller or shorter menu when one changed shape: the Applications menu as
@@ -2021,26 +2129,7 @@ fn remember(state: &Lens) {
         None => line("popup", "closed"),
         Some(shown) => line("popup", &shown.level.words()),
     }
-    match &state.menu {
-        None => line("menu", "closed"),
-        Some(menu) => {
-            line("menu", "open");
-            line("field", &menu.input);
-            line("rows", &menu.results.shown().to_string());
-            line(
-                "places",
-                &menu
-                    .places
-                    .iter()
-                    .map(|place| place.word)
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
-            if let Some((text, wrong)) = menu.line() {
-                line(if wrong { "error" } else { "notice" }, text);
-            }
-        }
-    }
+    menu_lines(state, &mut line);
     line("dock", &state.dock.line());
     for setting in state.dock.options.lines() {
         let (key, value) = setting.split_once(' ').unwrap_or((&setting, ""));
@@ -2055,6 +2144,35 @@ fn remember(state: &Lens) {
     }
     if let Ok(mut kept) = kept().lock() {
         *kept = lines;
+    }
+}
+
+/// The lines about the Applications menu: whether it is open, what is in the field, how many rows
+/// are under it, the files a search of home found, the places over the apps, and the line under
+/// them all.
+fn menu_lines(state: &Lens, line: &mut impl FnMut(&str, &str)) {
+    let Some(menu) = &state.menu else {
+        line("menu", "closed");
+        return;
+    };
+    line("menu", "open");
+    line("field", &menu.input);
+    line("rows", &menu.results.shown().to_string());
+    let found: Vec<&str> = menu.files().map(|file| file.under.as_str()).collect();
+    line("found", &words_or_none(&found));
+    let places: Vec<&str> = menu.places.iter().map(|place| place.word).collect();
+    line("places", &places.join(" "));
+    if let Some((text, wrong)) = menu.line() {
+        line(if wrong { "error" } else { "notice" }, text);
+    }
+}
+
+/// A line's words, or `none` when there are no words, so a line of a state is never empty.
+fn words_or_none(words: &[&str]) -> String {
+    if words.is_empty() {
+        "none".to_string()
+    } else {
+        words.join(" ")
     }
 }
 

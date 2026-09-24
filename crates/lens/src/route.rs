@@ -4,6 +4,13 @@
 //! The interpreters are tried in order. The four words `wifi`, `display`, `volume` and `power`
 //! are reserved for the OS commands, everything else goes to the launcher first, then to the
 //! shell if it reads like a pipeline, and the rest is a question for Quasar.
+//!
+//! Plain words that are not a question are also words to look for a file with, which is what
+//! [`searched`] says. Enter still asks Quasar; the files of home come up under the field by
+//! themselves.
+
+// the words to look with are only asked for by the panel, and the panel is linux only
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use librift::os::{self, Action};
 
@@ -131,6 +138,39 @@ pub fn matches<'a>(input: &str, apps: &'a [App]) -> Vec<&'a App> {
         .collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
     ranked.into_iter().map(|(_, app)| app).collect()
+}
+
+/// How many characters the field holds before it is worth looking through home for them.
+const LEAST: usize = 3;
+
+/// Words that make a line a question when they come first. A question is Quasar's to answer, and
+/// the files of home are looked through for a line that is about a thing instead.
+const QUESTION_WORDS: &[&str] = &[
+    "how", "what", "why", "when", "where", "who", "whom", "whose", "which", "is", "are", "was",
+    "were", "do", "does", "did", "can", "could", "should", "would", "will",
+];
+
+/// The words the field looks through home by meaning with, or `None` when the line is not one to
+/// look with: an app, an OS command or a pipeline, a question, and a line too short to mean
+/// anything. Enter is not what starts it, so this says nothing about what Enter does.
+#[must_use]
+pub fn searched(input: &str, apps: &[App]) -> Option<String> {
+    let line = input.trim();
+    if line.chars().count() < LEAST || line.contains('?') {
+        return None;
+    }
+    if !matches!(route(line, apps), Interpretation::Ask(_)) {
+        return None;
+    }
+    let first = line
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    if QUESTION_WORDS.contains(&first.as_str()) {
+        return None;
+    }
+    Some(line.to_string())
 }
 
 fn looks_like_shell(line: &str, words: &[&str]) -> bool {
@@ -325,6 +365,31 @@ mod tests {
             route("git status", &apps()),
             Interpretation::Shell("git status".into())
         );
+    }
+
+    #[test]
+    fn plain_words_are_words_to_look_for_a_file_with() {
+        let known = apps();
+        assert_eq!(
+            searched("the letter from the dentist", &known),
+            Some("the letter from the dentist".to_string())
+        );
+        assert_eq!(
+            searched("  teeth checkup booking ", &known),
+            Some("teeth checkup booking".to_string())
+        );
+        // a question is Quasar's, and so is anything with a question mark in it
+        assert_eq!(searched("how much disk is left", &known), None);
+        assert_eq!(searched("what time is it in Tokyo", &known), None);
+        assert_eq!(searched("the dentist?", &known), None);
+        // the other three readings keep the line to themselves
+        assert_eq!(searched("firefox", &known), None);
+        assert_eq!(searched("wifi off", &known), None);
+        assert_eq!(searched("ls ~/Documents", &known), None);
+        // and a line of one or two characters is not worth a call to the model
+        assert_eq!(searched("ab", &known), None);
+        assert_eq!(searched("", &known), None);
+        assert_eq!(searched("tax", &known), Some("tax".to_string()));
     }
 
     #[test]
