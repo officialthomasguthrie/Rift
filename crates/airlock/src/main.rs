@@ -53,7 +53,7 @@ fn main() -> ExitCode {
                 "airlock runs commands in a sandbox for rift run --sandbox and keeps their \
                  network switch for rift net.\n{USAGE}\n       {}\n       airlock serve \
                  [--state <folder>] [--cgroups <folder>]",
-                text::USAGE
+                text::LINE
             );
             ExitCode::from(2)
         }

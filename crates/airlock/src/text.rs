@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
+/// The command on one line, for the lines a bare `airlock` prints under its own usage.
+pub const LINE: &str = "airlock text <file>";
 pub const USAGE: &str = "Usage: airlock text <file>";
 
 const HELP: &str = "Writes out the text of a document. The program that reads it runs in a sandbox \
