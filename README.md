@@ -114,6 +114,7 @@ The image includes the following software, so a new drive is usable without a ne
 - Files in the home directory can be searched by meaning rather than by exact wording, through an embedding index that is built and kept on the drive. The file manager, the shell's search field and the command line all search it.
 - Text files, source code and PDFs are indexed. The text of a PDF is read out by pdftotext running in a sandbox with no network access that is given the one file and nothing else, and a result in a PDF names the page it was found on.
 - Words are read out loud by a Piper voice held on the same volume, played through the machine's speakers or written to a wav file. The voice runs on the host, for one sentence at a time, and only when its files are present.
+- Speech in a recording is written down by a Whisper model held beside the voice, in the language the system speaks. It runs the same way: on the host, for one recording at a time, and only when its file is present.
 
 ### Application sandboxing
 
@@ -149,7 +150,7 @@ The `rift` command reaches the same services as the desktop.
 | Command | Purpose |
 |---|---|
 | `rift host` | Show the stored profile of the current machine |
-| `rift ai` | Ask a question, index and search the home directory by meaning, or read words out loud |
+| `rift ai` | Ask a question, index and search the home directory by meaning, read words out loud, or write down the speech in a recording |
 | `rift doctor` | Check the drive, the host and the system services |
 | `rift snapshot` | List, take and restore from snapshots |
 | `rift backup` | List, make and restore from encrypted backups |
@@ -207,7 +208,7 @@ Rift is in active development ahead of its first public release.
 | Encrypted storage created on first boot | Working |
 | Compositor, shell, drop-down terminal and lock screen | Working |
 | Per-machine profiles | Working |
-| Local AI, API, search by meaning and a voice | Working |
+| Local AI, API, search by meaning, a voice and speech to text | Working |
 | Snapshots, backup and cloning | Working |
 | rift-flash for Windows, macOS and Linux | Working |
 | Sandboxing, network switch and Flatpak with portals | Working |
@@ -216,7 +217,7 @@ Rift is in active development ahead of its first public release.
 | Settings and first-run setup | Working |
 | File manager | In progress |
 | Software center | Planned |
-| Voice input and speech output | Planned |
+| Push-to-talk voice input in the shell | Planned |
 | FIDO2 unlock, TPM2 unlock on owned machines, and a mode that boots without personal data | Planned |
 | Signed releases, Secure Boot support and delta updates | Planned |
 

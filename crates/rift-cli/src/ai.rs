@@ -1,8 +1,9 @@
 //! `rift ai`: a question for Quasar from the terminal. An answer is printed. A command Quasar
 //! proposes is printed as well and follows the rule Lens's field follows: one that only reads
 //! runs at once, one that changes something runs after a yes. Without a question it prints
-//! Quasar's state. `rift ai index` and `rift ai search` are search by meaning in home, and
-//! `rift ai say` reads words out loud with the voice on the drive.
+//! Quasar's state. `rift ai index` and `rift ai search` are search by meaning in home,
+//! `rift ai say` reads words out loud with the voice on the drive, and `rift ai listen` writes down
+//! the words in a recording.
 
 use std::process::{Command, ExitCode, Stdio};
 
@@ -14,7 +15,8 @@ use crate::{search, text};
 const USAGE: &str = "Usage: rift ai [--yes] [question]
        rift ai index
        rift ai search <words>
-       rift ai say [--wav <file>] <words>";
+       rift ai say [--wav <file>] <words>
+       rift ai listen <file>";
 
 const HELP: &str =
     "Asks Quasar a question and prints the answer. When Quasar proposes a command that \
@@ -23,7 +25,8 @@ shows which models Quasar runs and whether they are ready.
 
   index    bring the search index of your home folder up to date. It also runs every 15 minutes.
   search   list the files in your home folder closest in meaning to the words, best first.
-  say      read the words out loud. With --wav the audio goes into that file instead.";
+  say      read the words out loud. With --wav the audio goes into that file instead.
+  listen   write down the words in a wav recording.";
 
 /// The program that plays the wav.
 const PLAYER: &str = "pw-play";
@@ -37,6 +40,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("index") => return search::index(&args[1..]),
         Some("search") => return search::search(&args[1..]),
         Some("say") => return say(&args[1..]),
+        Some("listen") => return listen(&args[1..]),
         Some("--yes" | "-y") => (true, &args[1..]),
         _ => (false, args),
     };
@@ -96,6 +100,36 @@ fn say(args: &[String]) -> ExitCode {
             }
         },
         None => play(&audio),
+    }
+}
+
+/// `rift ai listen`: the words in a recording. The file is read here, as the caller, and the bytes
+/// go to Quasar, which opens none of the owner's files.
+fn listen(args: &[String]) -> ExitCode {
+    let [file] = args else {
+        eprintln!("rift ai listen takes one wav file to read.");
+        return ExitCode::FAILURE;
+    };
+    let wav = match std::fs::read(file) {
+        Ok(wav) => wav,
+        Err(e) => {
+            eprintln!("Could not read {file}: {e}.");
+            return ExitCode::FAILURE;
+        }
+    };
+    match quasar::listen(&wav) {
+        Ok(words) if words.is_empty() => {
+            eprintln!("Nothing was said in {file}.");
+            ExitCode::FAILURE
+        }
+        Ok(words) => {
+            println!("{words}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -189,6 +223,15 @@ fn rows(status: &Status) -> Vec<(&'static str, String)> {
     if !status.voice_error.is_empty() {
         rows.push(("Voice error", status.voice_error.clone()));
     }
+    let speech = if status.speech.is_empty() {
+        status.speech_state.clone()
+    } else {
+        format!("{}, {}", status.speech_state, status.speech)
+    };
+    rows.push(("Speech", speech));
+    if !status.speech_error.is_empty() {
+        rows.push(("Speech error", status.speech_error.clone()));
+    }
     rows
 }
 
@@ -227,7 +270,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ready_models_are_five_rows() {
+    fn ready_models_are_six_rows() {
         let ready = Status {
             state: "ready".into(),
             model: "qwen3-0.6b-q8_0".into(),
@@ -239,12 +282,16 @@ mod tests {
             voice_state: "ready".into(),
             voice: "piper-en-us-lessac-medium".into(),
             voice_error: String::new(),
+            speech_state: "ready".into(),
+            speech: "whisper-base".into(),
+            speech_error: String::new(),
         };
         assert_eq!(
             text::table(&rows(&ready)),
             "State:  ready\nModel:  qwen3-0.6b-q8_0\nTier:   small\n\
              Search: ready, nomic-embed-text-v1.5-q8\n\
-             Voice:  ready, piper-en-us-lessac-medium\n"
+             Voice:  ready, piper-en-us-lessac-medium\n\
+             Speech: ready, whisper-base\n"
         );
     }
 
@@ -276,6 +323,11 @@ mod tests {
             voice_error: "Saying words out loud needs en_US-lessac-medium.onnx, which is not on \
                           the drive."
                 .into(),
+            speech_state: "none".into(),
+            speech: String::new(),
+            speech_error: "Turning speech into words needs ggml-base.bin, which is not on the \
+                           drive."
+                .into(),
         };
         assert_eq!(
             rows(&none),
@@ -299,6 +351,12 @@ mod tests {
                     "Voice error",
                     "Saying words out loud needs en_US-lessac-medium.onnx, which is not on the \
                      drive."
+                        .to_string()
+                ),
+                ("Speech", "none".to_string()),
+                (
+                    "Speech error",
+                    "Turning speech into words needs ggml-base.bin, which is not on the drive."
                         .to_string()
                 ),
             ]

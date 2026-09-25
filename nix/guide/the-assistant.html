@@ -46,6 +46,13 @@ either, and it works with the network unplugged:</p>
 <p>The voice is one of the files on your side of the drive, the same as the models, and
 <code>rift ai</code> says which one it is.</p>
 
+<h2>Speech written down</h2>
+<p>The other way round, Rift writes down what was said in a recording. The recording stays on the
+machine, the same as everything else here:</p>
+<pre><code>rift ai listen kettle.wav</code></pre>
+<p>The words are printed. A wav file is what it reads, which is what the line above writes and what
+a recorder on the machine saves. When nothing was said in the recording, it says so.</p>
+
 <h2>Other programs on the machine</h2>
 <p>The model is also served to programs on the machine at <code>127.0.0.1:11434</code>, in the shape
 most tools expect. A request that comes from a web page is refused, so a page in the browser cannot
