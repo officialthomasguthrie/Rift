@@ -14,7 +14,7 @@ use librift::dock::{Edge, Options, Size};
 use librift::drives::Volume;
 
 use crate::bar;
-use crate::horizon::{self, Open, Space};
+use crate::horizon::{Open, Space};
 use crate::icons;
 use crate::launcher::App;
 use crate::theme::Palette;
@@ -535,7 +535,7 @@ pub fn items(apps: &[App], pinned: &[String], open: &Open) -> Vec<Item> {
         if win.app_id.is_empty() {
             continue;
         }
-        let app = horizon::owner(apps, &win.app_id);
+        let app = librift::apps::owner(apps, &win.app_id);
         let key = app.map_or_else(|| win.app_id.clone(), |app| app.id.clone());
         let found = items.iter().position(|item| item.key == key);
         let at = if let Some(at) = found {
@@ -883,6 +883,7 @@ mod tests {
             app_id: app_id.to_string(),
             title: format!("window {id}"),
             focused,
+            ..Win::default()
         }
     }
 

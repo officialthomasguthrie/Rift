@@ -534,6 +534,34 @@ pub fn scope(id: &str) -> String {
     name
 }
 
+/// Whether a window with this app id belongs to this app. An app names its windows after its
+/// entry, or after the class the entry says it uses, or after the program; a terminal app is
+/// named after the class it is started with.
+#[must_use]
+pub fn belongs(app: &App, app_id: &str) -> bool {
+    if app_id.is_empty() {
+        return false;
+    }
+    let same = |other: &str| other.eq_ignore_ascii_case(app_id);
+    let tail = app.id.rsplit('.').next().unwrap_or(&app.id);
+    let program = app
+        .exec
+        .first()
+        .and_then(|word| word.rsplit('/').next())
+        .unwrap_or_default();
+    same(&app.id)
+        || app.wm_class.as_deref().is_some_and(same)
+        || same(tail)
+        || same(program)
+        || (app.terminal && same(&app.class()))
+}
+
+/// The app a window belongs to, when one of them does.
+#[must_use]
+pub fn owner<'a>(apps: &'a [App], app_id: &str) -> Option<&'a App> {
+    apps.iter().find(|app| belongs(app, app_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +789,60 @@ mod tests {
             split_exec("\"quote \\\"inside\\\"\" x"),
             ["quote \"inside\"", "x"]
         );
+    }
+
+    fn named(id: &str, program: &str) -> App {
+        App {
+            id: id.to_string(),
+            name: id.to_string(),
+            exec: vec![program.to_string()],
+            terminal: false,
+            icon: None,
+            wm_class: None,
+            category: Category::Accessories,
+            types: Vec::new(),
+            line: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_window_is_matched_to_the_entry_it_came_from() {
+        let firefox = named("firefox", "/run/current-system/sw/bin/firefox");
+        assert!(belongs(&firefox, "firefox"));
+        assert!(belongs(&firefox, "Firefox"), "the case is not the app");
+        assert!(!belongs(&firefox, "com.mitchellh.ghostty"));
+        // a window with no app id at all belongs to nobody
+        assert!(!belongs(&firefox, ""));
+
+        // an entry named the way flatpak names them, and a window named after the program
+        let ghostty = named("com.mitchellh.ghostty", "ghostty");
+        assert!(belongs(&ghostty, "com.mitchellh.ghostty"));
+        assert!(belongs(&ghostty, "ghostty"));
+
+        // and one that says what its windows are called
+        let mut code = named("code", "code");
+        code.wm_class = Some("Code".to_string());
+        assert!(belongs(&code, "Code"));
+        assert!(belongs(&code, "code"));
+    }
+
+    #[test]
+    fn a_terminal_app_is_matched_to_the_class_it_was_started_with() {
+        let mut helix = named("Helix", "hx");
+        helix.terminal = true;
+        assert!(belongs(&helix, "dev.rift.Helix"));
+        assert!(belongs(&helix, "Helix"));
+        // the terminal's own windows are the terminal's
+        assert!(!belongs(&helix, "com.mitchellh.ghostty"));
+    }
+
+    #[test]
+    fn the_first_entry_that_fits_owns_the_window() {
+        let apps = vec![named("firefox", "firefox"), named("btop", "btop")];
+        assert_eq!(
+            owner(&apps, "btop").map(|app| app.id.as_str()),
+            Some("btop")
+        );
+        assert!(owner(&apps, "org.gnome.Nautilus").is_none());
     }
 }

@@ -179,6 +179,9 @@ struct Lens {
     volume: Latest<u8>,
     /// Sets the brightness the slider asks for.
     brightness: Latest<u8>,
+    /// What the session journal last said, so a change in a window that is not written down, like
+    /// a window growing, does not write the file again.
+    journal: Vec<session::Window>,
 }
 
 /// Which of the bar's menus closed.
@@ -733,6 +736,7 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
         dismissed: None,
         volume: Latest::new(|level| report(sound::set_volume(Side::Output, level))),
         brightness: Latest::new(|level| report(status::set_brightness(level))),
+        journal: Vec::new(),
     };
     remember(&state);
     (state, opening)
@@ -1042,6 +1046,7 @@ fn measured(state: &mut Lens, id: window::Id, width: f32) {
 fn horizon_said(state: &mut Lens, message: Message) -> Task<Message> {
     match message {
         Message::Windows(open) => {
+            write_down(state, &open);
             state.dock.changed(&state.apps, open);
             state.layout = layout_name(state);
             Task::none()
@@ -1063,6 +1068,32 @@ fn horizon_said(state: &mut Lens, message: Message) -> Task<Message> {
         }
         _ => Task::none(),
     }
+}
+
+/// Write down what is open, the first half of teleport: the app that opened each window, the
+/// workspace and the screen it is on, and where it stands in the layout. It is written whenever it
+/// changes and nowhere else, since a drive is unplugged without warning and a journal written at
+/// the end of a session would be a journal of nothing. A window growing or being drawn again says
+/// nothing the journal keeps, so the file is left alone for it.
+fn write_down(state: &mut Lens, open: &Open) {
+    let seen: Vec<session::Seen> = open
+        .windows
+        .iter()
+        .map(|win| session::Seen {
+            app_id: win.app_id.clone(),
+            title: win.title.clone(),
+            pid: win.pid,
+            space: win.space,
+            floating: win.floating,
+            place: win.place,
+        })
+        .collect();
+    let windows = session::of(&seen, &open.all, &state.apps, session::started_by);
+    if windows == state.journal {
+        return;
+    }
+    state.journal = windows;
+    report(session::keep(&state.journal).map(|_| ()));
 }
 
 /// What the clock and the status sources said: the bar and the menus draw from it.
