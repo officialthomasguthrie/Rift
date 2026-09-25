@@ -172,6 +172,10 @@ pub struct Menu {
     pub places: Vec<Place>,
     /// The height the surface has been told to be.
     pub height: u32,
+    /// Whether the line in the field is one the shell heard rather than one that was typed. It
+    /// stays in the field after Enter, so what the shell heard is under your eyes, and the answer
+    /// to it is read back out loud.
+    pub heard: bool,
 }
 
 impl Menu {
@@ -190,6 +194,7 @@ impl Menu {
             notice: None,
             pending: None,
             places: places.to_vec(),
+            heard: false,
         }
     }
 
@@ -199,6 +204,7 @@ impl Menu {
         self.pending = None;
         self.notice = None;
         self.error = None;
+        self.heard = false;
         self.input = value;
         self.top = 0;
         if self.input.trim().is_empty() {
@@ -224,6 +230,14 @@ impl Menu {
     /// Empty field, the app list back, nothing pending.
     pub fn clear(&mut self, apps: &[App]) {
         self.typed(apps, String::new());
+    }
+
+    /// The field after Enter has taken the line: empty, unless the shell heard the line rather
+    /// than reading it typed, in which case it stays where it can be read and corrected.
+    pub fn taken(&mut self) {
+        if !self.heard {
+            self.input.clear();
+        }
     }
 
     /// The files a search of home came back with: a section of their own under the field, in place

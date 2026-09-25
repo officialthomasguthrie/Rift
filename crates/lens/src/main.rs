@@ -1,7 +1,7 @@
 //! lens: the shell. The top bar along the top of the screen, the Applications menu under it,
 //! and four interpreters behind its field: the app launcher, the OS commands, nushell and Quasar.
 //! Plain words also bring up the files of home closest to them in meaning, from the index Quasar's
-//! model made.
+//! model made, and a key puts into the field what was said out loud instead of typed.
 //!
 //! `lens` draws the bar, the dock, the menus and the dialogs as layer-shell surfaces on the running
 //! session. `lens
@@ -9,7 +9,8 @@
 //! [--yes] <words>` does it from a terminal instead, with `--yes` standing in for the
 //! confirmation the field asks for. `lens --type <words>`, `lens --enter [<words>]` and
 //! `lens --escape` type into the field of the shell that is already running, `lens --menu` opens
-//! and closes the Applications menu, `lens --look` makes it read the appearance settings again,
+//! and closes the Applications menu, `lens --listen` starts and stops the recording push to talk
+//! makes, `lens --look` makes it read the appearance settings again,
 //! `lens --dock` the dock's and `lens --notifications` Do not disturb and the apps kept quiet, and
 //! `lens --state` prints what the bar shows. `lens --volume
 //! up|down|mute` and `lens --brightness up|down` are what the keys for them run: they make the
@@ -53,6 +54,7 @@ mod route;
 mod status;
 #[cfg(target_os = "linux")]
 mod system;
+mod talk;
 #[cfg(target_os = "linux")]
 mod theme;
 #[cfg(target_os = "linux")]
@@ -86,6 +88,7 @@ fn main() -> ExitCode {
         Some("--enter") => tell(&control::Command::Enter(args[1..].join(" "))),
         Some("--escape") => tell(&control::Command::Escape),
         Some("--menu") => tell(&control::Command::Menu),
+        Some("--listen") => tell(&control::Command::Listen),
         Some("--look") => tell(&control::Command::Look),
         Some("--dock") => tell(&control::Command::Dock),
         Some("--notifications") => tell(&control::Command::Notifications),
@@ -102,7 +105,7 @@ fn main() -> ExitCode {
         Some("--keyboard") => turn(access::Tool::Keyboard),
         Some(other) => {
             eprintln!(
-                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --look | --dock | --notifications | --state | --volume up|down|mute | --brightness up|down | --record | --screen-reader | --keyboard]"
+                "lens: unknown option {other}. lens [--version | --route <words> | --do [--yes] <words> | --type <words> | --enter [<words>] | --escape | --menu | --listen | --look | --dock | --notifications | --state | --volume up|down|mute | --brightness up|down | --record | --screen-reader | --keyboard]"
             );
             ExitCode::from(2)
         }

@@ -115,6 +115,7 @@ The image includes the following software, so a new drive is usable without a ne
 - Text files, source code and PDFs are indexed. The text of a PDF is read out by pdftotext running in a sandbox with no network access that is given the one file and nothing else, and a result in a PDF names the page it was found on.
 - Words are read out loud by a Piper voice held on the same volume, played through the machine's speakers or written to a wav file. The voice runs on the host, for one sentence at a time, and only when its files are present.
 - Speech in a recording is written down by a Whisper model held beside the voice, in the language the system speaks. It runs the same way: on the host, for one recording at a time, and only when its file is present.
+- A key starts and stops a recording from the shell's own field. What was said is written down, put in the field and acted on the way a typed line is, and the answer to a question asked this way is read back out loud. The shell listens only while its menu is open, stops after a minute, and keeps nothing.
 
 ### Application sandboxing
 
@@ -208,7 +209,7 @@ Rift is in active development ahead of its first public release.
 | Encrypted storage created on first boot | Working |
 | Compositor, shell, drop-down terminal and lock screen | Working |
 | Per-machine profiles | Working |
-| Local AI, API, search by meaning, a voice and speech to text | Working |
+| Local AI, API, search by meaning, a voice, speech to text and push-to-talk | Working |
 | Snapshots, backup and cloning | Working |
 | rift-flash for Windows, macOS and Linux | Working |
 | Sandboxing, network switch and Flatpak with portals | Working |
@@ -217,7 +218,6 @@ Rift is in active development ahead of its first public release.
 | Settings and first-run setup | Working |
 | File manager | In progress |
 | Software center | Planned |
-| Push-to-talk voice input in the shell | Planned |
 | FIDO2 unlock, TPM2 unlock on owned machines, and a mode that boots without personal data | Planned |
 | Signed releases, Secure Boot support and delta updates | Planned |
 

@@ -1,9 +1,9 @@
 //! The shell, driven from a terminal. Lens listens on a socket in the session's runtime
-//! directory; `lens --type`, `lens --enter`, `lens --escape`, `lens --menu`, `lens --look`,
-//! `lens --dock`, `lens --notifications` and `lens --state` write one line to it, and `--state`
-//! reads the answer back. `lens --volume` and `lens --brightness`, which the keys for them run,
-//! write the level they left behind, and the shell shows it in the key popup. The runtime
-//! directory belongs to one person, so only that person can type into their field.
+//! directory; `lens --type`, `lens --enter`, `lens --escape`, `lens --menu`, `lens --listen`,
+//! `lens --look`, `lens --dock`, `lens --notifications` and `lens --state` write one line to it,
+//! and `--state` reads the answer back. `lens --volume` and `lens --brightness`, which the keys
+//! for them run, write the level they left behind, and the shell shows it in the key popup. The
+//! runtime directory belongs to one person, so only that person can type into their field.
 
 // only the shell listens on the socket, and the shell is linux only
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -26,6 +26,8 @@ pub enum Command {
     Escape,
     /// Open the Applications menu, or close it when it is open. What Mod+Space does.
     Menu,
+    /// Start listening, or stop when the shell is already listening. What Mod+H does.
+    Listen,
     /// Print what the bar shows.
     State,
     /// Read the appearance settings again and draw with them. Settings sends this when the owner
@@ -138,6 +140,7 @@ impl Command {
             Self::Enter(words) => format!("enter {words}"),
             Self::Escape => "escape".to_string(),
             Self::Menu => "menu".to_string(),
+            Self::Listen => "listen".to_string(),
             Self::State => "state".to_string(),
             Self::Look => "look".to_string(),
             Self::Dock => "dock".to_string(),
@@ -148,7 +151,7 @@ impl Command {
     }
 }
 
-/// Read one line of the protocol. `None` when it is not one of the ten.
+/// Read one line of the protocol. `None` when it is not one of the eleven.
 #[must_use]
 pub fn parse(line: &str) -> Option<Command> {
     let line = line.trim_end_matches(['\r', '\n']);
@@ -158,6 +161,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "enter" => Some(Command::Enter(rest.to_string())),
         "escape" => Some(Command::Escape),
         "menu" => Some(Command::Menu),
+        "listen" => Some(Command::Listen),
         "state" => Some(Command::State),
         "look" => Some(Command::Look),
         "dock" => Some(Command::Dock),
@@ -246,6 +250,7 @@ mod tests {
         );
         assert_eq!(parse("escape\r\n"), Some(Command::Escape));
         assert_eq!(parse("menu\n"), Some(Command::Menu));
+        assert_eq!(parse("listen\n"), Some(Command::Listen));
         assert_eq!(parse("state\n"), Some(Command::State));
         assert_eq!(parse("enter"), Some(Command::Enter(String::new())));
         assert_eq!(parse("type "), Some(Command::Type(String::new())));
@@ -315,6 +320,7 @@ mod tests {
             Command::Enter("echo hello".into()),
             Command::Escape,
             Command::Menu,
+            Command::Listen,
             Command::State,
             Command::Look,
             Command::Dock,

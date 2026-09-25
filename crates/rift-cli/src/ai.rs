@@ -28,6 +28,15 @@ shows which models Quasar runs and whether they are ready.
   say      read the words out loud. With --wav the audio goes into that file instead.
   listen   write down the words in a wav recording.";
 
+const SAY_USAGE: &str = "Usage: rift ai say [--wav <file>] <words>";
+const SAY_HELP: &str = "Reads the words out loud in the voice on the drive, through the machine's \
+speakers. With --wav the sound is written to that file instead of played, and the line says how \
+long it is.";
+const LISTEN_USAGE: &str = "Usage: rift ai listen <file>";
+const LISTEN_HELP: &str = "Writes down what was said in a wav recording and prints it. The \
+recording is read here and its bytes go to Quasar, which opens no files of yours. When nothing was \
+said in it, it says so.";
+
 /// The program that plays the wav.
 const PLAYER: &str = "pw-play";
 
@@ -67,6 +76,13 @@ pub fn run(args: &[String]) -> ExitCode {
 
 /// `rift ai say`: the words out loud, or into a wav file of the caller's choosing.
 fn say(args: &[String]) -> ExitCode {
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        println!("{SAY_USAGE}\n\n{SAY_HELP}");
+        return ExitCode::SUCCESS;
+    }
     let (wav, words) = if args.first().is_some_and(|arg| arg == "--wav") {
         let Some(file) = args.get(1) else {
             eprintln!("--wav needs a file to write.");
@@ -78,7 +94,7 @@ fn say(args: &[String]) -> ExitCode {
     };
     let text = words.join(" ");
     if text.trim().is_empty() {
-        eprintln!("rift ai say needs words to say.");
+        eprintln!("{SAY_USAGE}");
         return ExitCode::FAILURE;
     }
     let audio = match quasar::say(&text) {
@@ -106,8 +122,15 @@ fn say(args: &[String]) -> ExitCode {
 /// `rift ai listen`: the words in a recording. The file is read here, as the caller, and the bytes
 /// go to Quasar, which opens none of the owner's files.
 fn listen(args: &[String]) -> ExitCode {
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        println!("{LISTEN_USAGE}\n\n{LISTEN_HELP}");
+        return ExitCode::SUCCESS;
+    }
     let [file] = args else {
-        eprintln!("rift ai listen takes one wav file to read.");
+        eprintln!("{LISTEN_USAGE}");
         return ExitCode::FAILURE;
     };
     let wav = match std::fs::read(file) {

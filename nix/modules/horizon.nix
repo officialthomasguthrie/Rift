@@ -221,6 +221,11 @@ let
         // wrote when it stops. the same keys gnome uses
         Ctrl+Alt+Shift+R hotkey-overlay-title="Start or stop a screen recording" { spawn "lens" "--record"; }
 
+        // push to talk. the shell records while it is listening, hands what was said to the model
+        // that writes it down and puts the words in its field. it is a toggle, so repeat=false:
+        // a key held down would otherwise start and stop it over and over
+        Mod+H repeat=false hotkey-overlay-title="Start or stop listening" { spawn "lens" "--listen"; }
+
         // the screen reader on gnome's own keys, and the on-screen keyboard beside it. lens starts
         // and stops both, and the Applications menu has a row for each
         Mod+Alt+S hotkey-overlay-title="Turn the screen reader on or off" { spawn "lens" "--screen-reader"; }

@@ -47,8 +47,13 @@ use crate::popup::{self, Popup};
 use crate::route::{self, Interpretation};
 use crate::status::{self, Status};
 use crate::system;
+use crate::talk;
 use crate::theme::Palette;
 use crate::watch::{self, Latest};
+
+/// What the line under the field says while the shell is listening. It names the key, since the
+/// same key is what stops it and the field is the only place that teaches what the field does.
+const LISTENING: &str = "Listening. Press Super and H again to stop.";
 
 /// The interface font.
 pub const FONT: Font = Font {
@@ -160,6 +165,12 @@ struct Lens {
     popup: Option<Popup>,
     /// The file the screen recorder is writing, while it is running. The bar is marked for it.
     recording: Option<String>,
+    /// The recording push to talk is making, while the shell is listening.
+    listening: Option<talk::Recording>,
+    /// Counts the times the shell has started listening, so only the last one's minute stops it.
+    ears: u64,
+    /// The last answer the shell read out loud, which `lens --state` prints.
+    said: Option<String>,
     /// Counts the keys the popup showed, so only the last one's second closes it.
     keys: u64,
     /// The menu the compositor closed by taking the keyboard away, and when.
@@ -250,6 +261,12 @@ pub enum Message {
     Answered(Result<(String, String), String>),
     /// A line came in on the socket.
     Typed(Command),
+    /// The minute the shell listens for at most is over, for this run of it.
+    Deaf(u64),
+    /// A recording became words, or nothing at all when nobody spoke into it.
+    Heard(Result<Option<String>, String>),
+    /// The answer to a spoken question went to the speakers, or would not play.
+    Said(Result<String, String>),
     /// Horizon opened, closed or focused something.
     Windows(Open),
     /// A click on a dock item: its app starts, or its window comes forward.
@@ -709,6 +726,9 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
         outbox: None,
         popup: None,
         recording: access::running(access::Tool::Recorder).and_then(|(_, file)| file),
+        listening: None,
+        ears: 0,
+        said: None,
         keys: 0,
         dismissed: None,
         volume: Latest::new(|level| report(sound::set_volume(Side::Output, level))),
@@ -898,6 +918,9 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
             .as_mut()
             .map_or_else(Task::none, |menu| answered(menu, result)),
         Message::Typed(command) => typed(state, command),
+        Message::Deaf(ears) => deaf(state, ears),
+        Message::Heard(result) => spoken(state, result),
+        Message::Said(result) => said(state, result),
         Message::Windows(_)
         | Message::NextLayout
         | Message::Dock(_)
@@ -1575,14 +1598,17 @@ fn open(state: &mut Lens) -> Task<Message> {
 }
 
 fn close(state: &mut Lens) -> Task<Message> {
+    // the shell listens while this menu is open and nowhere else
+    forget(state);
     state
         .menu
         .take()
         .map_or_else(Task::none, |menu| Task::done(Message::Close(menu.id)))
 }
 
-/// Escape cancels a dialog and closes the system menu. In the Applications menu it clears the field
-/// first, the way a search entry does, and closes the menu when there is nothing left to clear.
+/// Escape cancels a dialog and closes the system menu. In the Applications menu it stops the shell
+/// listening, then clears the field, the way a search entry does, and closes the menu when there is
+/// nothing left to clear.
 fn escape(state: &mut Lens) -> Task<Message> {
     if state.dialog.is_some() {
         return close_dialog(state);
@@ -1592,6 +1618,12 @@ fn escape(state: &mut Lens) -> Task<Message> {
     }
     if state.datemenu.is_some() {
         return close_clock(state);
+    }
+    // escape stops the shell listening before it clears anything, since the line that says it is
+    // listening is what it would otherwise take away
+    if state.listening.is_some() {
+        forget(state);
+        return note(state, "The shell stopped listening.".to_string());
     }
     let Lens { apps, menu, .. } = state;
     match menu.as_mut() {
@@ -1851,6 +1883,7 @@ fn typed(state: &mut Lens, command: Command) -> Task<Message> {
         }
         Command::Escape => escape(state),
         Command::Menu => toggle(state),
+        Command::Listen => listen(state),
         Command::Popup(level) => show_popup(state, level),
         Command::Record(recording) => record(state, &recording),
         Command::Look => look(state),
@@ -1918,6 +1951,132 @@ fn record(state: &mut Lens, recording: &Recording) -> Task<Message> {
             }))
         }
     }
+}
+
+/// The key for push to talk. The shell listens while the Applications menu is open and nowhere
+/// else: the menu opens for the first press, and a second press, the minute the shell listens for
+/// at most, or the menu closing all stop the recording. A microphone that runs behind a shut menu
+/// is one nobody can see.
+fn listen(state: &mut Lens) -> Task<Message> {
+    if state.listening.is_some() {
+        return stop_listening(state);
+    }
+    let opening = open(state);
+    let recording = match talk::start() {
+        Ok(recording) => recording,
+        Err(why) => return Task::batch([opening, note(state, why)]),
+    };
+    state.listening = Some(recording);
+    state.ears += 1;
+    let ears = state.ears;
+    let listening = note(state, LISTENING.to_string());
+    Task::batch([opening, listening, later(talk::MOST, Message::Deaf(ears))])
+}
+
+/// The minute the shell listens for at most is over. Nobody says a sentence to a launcher for a
+/// minute, so this is a key somebody pressed and forgot: the recording is thrown away rather than
+/// sent, since the shell would otherwise ask Quasar about a room and read the answer out loud.
+fn deaf(state: &mut Lens, ears: u64) -> Task<Message> {
+    if state.ears != ears || state.listening.is_none() {
+        return Task::none();
+    }
+    forget(state);
+    note(
+        state,
+        "The shell stopped listening after a minute.".to_string(),
+    )
+}
+
+/// Stop listening and turn what was recorded into words, on a thread of its own: reading the
+/// recording and the model that reads it back both take a moment.
+fn stop_listening(state: &mut Lens) -> Task<Message> {
+    let Some(recording) = state.listening.take() else {
+        return Task::none();
+    };
+    let working = note(state, "Working out what you said.".to_string());
+    let heard = Task::perform(
+        async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(recording.stop().and_then(|wav| talk::words(&wav)));
+            });
+            receiver
+                .await
+                .unwrap_or_else(|_| Err("The shell stopped before it heard you.".to_string()))
+        },
+        Message::Heard,
+    );
+    Task::batch([working, heard])
+}
+
+/// Stop listening and keep nothing: the menu closed, or the minute ran out.
+fn forget(state: &mut Lens) {
+    if let Some(recording) = state.listening.take() {
+        std::thread::spawn(move || {
+            let _ = recording.stop();
+        });
+    }
+}
+
+/// What the recording turned into. The words go in the field and Enter follows them, since
+/// somebody who has spoken a whole sentence has said everything they mean; the line stays in the
+/// field, because the shell typed it and what it typed has to be readable.
+fn spoken(state: &mut Lens, result: Result<Option<String>, String>) -> Task<Message> {
+    let words = match result {
+        Ok(Some(words)) => words,
+        Ok(None) => return note(state, "Nothing was said.".to_string()),
+        Err(why) => {
+            eprintln!("lens: the recording could not be read: {why}");
+            return note(state, why);
+        }
+    };
+    let Lens { apps, menu, .. } = state;
+    let Some(menu) = menu.as_mut() else {
+        return Task::none();
+    };
+    // the line is whole, so there is no wait for more of it and no search of home while it is
+    // typed on: Enter is what a spoken line gets, and Enter is the same four readings as ever
+    menu.typed(apps, words);
+    menu.heard = true;
+    let scrolling = menu.scroll();
+    Task::batch([scrolling, submit(state)])
+}
+
+/// A line under the field about the listening, in the gray a notice has. A machine that cannot
+/// hear is not a person making a mistake.
+fn note(state: &mut Lens, said: String) -> Task<Message> {
+    if let Some(menu) = state.menu.as_mut() {
+        menu.notice = Some(said);
+        menu.error = None;
+    }
+    Task::none()
+}
+
+/// The answer went to the speakers, or it did not. What was read out loud is what `lens --state`
+/// prints, so a test can hear the shell in a machine with no ears.
+fn said(state: &mut Lens, result: Result<String, String>) -> Task<Message> {
+    match result {
+        Ok(said) => state.said = Some(said),
+        Err(why) => eprintln!("lens: the answer was not read out loud: {why}"),
+    }
+    Task::none()
+}
+
+/// Read an answer out loud, on a thread of its own: the voice takes a second to make the sound and
+/// as long as the sentence to play it.
+fn aloud(answer: String) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(talk::say(&answer));
+            });
+            receiver
+                .await
+                .unwrap_or_else(|_| Err("The voice stopped before it spoke.".to_string()))
+        },
+        Message::Said,
+    )
 }
 
 /// The field and the list under it: a line typed or entered, the arrows, a row pressed, and the
@@ -2139,6 +2298,21 @@ fn remember(state: &Lens) {
     line("dock-places", &state.dock.places_line());
     line("workspaces", &state.dock.spaces_line());
     line("layout", state.layout.as_deref().unwrap_or("none"));
+    line(
+        "listening",
+        if state.listening.is_some() {
+            "on"
+        } else {
+            "off"
+        },
+    );
+    line(
+        "said",
+        &state
+            .said
+            .as_deref()
+            .map_or_else(|| "none".to_string(), |said| one_line(said, SAID_SHOWN)),
+    );
     if let Some(menu) = &state.dock.menu {
         line("item", &format!("{} {}", menu.key, menu.rows.len()));
     }
@@ -2164,6 +2338,28 @@ fn menu_lines(state: &Lens, line: &mut impl FnMut(&str, &str)) {
     line("places", &places.join(" "));
     if let Some((text, wrong)) = menu.line() {
         line(if wrong { "error" } else { "notice" }, text);
+    }
+}
+
+/// How much of an answer the shell read out loud `lens --state` prints. It is one line of a state,
+/// not the answer itself, which is in the menu.
+const SAID_SHOWN: usize = 120;
+
+/// A line of a state out of words that may hold newlines and runs of spaces, cut to a length, so
+/// what the shell says about itself is always one key and one line.
+fn one_line(words: &str, most: usize) -> String {
+    let mut line: String = words.split_whitespace().collect::<Vec<&str>>().join(" ");
+    if line.chars().count() > most {
+        let end = line
+            .char_indices()
+            .nth(most)
+            .map_or(line.len(), |(at, _)| at);
+        line.truncate(end);
+    }
+    if line.is_empty() {
+        "none".to_string()
+    } else {
+        line
     }
 }
 
@@ -2213,7 +2409,7 @@ fn submit(state: &mut Lens) -> Task<Message> {
         return Task::none();
     };
     if let Some(action) = menu.pending.take() {
-        menu.input.clear();
+        menu.taken();
         menu.notice = None;
         return start(action);
     }
@@ -2236,13 +2432,13 @@ fn submit(state: &mut Lens) -> Task<Message> {
             menu.error = Some(usage.to_string());
         }
         Interpretation::Shell(line) => {
-            menu.input.clear();
+            menu.taken();
             menu.results = Results::None;
             menu.error = None;
             return Task::perform(async move { nu::run(&line) }, Message::Done);
         }
         Interpretation::Ask(question) => {
-            menu.input.clear();
+            menu.taken();
             menu.results = Results::None;
             menu.error = None;
             menu.notice = Some("Asking Quasar".to_string());
@@ -2263,7 +2459,7 @@ fn propose(menu: &mut Menu, action: Action) -> Task<Message> {
         menu.pending = Some(action);
         return Task::none();
     }
-    menu.input.clear();
+    menu.taken();
     menu.notice = None;
     start(action)
 }
@@ -2299,6 +2495,11 @@ fn answered(menu: &mut Menu, result: Result<(String, String), String>) -> Task<M
     match reply {
         quasar::Reply::Answer(answer) => {
             menu.results = Results::Answer(answer::rows(&answer, menu::ROWS));
+            // a question asked out loud is answered out loud, and one that was typed is not: a
+            // machine that reads every answer back would be one nobody could work next to
+            if menu.heard {
+                return aloud(answer);
+            }
             Task::none()
         }
         quasar::Reply::Action(action) => propose(menu, action),
@@ -2317,7 +2518,7 @@ fn launch(menu: &mut Menu, app: &App) {
         }
         Err(why) => menu.error = Some(why),
     }
-    menu.input.clear();
+    menu.taken();
     menu.results = Results::None;
     menu.selected = None;
 }

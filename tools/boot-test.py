@@ -499,7 +499,7 @@ STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
               "recording", "screen-reader", "keyboard", "layout", "dock-position", "dock-extend",
-              "dock-icons", "dock-hide", "dock-hidden", "dock-places", "places")
+              "dock-icons", "dock-hide", "dock-hidden", "dock-places", "places", "listening", "said")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -508,6 +508,12 @@ RESULT_ROWS = 3
 ERROR_LINE = "wifi dance"
 # a question with a short answer. the model runs on the cpu, next to horizon's software renderer
 QUESTION = "What is the capital of France?"
+# the microphone this machine does not have. a pipewire loopback whose capture side is a sink and
+# whose playback side is a source: a wav played into the sink is what the machine then hears, which
+# is the only way to hand recorded speech to a vm with no sound hardware of its own
+MIC_UNIT = "rift-test-mic"
+MIC_SINK = "rift-test-sink"
+MIC_SOURCE = "rift-test-mic"
 # the console, from nix/modules/horizon.nix: ghostty's background, the height the window rule gives
 # the window in logical pixels, and the app id the bind shows and hides
 CONSOLE = (4, 4, 6)
@@ -7167,6 +7173,112 @@ def main():
             shot(f"{stem}-menu-opened{extension}", "menu-opened")
             close_app(SEARCH_PDF, SEARCH_PDF_APP)
             ok(f"a press on {SEARCH_PDF} opened it with the app for its kind and closed the menu")
+
+            # 5s. push to talk, which is P2.6 part 3. a key starts a recording, the model on the
+            # drive writes down what was said, the words go in the field and Enter follows them,
+            # and the answer to a question asked out loud is read back out loud. this machine has
+            # no microphone, so one is made out of pipewire: a loopback whose capture side is a
+            # sink and whose playback side is a source, the source made the default, and the wav
+            # the voice writes played into the sink while the shell is listening
+            if args.models:
+                run(f"systemd-run --user --quiet --collect --unit={MIC_UNIT} pw-loopback "
+                    f"--capture-props='media.class=Audio/Sink node.name={MIC_SINK} node.description={MIC_SINK}' "
+                    f"--playback-props='media.class=Audio/Source node.name={MIC_SOURCE} node.description={MIC_SOURCE}'",
+                    "a microphone made out of a pipewire loopback")
+
+                def mic_id():
+                    """The id wireplumber gives the loopback's source, once it is there."""
+                    _, listed = run("wpctl status | cat", "what wireplumber lists")
+                    found = re.search(rf"(\d+)\.\s+{re.escape(MIC_SOURCE)}\b", without_console(listed))
+                    return found.group(1) if found else None
+
+                talk_id = wait_for(60, mic_id)
+                if not talk_id:
+                    _, listed = run("wpctl status | cat", "what wireplumber lists in the end")
+                    _, journal = run(f"journalctl --user -u {MIC_UNIT} -b -o cat -n 20 | cat", "what it said")
+                    fail(f"the loopback made no source called {MIC_SOURCE}: "
+                         f"{without_console(listed).strip()[-600:]!r} {without_console(journal).strip()[-300:]!r}")
+                status, _ = run(f"wpctl set-default {talk_id}", "the loopback as the machine's microphone")
+                if status != 0:
+                    fail(f"wpctl would not make {talk_id} the default source")
+                ok(f"a pipewire loopback stands in for a microphone: {MIC_SOURCE} is source {talk_id}")
+
+                # the pointer goes onto the desktop first: the menu opens under it otherwise and a
+                # row under the pointer is drawn in its own gray
+                point(args.qmp, shell_size, (round(shell_width * 0.8), round(shell_height * 0.5)))
+
+                # a room with nobody in it is not a sentence. the shell records digital silence and
+                # says so, and nothing is asked of quasar and nothing is typed in the field
+                run("lens --listen", "the key for push to talk, with nothing to hear")
+                talk_said = shell_until(20, lambda said: said.get("listening") == "on",
+                                        "the shell listening")
+                if talk_said.get("listening") != "on" or talk_said.get("menu") != "open":
+                    fail(f"the key left the shell listening {talk_said.get('listening')!r} with the "
+                         f"menu {talk_said.get('menu')!r}")
+                run("lens --listen", "the key again, which stops it")
+                talk_said = shell_until(90, lambda said: said.get("listening") == "off"
+                                        and said.get("notice", "").startswith("Nothing"),
+                                        "what the shell heard in a quiet room")
+                if talk_said.get("listening") != "off" or not talk_said.get("notice", "").startswith("Nothing"):
+                    fail(f"the shell says listening {talk_said.get('listening')!r} and "
+                         f"{talk_said.get('notice')!r} about a recording with nothing in it")
+                if talk_said.get("field"):
+                    fail(f"the field holds {talk_said.get('field')!r} after a recording with nothing in it")
+                ok("the key started and stopped the shell listening, and a recording with nothing in "
+                   f"it left the field empty: {talk_said.get('notice')!r}")
+
+                # nothing typed has ever been read out loud: 5g asked this same question in the
+                # field and the answer only ever went on the screen. a question asked out loud is
+                # what the voice answers, which is the whole rule
+                if talk_said.get("said") != "none":
+                    fail(f"the shell has read {talk_said.get('said')!r} out loud without being "
+                         "asked out loud")
+
+                # and now the question, said out loud by the voice and played into the microphone
+                # while the shell listens. the words come back into the field, Enter follows them,
+                # and quasar's answer goes to the speakers as well as under the field
+                talk_wav = "/home/rift/asked.wav"
+                status, printed = run(f'rift ai say --wav {talk_wav} "{QUESTION}"', "the question out loud")
+                if status != 0 or "Wrote" not in without_console(printed):
+                    fail(f"rift ai say wrote no wav to ask with: {without_console(printed).strip()[-300:]!r}")
+                run("lens --listen", "the key for push to talk")
+                talk_said = shell_until(20, lambda said: said.get("listening") == "on", "the shell listening")
+                if talk_said.get("listening") != "on":
+                    fail("the key did not start the shell listening for the question")
+                status, printed = run(f"pw-play --target {MIC_SINK} {talk_wav}", "the question into the microphone")
+                if status != 0:
+                    fail(f"the question would not play into {MIC_SINK}: "
+                         f"{without_console(printed).strip()[-300:]!r}")
+                run("lens --listen", "the key again, which stops it")
+                talk_said = shell_until(args.answer_timeout,
+                                        lambda said: said.get("said") not in (None, "", "none"),
+                                        "the answer the shell read out loud")
+                talk_heard = talk_said.get("field") or ""
+                talk_spoken = re.findall(r"[a-z]+", QUESTION.lower())
+                talk_shared = [word for word in talk_spoken if word in re.findall(r"[a-z]+", talk_heard.lower())]
+                print(f"\nboot-test: the field holds {talk_heard!r} and the shell said "
+                      f"{talk_said.get('said')!r}", flush=True)
+                if len(talk_shared) < 0.7 * len(talk_spoken):
+                    _, journal = run("journalctl --user -u lens -b -o cat -n 30 | cat", "the shell's log")
+                    fail(f"the field holds {talk_heard!r} of {QUESTION!r}: {len(talk_shared)} of its "
+                         f"{len(talk_spoken)} words: {without_console(journal).strip()[-600:]!r}")
+                if int(talk_said.get("rows") or 0) < 1:
+                    fail(f"the shell heard {talk_heard!r} and put no answer under the field")
+                if talk_said.get("said") in (None, "", "none"):
+                    _, journal = run("journalctl --user -u lens -b -o cat -n 30 | cat", "the shell's log")
+                    fail(f"the shell did not read the answer out loud: "
+                         f"{without_console(journal).strip()[-600:]!r}")
+                look("the words the shell heard, with the answer under them",
+                     f"{stem}-menu-heard{extension}", 20, menu=True,
+                     rows=int(talk_said.get("rows") or 0), journals=("lens",))
+                ok(f"the shell heard {len(talk_shared)} of the question's {len(talk_spoken)} words "
+                   f"({talk_heard!r}), answered it in {talk_said.get('rows')} rows and read the "
+                   f"answer out loud: {talk_said.get('said')!r}")
+
+                run("lens --escape", "escape after the answer")
+                run("lens --escape", "escape again, which closes the menu")
+                run(f"rm -f {talk_wav}", "the wav the question was said into")
+                run(f"systemctl --user stop {MIC_UNIT}", "the loopback that stood in for a microphone")
 
             # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again
