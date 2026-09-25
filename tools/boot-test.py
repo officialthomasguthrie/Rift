@@ -514,6 +514,13 @@ QUESTION = "What is the capital of France?"
 MIC_UNIT = "rift-test-mic"
 MIC_SINK = "rift-test-sink"
 MIC_SOURCE = "rift-test-mic"
+# the session journal of P2.8 part 1: where the shell writes down what is open, and the words a
+# window's paragraph can hold. the app opened beside the terminal in step 5t is the quickest window
+# in the image to open and close, and its app id is matched in lower case the way step 5j matches
+SESSION_JOURNAL = "~/.local/state/rift/session"
+SESSION_KEYS = ("app", "window", "title", "workspace", "screen", "column", "tile", "floating")
+SESSION_APP = "Calculator"
+SESSION_APP_ID = "calculator"
 # the console, from nix/modules/horizon.nix: ghostty's background, the height the window rule gives
 # the window in logical pixels, and the app id the bind shows and hides
 CONSOLE = (4, 4, 6)
@@ -7279,6 +7286,176 @@ def main():
                 run("lens --escape", "escape again, which closes the menu")
                 run(f"rm -f {talk_wav}", "the wav the question was said into")
                 run(f"systemctl --user stop {MIC_UNIT}", "the loopback that stood in for a microphone")
+
+            # 5t. the session journal, which is P2.8 part 1. the shell writes down what is open as
+            # windows open, move and close: for each window the desktop entry that opened it, the
+            # workspace and the screen it is on, and where it stands in the scrolling layout. it is
+            # the half of teleport that remembers; opening the apps again is part 2. the entry is
+            # the one thing the compositor cannot say, so the step opens a window each of the two
+            # ways an app is started here: from the Applications menu, which gives it a scope of the
+            # shell's named after its entry, and by the compositor itself, which gives it no scope
+            # of a session's at all and leaves the app id its window carries to say what it is
+            def session_windows(what):
+                """The windows the session journal names, each as a dict of its lines. The lines of
+                a window go in a fixed order, so a word that comes round again starts the next
+                window, which is what says where one ends when a journal line lands in the blank
+                line between two."""
+                status, output = run(f"cat {SESSION_JOURNAL}", what)
+                if status != 0:
+                    return []
+                windows, win = [], {}
+                for printed_line in without_console(output).splitlines():
+                    printed_line = printed_line.strip()
+                    if printed_line.startswith("#"):
+                        continue
+                    if not printed_line:
+                        if win:
+                            windows.append(win)
+                        win = {}
+                        continue
+                    key, _, value = printed_line.partition(" ")
+                    if key not in SESSION_KEYS:
+                        continue
+                    if key in win:
+                        windows.append(win)
+                        win = {}
+                    win[key] = value.strip()
+                if win:
+                    windows.append(win)
+                return windows
+
+            def session_of(app_id, windows):
+                """The journal's paragraph for the window whose app id has this in it."""
+                return next((win for win in windows
+                             if app_id in (win.get("window") or "").lower()), None)
+
+            def session_until(seconds, ready, what):
+                """The journal once it fits, or what it said when the wait ran out."""
+                until = time.monotonic() + seconds
+                while True:
+                    windows = session_windows(what)
+                    if ready(windows) or time.monotonic() > until:
+                        return windows
+                    time.sleep(2)
+
+            def session_entry(scope):
+                """The desktop entry the name of a scope of the shell's names, with the escapes a
+                unit name needs taken back out, the way crates/librift/src/session.rs reads it."""
+                found = re.fullmatch(r"app-rift-(.+)-\d+\.scope", scope or "")
+                if not found:
+                    return None
+                return re.sub(r"\\x([0-9a-f]{2})",
+                              lambda hexed: chr(int(hexed.group(1), 16)), found.group(1))
+
+            # a terminal the compositor spawned itself, which is what Super and T does. the
+            # compositor only puts what it spawns in a scope of its own when it is a notify unit
+            # itself, and greetd starts it without a notify socket, so this one is in no scope of a
+            # session's and the entry has to be found from the app id its window carries
+            session_already = {win[0] for win in app_windows(MENU_APP_ID, "the terminals open now")}
+            run("horizon msg action spawn -- ghostty", "a terminal started the way a key starts one")
+            session_terminal = wait_for(120, lambda: next(
+                (win[0] for win in app_windows(MENU_APP_ID, "the terminal the compositor started")
+                 if win[0] not in session_already), None))
+            if not session_terminal:
+                _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"the compositor started no {MENU_APP_ID} window: "
+                     f"{without_console(output).strip()[-800:]!r}")
+            # and an app from the Applications menu, which the shell starts in a scope of its own
+            # named after the entry it came from
+            open_from_menu(SESSION_APP, SESSION_APP_ID)
+
+            session_found = session_until(
+                60,
+                lambda windows: session_of(MENU_APP_ID, windows) and session_of(SESSION_APP_ID, windows),
+                "the journal with both windows in it")
+            session_spawned = session_of(MENU_APP_ID, session_found)
+            session_started = session_of(SESSION_APP_ID, session_found)
+            if not session_spawned or not session_started:
+                _, output = run("journalctl --user -u lens -b -o cat -n 30 | cat", "the shell's log")
+                fail(f"the journal names {[win.get('window') for win in session_found]}, expected "
+                     f"{MENU_APP_ID} and an app id with {SESSION_APP_ID} in it: "
+                     f"{without_console(output).strip()[-600:]!r}")
+
+            # the entry each window came from. the app came from the menu, so it runs in a scope of
+            # the shell's named after its entry and the journal has to say the same; the terminal is
+            # in no such scope, so its entry was found from the app id its window carries, which is
+            # the way the dock has always found an app
+            session_scopes = {name: window_scope(window, f"the scope of {name}")
+                              for name, window in ((MENU_APP_ID, session_terminal),
+                                                   (SESSION_APP_ID, app_windows(SESSION_APP_ID, "the app's window")[0][0]))}
+            if session_entry(session_scopes[MENU_APP_ID]):
+                fail(f"the terminal the compositor started runs in {session_scopes[MENU_APP_ID]!r}, "
+                     "which is a scope of the shell's, so this proves nothing about the app id")
+            if session_spawned.get("app") != MENU_APP_ID:
+                fail(f"the journal says the terminal came from {session_spawned.get('app')!r}, expected "
+                     f"{MENU_APP_ID} found from the app id of a window in no scope of the shell's")
+            session_named = session_entry(session_scopes[SESSION_APP_ID])
+            if not session_named:
+                fail(f"{SESSION_APP} runs in {session_scopes[SESSION_APP_ID]!r}, expected a scope of "
+                     "the shell's own named after its entry")
+            if session_started.get("app") != session_named:
+                fail(f"the journal says {SESSION_APP} came from {session_started.get('app')!r}, where "
+                     f"its scope says {session_named}")
+
+            # and where each one stood. a new window opens as a column of its own, so the two are on
+            # the same workspace in columns of their own, each the only window in its column
+            for name, win in ((MENU_APP_ID, session_spawned), (SESSION_APP_ID, session_started)):
+                for key in ("workspace", "screen", "column", "tile"):
+                    if not win.get(key):
+                        fail(f"the journal says {win} about {name}, with no {key} in it")
+                if not win["workspace"].isdigit() or not win["column"].isdigit():
+                    fail(f"the journal says workspace {win['workspace']!r} and column "
+                         f"{win['column']!r} about {name}, expected numbers")
+            if session_spawned["workspace"] != session_started["workspace"]:
+                fail(f"the two windows are on workspaces {session_spawned['workspace']} and "
+                     f"{session_started['workspace']}, where both opened on the one in front of the owner")
+            if session_spawned["column"] == session_started["column"]:
+                fail(f"the journal puts both windows in column {session_spawned['column']}, where a new "
+                     "window opens as a column of its own")
+            ok(f"the journal names {SESSION_APP} from the entry its scope names "
+               f"({session_started['app']} from {session_scopes[SESSION_APP_ID]}, workspace "
+               f"{session_started['workspace']}, column {session_started['column']}) and the terminal "
+               f"the compositor started from its app id ({session_spawned['app']}, column "
+               f"{session_spawned['column']})")
+
+            # what a person reads: one row a window, the app named the way the Applications menu
+            # names it, then where it stood, then what it was showing
+            status, output = run("rift session", "what rift session prints")
+            session_printed = without_console(output)
+            if status != 0:
+                fail(f"rift session exited with {status}: {session_printed.strip()[-300:]!r}")
+            print(f"\nboot-test: rift session prints\n{session_printed}", flush=True)
+            session_rows = [row for row in session_printed.splitlines() if row.strip()]
+            if len(session_rows) < 2:
+                fail(f"rift session printed {len(session_rows)} rows for the {len(session_found)} "
+                     f"windows the journal names: {session_printed.strip()[-400:]!r}")
+            # each app is named the way the Applications menu names it, from the entry the journal
+            # keeps, not by the app id its window carries
+            for named, column in ((SESSION_APP, session_started["column"]),
+                                  (MENU_APP, session_spawned["column"])):
+                if not any(row.startswith(f"{named} ") and f"column {column}" in row
+                           for row in session_rows):
+                    fail(f"rift session printed no row naming {named} in column {column}: "
+                         f"{session_printed.strip()[-400:]!r}")
+            ok(f"rift session prints {len(session_rows)} rows, each the name of the app from its "
+               f"entry, where it stood and what it was showing: {session_rows[0].strip()!r}")
+
+            # and a window that closes leaves the journal, which is what says the journal is what is
+            # open now rather than everything that was ever opened
+            close_app(SESSION_APP, SESSION_APP_ID)
+            session_left = session_until(60, lambda windows: not session_of(SESSION_APP_ID, windows),
+                                         "the journal after the app closed")
+            if session_of(SESSION_APP_ID, session_left):
+                fail(f"{SESSION_APP} is still in the journal after its window closed: "
+                     f"{[win.get('window') for win in session_left]}")
+            if not session_of(MENU_APP_ID, session_left):
+                fail("the terminal left the journal with the app that closed: "
+                     f"{[win.get('window') for win in session_left]}")
+            ok(f"{SESSION_APP} left the journal when its window closed, and the terminal stayed in it")
+            run(f"horizon msg action close-window --id {session_terminal}", "the terminal at the end")
+            if not wait_for(60, lambda: not [win for win in app_windows(MENU_APP_ID, "the terminals left")
+                                             if win[0] == session_terminal]):
+                fail("the terminal the compositor started did not close")
 
             # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again
