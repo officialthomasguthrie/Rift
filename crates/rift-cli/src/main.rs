@@ -13,6 +13,7 @@ mod net;
 mod restore;
 mod run;
 mod search;
+mod session;
 mod snapshot;
 mod text;
 mod version;
@@ -60,6 +61,11 @@ const COMMANDS: &[(&str, &str, &str)] = &[
         "Phase 2",
     ),
     (
+        "session",
+        "Show the windows that were open, and where each one stood",
+        "Phase 2",
+    ),
+    (
         "doctor",
         "Check the drive, the host, and the services",
         "Phase 1",
@@ -94,6 +100,7 @@ fn main() -> ExitCode {
         Some("clone") => clone::run(rest),
         Some("run") => run::run(rest),
         Some("net") => net::run(rest),
+        Some("session") => session::run(rest),
         Some("wallpaper") => wallpaper::run(rest),
         Some("guide") => guide::run(rest),
         Some(cmd) => {

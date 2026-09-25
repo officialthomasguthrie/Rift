@@ -158,6 +158,7 @@ The `rift` command reaches the same services as the desktop.
 | `rift clone` | Write a complete second drive with a new key |
 | `rift run --sandbox` | Run a command inside a sandbox |
 | `rift net` | Turn network access off or on for a sandboxed application |
+| `rift session` | Show the windows that were open, and where each one stood |
 | `rift wallpaper` | List the wallpapers, or set a photograph, a picture or a colour |
 | `rift guide` | Open the user guide that comes with the system |
 
