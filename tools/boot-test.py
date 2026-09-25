@@ -7364,10 +7364,13 @@ def main():
             # named after the entry it came from
             open_from_menu(SESSION_APP, SESSION_APP_ID)
 
+            # the column each one stands in comes with the window, so waiting for it is waiting for
+            # the whole paragraph rather than for the first line of it
             session_found = session_until(
                 60,
-                lambda windows: session_of(MENU_APP_ID, windows) and session_of(SESSION_APP_ID, windows),
-                "the journal with both windows in it")
+                lambda windows: all((session_of(app, windows) or {}).get("column")
+                                    for app in (MENU_APP_ID, SESSION_APP_ID)),
+                "the journal with both windows in it, each in a column of its own")
             session_spawned = session_of(MENU_APP_ID, session_found)
             session_started = session_of(SESSION_APP_ID, session_found)
             if not session_spawned or not session_started:
@@ -7380,9 +7383,12 @@ def main():
             # the shell's named after its entry and the journal has to say the same; the terminal is
             # in no such scope, so its entry was found from the app id its window carries, which is
             # the way the dock has always found an app
+            session_open = app_windows(SESSION_APP_ID, "the app's window")
+            if not session_open:
+                fail(f"{SESSION_APP} is in the journal with no window of its own open")
             session_scopes = {name: window_scope(window, f"the scope of {name}")
                               for name, window in ((MENU_APP_ID, session_terminal),
-                                                   (SESSION_APP_ID, app_windows(SESSION_APP_ID, "the app's window")[0][0]))}
+                                                   (SESSION_APP_ID, session_open[0][0]))}
             if session_entry(session_scopes[MENU_APP_ID]):
                 fail(f"the terminal the compositor started runs in {session_scopes[MENU_APP_ID]!r}, "
                      "which is a scope of the shell's, so this proves nothing about the app id")
