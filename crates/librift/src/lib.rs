@@ -64,6 +64,9 @@ pub mod quasar;
 pub mod region;
 pub mod release;
 pub mod search;
+// the journal of what was open is a journal of desktop entries, which is the apps module,
+// and the lock is logind's, so neither means anything on Windows
+#[cfg(unix)]
 pub mod session;
 pub mod sound;
 #[cfg(feature = "suggested")]
