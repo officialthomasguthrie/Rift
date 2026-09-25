@@ -2,14 +2,17 @@
 //! runs llama-server on a unix socket as its child, serves the local api on the loopback address in
 //! front of it, and answers questions on the system bus as `dev.rift.Quasar`. When the manifest's
 //! embedding model is on the drive, a second llama-server runs it for search by meaning, and when
-//! one of its voices is there, `Say` reads words out loud with it.
+//! one of its voices is there, `Say` reads words out loud with it. `Listen` is the other way round:
+//! a recording goes in and the words come back, when a speech model is on the drive.
 
 mod api;
 mod backend;
 mod bus;
 mod chat;
+mod child;
 mod embed;
 mod http;
+mod speech;
 mod voice;
 
 use std::net::{Ipv4Addr, TcpListener};
@@ -35,6 +38,8 @@ const CTX_SIZE: u32 = 8192;
 const EMBEDDING_CTX_SIZE: u32 = 2048;
 /// The program that says words out loud.
 const VOICE: &str = "sherpa-onnx-offline-tts";
+/// The program that turns speech into words.
+const WHISPER: &str = "whisper-cli";
 /// The espeak-ng data the voice turns words into phonemes with.
 const VOICE_DATA: &str = "/run/current-system/sw/share/espeak-ng-data";
 
@@ -50,6 +55,7 @@ struct Args {
     tier: Option<Tier>,
     voice: PathBuf,
     voice_data: PathBuf,
+    whisper: PathBuf,
     print: bool,
 }
 
@@ -89,25 +95,20 @@ fn main() -> ExitCode {
 
     let status = Arc::new(Mutex::new(Status::default()));
     let embedding = Arc::new(Mutex::new(Status::default()));
-    // the local api is up before the model is, so a program gets told the model is loading
-    // instead of finding nothing on the port
-    let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, args.port)) {
-        Ok(listener) => listener,
-        Err(e) => {
-            eprintln!("quasard: could not listen on 127.0.0.1:{}: {e}", args.port);
-            return ExitCode::FAILURE;
-        }
-    };
-    {
-        let socket = backend.socket.clone();
-        let status = Arc::clone(&status);
-        thread::spawn(move || api::serve(&listener, &socket, &status));
+    if let Err(e) = local_api(args.port, backend.socket.clone(), Arc::clone(&status)) {
+        eprintln!("quasard: {e}");
+        return ExitCode::FAILURE;
     }
     let voice = Arc::new(Mutex::new(Status::default()));
     let speaker = Arc::new(voice::Voice {
         program: args.voice,
         models_dir: args.models_dir.clone(),
         data_dir: args.voice_data,
+    });
+    let speech = Arc::new(Mutex::new(Status::default()));
+    let whisper = Arc::new(speech::Speech {
+        program: args.whisper,
+        models_dir: args.models_dir.clone(),
     });
     let quasar = bus::Quasar {
         status: Arc::clone(&status),
@@ -118,6 +119,9 @@ fn main() -> ExitCode {
         voice: Arc::clone(&voice),
         speaker: Arc::clone(&speaker),
         voices: manifest.tts.clone(),
+        speech: Arc::clone(&speech),
+        listener: Arc::clone(&whisper),
+        speeches: manifest.speech.clone(),
     };
     let connection = match bus::connect(quasar) {
         Ok(connection) => connection,
@@ -147,6 +151,7 @@ fn main() -> ExitCode {
     };
     search_by_meaning(embedder, manifest.clone(), embedding, connection.clone());
     words_out_loud(speaker, manifest.clone(), voice, connection.clone());
+    speech_into_words(whisper, manifest.clone(), speech, connection.clone());
     let named = args.model.as_deref();
     let pick = |on_drive: &dyn Fn(&str) -> bool| {
         manifest.pick(tier, named, on_drive).map(|pick| Picked {
@@ -156,6 +161,15 @@ fn main() -> ExitCode {
         })
     };
     backend.supervise(&pick, &status, &|| signal(&connection))
+}
+
+/// Serves the local api on the loopback address, on a thread of its own. It is up before the model
+/// is, so a program is told the model is loading instead of finding nothing on the port.
+fn local_api(port: u16, socket: PathBuf, status: Arc<Mutex<Status>>) -> Result<(), String> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .map_err(|e| format!("could not listen on 127.0.0.1:{port}: {e}"))?;
+    thread::spawn(move || api::serve(&listener, &socket, &status));
+    Ok(())
 }
 
 /// `--print`: the model that would run, and where its weights are.
@@ -226,6 +240,17 @@ fn words_out_loud(
     thread::spawn(move || speaker.watch(&manifest, &status, &|| signal(&connection)));
 }
 
+/// Keeps the speech model's properties current on a thread of its own. Nothing runs between
+/// recordings, so this only looks for the model's file.
+fn speech_into_words(
+    listener: Arc<speech::Speech>,
+    manifest: Manifest,
+    status: Arc<Mutex<Status>>,
+    connection: zbus::blocking::Connection,
+) {
+    thread::spawn(move || listener.watch(&manifest, &status, &|| signal(&connection)));
+}
+
 /// Tells the bus the properties changed.
 fn signal(connection: &zbus::blocking::Connection) {
     if let Err(e) = bus::announce(connection) {
@@ -247,6 +272,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, St
         tier: None,
         voice: PathBuf::from(VOICE),
         voice_data: PathBuf::from(VOICE_DATA),
+        whisper: PathBuf::from(WHISPER),
         print: false,
     };
     while let Some(arg) = args.next() {
@@ -261,6 +287,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, St
             "--model" => parsed.model = Some(value(&mut args, &arg, "a model id or file")?),
             "--voice" => parsed.voice = value(&mut args, &arg, "a program")?.into(),
             "--voice-data" => parsed.voice_data = value(&mut args, &arg, "a directory")?.into(),
+            "--whisper" => parsed.whisper = value(&mut args, &arg, "a program")?.into(),
             "--tier" => {
                 let word = value(&mut args, &arg, "a tier")?;
                 parsed.tier = Some(
@@ -331,6 +358,9 @@ fn usage() {
     println!("  --ctx-size <tokens>        the chat model's context size (default {CTX_SIZE})");
     println!("  --voice <program>          the program that says words out loud (default {VOICE})");
     println!("  --voice-data <dir>         the espeak-ng data it reads (default {VOICE_DATA})");
+    println!(
+        "  --whisper <program>        the program that turns speech into words (default {WHISPER})"
+    );
     println!("  --model <id or file>       run this model instead of the one the tier picks");
     println!("  --tier <tier>              small, medium or large instead of asking orbit");
     println!("  --print                    print the model that would run and exit");
@@ -363,6 +393,7 @@ mod tests {
             args.voice_data,
             PathBuf::from("/run/current-system/sw/share/espeak-ng-data")
         );
+        assert_eq!(args.whisper, PathBuf::from("whisper-cli"));
         assert!(!args.print);
     }
 
@@ -391,6 +422,8 @@ mod tests {
             "/bin/say-it",
             "--voice-data",
             "/tmp/espeak-ng-data",
+            "--whisper",
+            "/bin/whisper-cli",
             "--print",
         ])
         .unwrap()
@@ -406,6 +439,7 @@ mod tests {
         assert_eq!(args.tier, Some(Tier::Medium));
         assert_eq!(args.voice, PathBuf::from("/bin/say-it"));
         assert_eq!(args.voice_data, PathBuf::from("/tmp/espeak-ng-data"));
+        assert_eq!(args.whisper, PathBuf::from("/bin/whisper-cli"));
         assert!(args.print);
     }
 

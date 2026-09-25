@@ -102,13 +102,15 @@ shipped = true
 query_prefix = "search_query: "
 document_prefix = "search_document: "
 
-# speech to text
+# speech to text. quasar reads a recording with the first model on the drive, and the boot test
+# reads back the wav the voice writes. base is the one that ships: it reads a sentence in a second
+# or two on two cores and gets it right, turbo is more accurate on longer and rougher speech
 
 [[speech]]
 id = "whisper-base"
 file = "ggml-base.bin"
 url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-sha256 = ""
+sha256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
 size_gb = 0.15
 license = "MIT"
 shipped = true
@@ -117,7 +119,7 @@ shipped = true
 id = "whisper-large-v3-turbo"
 file = "ggml-large-v3-turbo.bin"
 url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
-sha256 = ""
+sha256 = "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
 size_gb = 1.6
 license = "MIT"
 shipped = false

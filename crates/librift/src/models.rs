@@ -19,6 +19,9 @@ pub struct Manifest {
     /// Voices, for saying words out loud.
     #[serde(default)]
     pub tts: Vec<Voice>,
+    /// Speech models, for turning what was said into words.
+    #[serde(default)]
+    pub speech: Vec<Speech>,
 }
 
 /// One chat model from the manifest.
@@ -90,6 +93,15 @@ pub struct Voice {
     pub file: String,
     /// The phonemes the voice was trained on, in a file beside it.
     pub tokens: String,
+}
+
+/// One speech model from the manifest, for turning what was said into words.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Speech {
+    /// Short name.
+    pub id: String,
+    /// File name under the models directory.
+    pub file: String,
 }
 
 /// Memory a model needs, in gigabytes.
@@ -291,6 +303,25 @@ impl Manifest {
             })
     }
 
+    /// Picks the speech model: the first one the manifest lists that is on the drive. A larger
+    /// one is more accurate and slower, and which is on the drive is the owner's choice.
+    ///
+    /// # Errors
+    ///
+    /// A sentence that says why nothing can turn speech into words.
+    pub fn pick_speech(&self, on_drive: impl Fn(&str) -> bool) -> Result<&Speech, String> {
+        self.speech
+            .iter()
+            .find(|model| on_drive(&model.file))
+            .ok_or_else(|| match self.speech.first() {
+                Some(model) => format!(
+                    "Turning speech into words needs {}, which is not on the drive.",
+                    model.file
+                ),
+                None => "The model manifest has no speech model.".into(),
+            })
+    }
+
     /// Picks the embedding model to run: the first one the manifest lists that is on the drive.
     /// One is as good as another for a machine of any size, they are all small.
     ///
@@ -411,6 +442,27 @@ file = "embed.gguf"
             Err("Saying words out loud needs a.onnx, which is not on the drive.".to_string())
         );
         assert!(Manifest::default().pick_voice(|_| true).is_err());
+    }
+
+    #[test]
+    fn the_first_speech_model_on_the_drive_is_the_one() {
+        let manifest = Manifest::parse(
+            "[[speech]]\nid = \"base\"\nfile = \"base.bin\"\n\n\
+             [[speech]]\nid = \"turbo\"\nfile = \"turbo.bin\"\n",
+        )
+        .unwrap();
+        let id = |files| {
+            manifest
+                .pick_speech(drive(files))
+                .map(|model| model.id.as_str())
+        };
+        assert_eq!(id(&["base.bin", "turbo.bin"]), Ok("base"));
+        assert_eq!(id(&["turbo.bin"]), Ok("turbo"));
+        assert_eq!(
+            id(&[]),
+            Err("Turning speech into words needs base.bin, which is not on the drive.".to_string())
+        );
+        assert!(Manifest::default().pick_speech(|_| true).is_err());
     }
 
     #[test]
@@ -569,5 +621,17 @@ file = "embed.gguf"
         assert_eq!(voice.id, "piper-en-us-lessac-medium");
         assert_eq!(voice.file, "en_US-lessac-medium.onnx");
         assert_eq!(voice.tokens, "en_US-lessac-medium.tokens.txt");
+
+        // the speech model that turns what was said into words
+        let speech = manifest.pick_speech(|_| true).unwrap();
+        assert_eq!(speech.id, "whisper-base");
+        assert_eq!(speech.file, "ggml-base.bin");
+        assert_eq!(
+            manifest
+                .pick_speech(|file| file == "ggml-large-v3-turbo.bin")
+                .unwrap()
+                .id,
+            "whisper-large-v3-turbo"
+        );
     }
 }

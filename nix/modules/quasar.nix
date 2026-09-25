@@ -2,7 +2,8 @@
 # llama-server (vulkan + cpu) as its child on a unix socket only quasar's user can open, serves the
 # local api on 127.0.0.1 in front of it and answers on the system bus as dev.rift.Quasar. a second
 # llama-server runs the embedding model for search by meaning, and the owner's own timer keeps an
-# index of home with it. whisper and piper come later.
+# index of home with it. the voice and whisper are not servers: each is a program quasard runs once,
+# for one sentence or one recording, when its model is on the drive.
 {
   config,
   lib,
@@ -59,6 +60,12 @@ in
       type = lib.types.package;
       default = pkgs.sherpa-onnx;
       description = "The program that says words out loud. It reads the piper voice in the manifest.";
+    };
+
+    speech = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.whisper-cpp;
+      description = "The program that turns speech into words. The plain build: whisper reads a sentence on the cpu in a second or two, and the vulkan build costs 51 MiB more.";
     };
 
     modelsDir = lib.mkOption {
@@ -125,6 +132,7 @@ in
             "--ctx-size ${toString cfg.contextSize}"
             "--voice ${cfg.voice}/bin/sherpa-onnx-offline-tts"
             "--voice-data ${espeak}/share/espeak-ng-data"
+            "--whisper ${cfg.speech}/bin/whisper-cli"
           ]
           ++ lib.optional (cfg.model != null) "--model ${cfg.model}"
         );

@@ -23,6 +23,10 @@ const EMBED_TIMEOUT: Duration = Duration::from_secs(150);
 #[cfg(feature = "bus")]
 const SAY_TIMEOUT: Duration = Duration::from_secs(150);
 
+/// How long the words of a recording may take. quasard gives whisper four minutes.
+#[cfg(feature = "bus")]
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// What a reply to `Ask` means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
@@ -57,6 +61,12 @@ pub struct Status {
     pub voice: String,
     /// Why nothing can say words out loud, in a sentence. Empty when a voice is on the drive.
     pub voice_error: String,
+    /// The speech model's state, for turning speech into words: `none` or `ready`.
+    pub speech_state: String,
+    /// Manifest id of the speech model that turns speech into words. Empty when there is none.
+    pub speech: String,
+    /// Why nothing can turn speech into words, in a sentence. Empty when a model is on the drive.
+    pub speech_error: String,
 }
 
 /// What the two strings `Ask` returned mean.
@@ -120,6 +130,9 @@ pub fn status() -> Result<Status, String> {
         voice_state: get("VoiceState")?,
         voice: get("Voice")?,
         voice_error: get("VoiceError")?,
+        speech_state: get("SpeechState")?,
+        speech: get("Speech")?,
+        speech_error: get("SpeechError")?,
     })
 }
 
@@ -135,6 +148,21 @@ pub fn say(text: &str) -> Result<Vec<u8>, String> {
     let proxy = bus::proxy(&connection, quasar)?;
     proxy
         .call("Say", &(text,))
+        .map_err(|e| bus::sentence(quasar, e))
+}
+
+/// The words that were said in a recording. Nothing back means a recording with nothing in it.
+///
+/// # Errors
+///
+/// A sentence when the bus or Quasar is not there, or no model could read the recording.
+#[cfg(feature = "bus")]
+pub fn listen(wav: &[u8]) -> Result<String, String> {
+    let quasar = Component::Quasar;
+    let connection = bus::connect(LISTEN_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, quasar)?;
+    proxy
+        .call("Listen", &(wav,))
         .map_err(|e| bus::sentence(quasar, e))
 }
 

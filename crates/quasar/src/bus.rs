@@ -4,7 +4,9 @@
 //! words, or `action` and the words of one of Lens's OS commands. It runs nothing. `Embed` turns
 //! texts into vectors for search by meaning; whoever calls it reads the files, Quasar never does.
 //! `Say` turns words into a wav and hands the caller the audio itself, for the same reason: what
-//! is done with it is the caller's, and Quasar writes into nobody's files.
+//! is done with it is the caller's, and Quasar writes into nobody's files. `Listen` is `Say` the
+//! other way round: the bytes of a recording go in and the words that were said come back, so
+//! Quasar opens none of the owner's files for that either.
 //! The properties say which models run, for which tier, and whether they answer yet; every change
 //! to them is signalled, so a client can wait for `ready` without polling.
 
@@ -15,7 +17,7 @@ use librift::Component;
 use zbus::fdo;
 
 use crate::backend::{State, Status};
-use crate::{chat, embed, voice};
+use crate::{chat, embed, speech, voice};
 use librift::models::Embedding;
 
 /// The longest question `Ask` takes, in characters.
@@ -28,6 +30,9 @@ const LONGEST_TEXT: usize = 4000;
 /// The longest text `Say` takes, in characters. About a minute of speech, which is as much as
 /// anyone wants read out in one go and keeps the wav well inside what a bus message carries.
 const LONGEST_SAY: usize = 1000;
+/// The largest recording `Listen` takes, in bytes. Six minutes of what the voice writes, or a
+/// minute and a half of a recording at the rate a microphone is usually read.
+const LARGEST_RECORDING: usize = 16 << 20;
 
 /// The object that answers on the bus.
 pub struct Quasar {
@@ -47,6 +52,13 @@ pub struct Quasar {
     pub speaker: Arc<voice::Voice>,
     /// The voices in the manifest, for the files the one that runs reads.
     pub voices: Vec<librift::models::Voice>,
+    /// The speech model's state. There is no server for it either, so it is ready as soon as one
+    /// is on the drive.
+    pub speech: Arc<Mutex<Status>>,
+    /// How to turn speech into words.
+    pub listener: Arc<speech::Speech>,
+    /// The speech models in the manifest, for the file the one that runs reads.
+    pub speeches: Vec<librift::models::Speech>,
 }
 
 fn now(status: &Mutex<Status>) -> Status {
@@ -100,6 +112,26 @@ impl Quasar {
             })?;
         let speaker = Arc::clone(&self.speaker);
         blocking::unblock(move || speaker.say(&voice, &text))
+            .await
+            .map_err(fdo::Error::Failed)
+    }
+
+    /// The words that were said in the recording. A wav goes in, and what came back empty was a
+    /// recording with nothing in it.
+    #[zbus(out_args("words"))]
+    async fn listen(&self, wav: Vec<u8>) -> fdo::Result<String> {
+        let status = now(&self.speech);
+        admit_recording(&wav, &status)?;
+        let model = self
+            .speeches
+            .iter()
+            .find(|model| model.id == status.model)
+            .cloned()
+            .ok_or_else(|| {
+                fdo::Error::Failed("The speech model that runs is not in the manifest.".into())
+            })?;
+        let listener = Arc::clone(&self.listener);
+        blocking::unblock(move || listener.listen(&model, &wav))
             .await
             .map_err(fdo::Error::Failed)
     }
@@ -163,6 +195,25 @@ impl Quasar {
     fn voice_error(&self) -> String {
         now(&self.voice).error
     }
+
+    /// Manifest id of the speech model that turns speech into words. Empty when there is none.
+    #[zbus(property)]
+    fn speech(&self) -> String {
+        now(&self.speech).model
+    }
+
+    /// The speech model's state: `none` or `ready`. Nothing runs between recordings, so it never
+    /// loads.
+    #[zbus(property)]
+    fn speech_state(&self) -> String {
+        now(&self.speech).state.name().to_string()
+    }
+
+    /// Why nothing can turn speech into words, in a sentence. Empty when a model is on the drive.
+    #[zbus(property)]
+    fn speech_error(&self) -> String {
+        now(&self.speech).error
+    }
 }
 
 /// The question as it goes to the model, or why it cannot go now.
@@ -198,6 +249,32 @@ fn admit_words(text: &str, status: &Status) -> fdo::Result<String> {
     }
     match status.state {
         State::Ready => Ok(text.to_string()),
+        _ => Err(fdo::Error::Failed(status.error.clone())),
+    }
+}
+
+/// Whether the recording can go to whisper now, or why it cannot.
+fn admit_recording(wav: &[u8], status: &Status) -> fdo::Result<()> {
+    if wav.is_empty() {
+        return Err(fdo::Error::InvalidArgs(
+            "Listen needs a recording to read.".into(),
+        ));
+    }
+    if wav.len() > LARGEST_RECORDING {
+        return Err(fdo::Error::InvalidArgs(format!(
+            "Listen takes a recording of at most {} megabytes.",
+            LARGEST_RECORDING >> 20
+        )));
+    }
+    // a wav, and nothing else: the program reads a few other kinds of audio file, and a recording
+    // is what Rift itself writes and what the desktop will hand it
+    if wav.len() < 12 || &wav[..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+        return Err(fdo::Error::InvalidArgs(
+            "Listen takes a wav recording, and that is not one.".into(),
+        ));
+    }
+    match status.state {
+        State::Ready => Ok(()),
         _ => Err(fdo::Error::Failed(status.error.clone())),
     }
 }
@@ -294,7 +371,10 @@ pub fn announce(connection: &zbus::blocking::Connection) -> zbus::Result<()> {
         quasar.embedding_error_changed(emitter).await?;
         quasar.voice_state_changed(emitter).await?;
         quasar.voice_changed(emitter).await?;
-        quasar.voice_error_changed(emitter).await
+        quasar.voice_error_changed(emitter).await?;
+        quasar.speech_state_changed(emitter).await?;
+        quasar.speech_changed(emitter).await?;
+        quasar.speech_error_changed(emitter).await
     })
 }
 
@@ -453,6 +533,40 @@ mod tests {
         assert!(matches!(
             admit_words("hello", &none),
             Err(fdo::Error::Failed(why)) if why.starts_with("Saying words out loud needs")
+        ));
+    }
+
+    #[test]
+    fn a_recording_goes_to_whisper_once_a_speech_model_is_on_the_drive() {
+        let ready = Status {
+            model: "whisper-base".into(),
+            ..status(State::Ready, "")
+        };
+        let wav = |bytes: &[u8]| {
+            let mut file = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+            file.extend_from_slice(bytes);
+            file
+        };
+        assert!(admit_recording(&wav(b"the samples"), &ready).is_ok());
+        assert!(matches!(
+            admit_recording(&[], &ready),
+            Err(fdo::Error::InvalidArgs(_))
+        ));
+        assert!(matches!(
+            admit_recording(b"ID3 a song", &ready),
+            Err(fdo::Error::InvalidArgs(why)) if why.contains("not one")
+        ));
+        assert!(matches!(
+            admit_recording(&wav(&vec![0; LARGEST_RECORDING]), &ready),
+            Err(fdo::Error::InvalidArgs(why)) if why.contains("at most 16 megabytes")
+        ));
+        let none = status(
+            State::NoModel,
+            "Turning speech into words needs ggml-base.bin, which is not on the drive.",
+        );
+        assert!(matches!(
+            admit_recording(&wav(b"the samples"), &none),
+            Err(fdo::Error::Failed(why)) if why.starts_with("Turning speech into words needs")
         ));
     }
 
