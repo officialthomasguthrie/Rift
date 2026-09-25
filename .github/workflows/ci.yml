@@ -409,9 +409,9 @@ jobs:
         run: |
           if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; ls -l /dev/kvm; else echo "no /dev/kvm, qemu will use tcg"; fi
       - name: Read the test models from the manifest
-        # the chat model marked test, the embedding model the image runs for search by meaning, and
-        # the voice that says words out loud, which is two files. every file in models/cache goes
-        # into the models subvolume
+        # the chat model marked test, the embedding model the image runs for search by meaning, the
+        # voice that says words out loud, which is two files, and the speech model that reads a
+        # recording back. every file in models/cache goes into the models subvolume
         id: model
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
@@ -421,7 +421,8 @@ jobs:
           [chat] = [m for m in manifest["chat"] if m.get("test")]
           embedding = manifest["embedding"][0]
           voice = manifest["tts"][0]
-          files = [(m["sha256"], m["file"], m["url"]) for m in (chat, embedding, voice)]
+          speech = manifest["speech"][0]
+          files = [(m["sha256"], m["file"], m["url"]) for m in (chat, embedding, voice, speech)]
           files.append((voice["tokens_sha256"], voice["tokens"], voice["tokens_url"]))
           with open("models/test-models.txt", "w") as f:
               for sha256, name, url in files:

@@ -2929,8 +2929,56 @@ def main():
         status, printed = run('rift ai say "Ready."', "a sentence through the speakers")
         if status != 0:
             fail(f"rift ai say exited with {status}: {without_console(printed).strip()!r}")
-        run(f"rm -f {say_file}", "the wav the test wrote")
         ok("rift ai say played a sentence through the machine's own speakers")
+
+        # 4e. speech into words, the other way round. the vm has no microphone, so the recording is
+        # the wav the voice just wrote: the sentence goes out through one model and comes back
+        # through the other, and no recorded speech has to live in git
+        with open(manifest_path, "rb") as f:
+            hear_model = tomllib.load(f)["speech"][0]["id"]
+        hear_deadline = time.monotonic() + args.quasar_timeout
+        while True:
+            hear_state = quasar_prop("SpeechState")
+            if hear_state == "ready":
+                break
+            if hear_state == "none" or time.monotonic() > hear_deadline:
+                why = quasar_prop("SpeechError")
+                fail(f"quasar's speech model is {hear_state or 'not on the bus'} after {since()}: {why}")
+            time.sleep(2)
+        if quasar_prop("Speech") != hear_model:
+            fail(f"quasar's speech model is {quasar_prop('Speech')}, the manifest's is {hear_model}")
+        status, printed = run("rift ai", "the speech row of rift ai")
+        printed = without_console(printed)
+        print(f"\nboot-test: rift ai printed:\n{printed}", flush=True)
+        if status != 0 or not re.search(rf"^Speech:[ \t]+ready, {re.escape(hear_model)}[ \t]*$", printed, re.M):
+            fail(f"rift ai does not say speech is ready with {hear_model}: {printed!r}")
+        ok(f"quasar turns speech into words with {hear_model}")
+
+        status, printed = run(f"rift ai listen {say_file}", f"the words in {say_file}")
+        printed = without_console(printed)
+        print(f"\nboot-test: rift ai listen printed:\n{printed}", flush=True)
+        hear_line = " ".join(line.strip() for line in printed.splitlines() if line.strip())
+        hear_spoken = re.findall(r"[a-z]+", say_words.lower())
+        hear_heard = re.findall(r"[a-z]+", hear_line.lower())
+        hear_shared = [word for word in hear_spoken if word in hear_heard]
+        # a small model gets a word wrong now and then, so most of the sentence is the test, not all
+        # of it. the words of the command itself are no help: it names a file, not the sentence
+        if status != 0 or len(hear_shared) < 0.7 * len(hear_spoken):
+            fail(f"rift ai listen exited with {status} and gave back {hear_line!r} of "
+                 f"{say_words!r}: {len(hear_shared)} of its {len(hear_spoken)} words")
+        ok(f"rift ai listen read {len(hear_shared)} of the sentence's {len(hear_spoken)} words back "
+           f"out of the wav the voice wrote: {hear_line!r}")
+        run(f"rm -f {say_file}", "the wav the test wrote")
+
+        # and a file that is not a recording at all is refused before any model runs
+        hear_junk = "/home/rift/notes/not-a-recording.wav"
+        run(f"printf 'this is not audio' > {hear_junk}", "a file that is not a recording")
+        status, printed = run(f"rift ai listen {hear_junk}", "what quasar says about it")
+        printed = without_console(printed)
+        if status == 0 or "not one" not in printed:
+            fail(f"rift ai listen said {printed.strip()!r} about a file that is not a recording")
+        run(f"rm -f {hear_junk}", "the file that is not a recording")
+        ok("rift ai listen refuses a file that is not a recording")
 
     # 4b. `rift doctor`: no check fails, and orbit and quasar each have a row. with the model
     # loaded, quasar's row has to pass
