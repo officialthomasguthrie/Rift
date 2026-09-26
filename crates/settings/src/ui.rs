@@ -61,6 +61,8 @@ pub struct Start {
 }
 
 /// The window's state.
+// a window of switches holds a bool for each of them, which is what this one is
+#[allow(clippy::struct_excessive_bools)]
 pub struct Settings {
     /// The page that is up.
     pub page: Page,
@@ -68,6 +70,8 @@ pub struct Settings {
     pub look: Look,
     /// Whether the terminal greets the first shell of a session.
     pub greeting: bool,
+    /// Whether the apps that were open come back at the next login.
+    pub restore: bool,
     /// How the next boot of this drive looks, once Vault has said. It is on the esp, not in home,
     /// so Vault is the one that reads and writes it.
     pub boot: Option<Result<Style, String>>,
@@ -301,6 +305,8 @@ pub enum Message {
     Wrote,
     /// The terminal greeting.
     Greeting(bool),
+    /// Whether the apps that were open come back at the next login.
+    Restore(bool),
     /// What Orbit answered about this machine.
     Host(Result<Host, String>),
     /// A line from the socket.
@@ -388,6 +394,7 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         page,
         look: Look::read(),
         greeting: librift::appearance::greeting(),
+        restore: librift::session::restores(),
         boot: None,
         choices: librift::wallpaper::choices(),
         zones: librift::clock::installed(),
@@ -462,6 +469,7 @@ impl Settings {
             page: Page::FIRST,
             look: Look::default(),
             greeting: false,
+            restore: true,
             boot: None,
             choices: Vec::new(),
             host: None,
@@ -523,6 +531,10 @@ impl Settings {
             format!("text {}", look.text),
             format!("terminal {}", look.terminal.word()),
             format!("greeting {}", if self.greeting { "on" } else { "off" }),
+            format!(
+                "session-restore {}",
+                if self.restore { "on" } else { "off" }
+            ),
         ]
         .into_iter()
         // the boot style is Vault's to answer, and the screens are Orbit's, so each is printed
@@ -685,14 +697,26 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Owning(asked) => return owner::asked(state, asked),
         Message::Pointer(changed) => pointer::update(state, changed),
         Message::Wrote => state.wrote(),
-        Message::Greeting(on) => {
-            state.greeting = on;
-            state.problem = librift::appearance::set_greeting(on).err();
-        }
+        Message::Greeting(_) | Message::Restore(_) => switched(state, &message),
         Message::Close => return iced::exit(),
         answer => return answered(state, answer),
     }
     Task::none()
+}
+
+/// A switch of a page whose setting is one small file under home, written where it is turned.
+fn switched(state: &mut Settings, message: &Message) {
+    match *message {
+        Message::Greeting(on) => {
+            state.greeting = on;
+            state.problem = librift::appearance::set_greeting(on).err();
+        }
+        Message::Restore(on) => {
+            state.restore = on;
+            state.problem = librift::session::keep_restores(on).err();
+        }
+        _ => {}
+    }
 }
 
 /// What a service, the socket or a write that has finished answered. It is the other half of

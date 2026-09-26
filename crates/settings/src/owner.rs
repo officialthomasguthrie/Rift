@@ -1,5 +1,6 @@
 //! The Owner page: the name the lock screen greets the owner by, the password it asks for, how the
-//! owner gets to the desktop, and a sentence each for the drive's passphrase and security keys.
+//! owner gets to the desktop, whether the apps that were open come back at the next login, and a
+//! sentence each for the drive's passphrase and security keys.
 //!
 //! Vault keeps the name and the password on persist and answers the owner and root alone, so the
 //! page asks it as it comes up and after each change, on a thread of its own. Nothing else changes
@@ -15,7 +16,9 @@ use librift::owner::{self as account, Owner};
 use crate::ai::said;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
-use crate::widgets::{GAP, TEXT_SIZE, action, fact, field, focus, group, heading, note, setting};
+use crate::widgets::{
+    GAP, TEXT_SIZE, action, fact, field, focus, group, heading, note, setting, switch,
+};
 
 /// The field the name is typed into.
 pub const NAME_FIELD: &str = "owner-name";
@@ -26,7 +29,7 @@ const AGAIN_FIELD: &str = "owner-again";
 
 /// The names `rift-settings --set` takes for this page: `owner-name <name>`, and `owner-password
 /// <current> <new>`, two words.
-pub const NAMES: [&str; 2] = ["owner-name", "owner-password"];
+pub const NAMES: [&str; 3] = ["owner-name", "owner-password", "session-restore"];
 
 /// What is typed on the page, and whether a change is on its way to Vault.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -192,6 +195,9 @@ fn to_vault(change: impl FnOnce() -> Result<(), String> + Send + 'static) -> Tas
 /// password fields, types the current password and the new one twice, and changes it. The steps
 /// go in that order, which a batch does not promise.
 pub fn named(name: &str, value: &str) -> Task<Message> {
+    if name == "session-restore" {
+        return Task::done(Message::Restore(!value.trim().eq_ignore_ascii_case("off")));
+    }
     let steps = match name {
         "owner-name" => vec![Asked::Name(value.trim().to_string()), Asked::SaveName],
         "owner-password" => {
@@ -248,12 +254,15 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
             heading(look, "Logging in"),
             group(
                 look,
-                vec![setting(
-                    look,
-                    "Automatic login",
-                    Some(AUTOMATIC),
-                    said(look, "On")
-                )]
+                vec![
+                    setting(look, "Automatic login", Some(AUTOMATIC), said(look, "On")),
+                    setting(
+                        look,
+                        "Bring the session back",
+                        Some(RESTORE),
+                        switch(look, state.restore, Message::Restore),
+                    ),
+                ]
             ),
         ]
         .spacing(8),
@@ -429,6 +438,10 @@ const PASSWORD: &str = "The lock screen asks for this password. The passphrase a
 /// Under automatic login.
 const AUTOMATIC: &str = "The drive's passphrase is asked for when the machine starts, and the \
                          desktop opens after it without the password.";
+/// Under bringing the session back.
+const RESTORE: &str = "At the first login after a boot, the apps that were open are opened again, \
+                       each on the workspace it was on and in the column it stood in. An app this \
+                       machine does not have is passed over.";
 /// What changes the drive's passphrase.
 const PASSPHRASE: &str = "Changing the drive's passphrase is not in Settings yet. sudo cryptsetup \
                           luksChangeKey /dev/disk/by-partlabel/persist changes it in a terminal.";
@@ -544,6 +557,7 @@ mod tests {
             HINT,
             PASSWORD,
             AUTOMATIC,
+            RESTORE,
             PASSPHRASE,
             KEYS,
         ] {
