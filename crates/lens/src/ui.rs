@@ -111,6 +111,9 @@ const REOPEN: Duration = Duration::from_millis(400);
 /// How long a network may take to come up after it was picked.
 const JOIN_WAIT: Duration = Duration::from_secs(45);
 
+/// The icon of the notification about the windows that did not come back.
+const PASSED_OVER: &str = "focus-windows-symbolic";
+
 /// How long after what is open changed the journal of it is written. A session being taken down
 /// closes its windows and stops the shell in the same breath, so a shell that is already gone writes
 /// no journal of an empty desktop over the one the next login brings back. It also holds the file
@@ -1189,6 +1192,7 @@ fn went_on(state: &mut Lens, next: restore::Next) -> Task<Message> {
     match next {
         restore::Next::Wait => Task::none(),
         restore::Next::Started(turn) => later(restore::PATIENCE, Message::Restoring(turn)),
+        restore::Next::Soon(turn) => later(restore::SETTLE, Message::Restoring(turn)),
         restore::Next::Done(passed) => {
             let back = state.restore.as_ref().map_or(0, restore::Restore::back);
             state.back = Back::Windows(back, passed.len());
@@ -1204,7 +1208,7 @@ fn went_on(state: &mut Lens, next: restore::Next) -> Task<Message> {
             Task::done(Message::Notified(Notification {
                 id: u32::MAX - 1,
                 app: "Lens".to_string(),
-                icon: None,
+                icon: Some(PASSED_OVER.to_string()),
                 entry: None,
                 summary: "Some windows did not come back".to_string(),
                 body: body.join("\n"),

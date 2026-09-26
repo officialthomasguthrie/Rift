@@ -10,6 +10,10 @@
 //! somewhere else. A window that shared a column is put back into it, and one that floated is let
 //! go of the layout after the ones that stood in it.
 //!
+//! Two windows of one app are a window apart in time: an app that keeps one process for all its
+//! windows is asked for the second one only once the first has drawn and the app has had a moment to
+//! itself, because a second request that arrives while it is still starting is dropped.
+//!
 //! It runs once a login. A crash of the shell is not a login: the shell leaves a note in the
 //! session's runtime directory, which a boot clears, and a shell that finds the note brings nothing
 //! back. Nothing comes back when the owner has turned it off on the Owner page, and nothing is
@@ -30,6 +34,13 @@ use crate::horizon::{Open, Win};
 /// slowest machine it runs on, since giving up early puts the windows after it in the wrong columns.
 pub const PATIENCE: Duration = Duration::from_secs(90);
 
+/// How long an app has to itself after it draws a window before it is asked for another one. Most
+/// apps on the drive keep one process for all their windows, and a second start of one is a message
+/// to the process that is already running: a message that arrives while it is still starting is
+/// dropped, and the boot test measured two ghostty starts a third of a second apart giving one
+/// window, where the same starts two seconds apart gave two.
+pub const SETTLE: Duration = Duration::from_secs(5);
+
 /// The note in the session's runtime directory that says this login has already had its session
 /// back. The runtime directory is made at login and gone at the end of it, so a boot clears it and
 /// a shell that starts again inside one login does not.
@@ -40,8 +51,8 @@ const NOTE: &str = "lens-restored";
 pub struct Restore {
     /// The apps still to open, the next one last, so they come off the end.
     left: Vec<Step>,
-    /// The app whose window is being waited for.
-    waiting: Option<Waiting>,
+    /// What the shell is doing about the session now.
+    doing: Doing,
     /// The windows the journal named that this machine has nothing to open.
     passed: Vec<Passed>,
     /// How many windows have come back.
@@ -52,8 +63,21 @@ pub struct Restore {
     ids: Vec<u64>,
     /// The workspace the last app was started on, 0 before the first one.
     here: u8,
-    /// The workspace the oldest window was on, which the screen goes back to at the end.
+    /// The lowest workspace the journal named, which the screen goes back to at the end.
     first: u8,
+}
+
+/// What the shell is doing about the session now.
+#[derive(Debug)]
+enum Doing {
+    /// Nothing: the next app can be started.
+    Ready,
+    /// Waiting for the window of the app that was started. Boxed, because what is being waited for
+    /// is most of an app's desktop entry and the other two are a number.
+    For(Box<Waiting>),
+    /// Letting the app that has just drawn a window have a moment to itself, because the next window
+    /// is one of its own.
+    Settling(u64),
 }
 
 /// The app a window is being waited for from.
@@ -74,8 +98,10 @@ struct Waiting {
 pub enum Next {
     /// Nothing: the window that was waited for has not arrived yet.
     Wait,
-    /// Start the next app and wait for its window until this many seconds have gone by.
+    /// An app was started: wait for its window, and give up on this start when the patience runs out.
     Started(u64),
+    /// The app that drew a window has the next window too: start it again after it has settled.
+    Soon(u64),
     /// It is over. These are the windows nothing here could open again.
     Done(Vec<Passed>),
 }
@@ -122,7 +148,7 @@ pub fn begin(apps: &[App]) -> Option<Restore> {
     steps.reverse();
     Some(Restore {
         left: steps,
-        waiting: None,
+        doing: Doing::Ready,
         passed,
         back: 0,
         turn: 0,
@@ -140,7 +166,16 @@ fn note() -> Option<PathBuf> {
 /// What the compositor has open now. The window that was waited for is put where the journal said
 /// it stood, and the next app is started; a window that has not come by the patience is given up on.
 pub fn saw(restore: &mut Restore, open: &Open, apps: &[App]) -> Next {
-    let waiting = restore.waiting.take();
+    let waiting = match std::mem::replace(&mut restore.doing, Doing::Ready) {
+        Doing::Ready => None,
+        Doing::For(waiting) => Some(waiting),
+        // an app is having its moment, and nothing is asked of it until it is over
+        settling @ Doing::Settling(_) => {
+            restore.ids = open.windows.iter().map(|win| win.id).collect();
+            restore.doing = settling;
+            return Next::Wait;
+        }
+    };
     let found = waiting
         .as_ref()
         .and_then(|waiting| arrived(waiting, open, &restore.ids));
@@ -149,9 +184,18 @@ pub fn saw(restore: &mut Restore, open: &Open, apps: &[App]) -> Next {
         (Some(waiting), Some(win)) => {
             place(&waiting.step, win, open);
             restore.back += 1;
+            // the next window is one of this app's own, so it has a moment to itself first
+            if restore
+                .left
+                .last()
+                .is_some_and(|next| next.app == waiting.step.app)
+            {
+                restore.doing = Doing::Settling(waiting.turn);
+                return Next::Soon(waiting.turn);
+            }
         }
         (Some(waiting), None) if waiting.since.elapsed() < PATIENCE => {
-            restore.waiting = Some(waiting);
+            restore.doing = Doing::For(waiting);
             return Next::Wait;
         }
         (Some(waiting), None) => gave_up(restore, &waiting),
@@ -160,16 +204,19 @@ pub fn saw(restore: &mut Restore, open: &Open, apps: &[App]) -> Next {
     start(restore, apps)
 }
 
-/// The patience for one app ran out, with no picture of what is open since. The window may still
-/// arrive, so the app is not started again, but the session carries on without it.
+/// A wait is over: either an app has had its moment to itself and the next of its windows can be
+/// asked for, or the patience for a window ran out with no picture of what is open since. A window
+/// that never came may still arrive, so the app is not started again, but the session carries on
+/// without it.
 pub fn waited(restore: &mut Restore, turn: u64, apps: &[App]) -> Next {
-    match restore.waiting.take() {
-        Some(waiting) if waiting.turn == turn => {
+    match std::mem::replace(&mut restore.doing, Doing::Ready) {
+        Doing::Settling(at) if at == turn => start(restore, apps),
+        Doing::For(waiting) if waiting.turn == turn => {
             gave_up(restore, &waiting);
             start(restore, apps)
         }
         other => {
-            restore.waiting = other;
+            restore.doing = other;
             Next::Wait
         }
     }
@@ -209,12 +256,12 @@ fn start(restore: &mut Restore, apps: &[App]) -> Next {
         }
         restore.turn += 1;
         let turn = restore.turn;
-        restore.waiting = Some(Waiting {
+        restore.doing = Doing::For(Box::new(Waiting {
             app: app.clone(),
             step,
             turn,
             since: Instant::now(),
-        });
+        }));
         return Next::Started(turn);
     }
     // the screen goes back to where the session started, so it is not left on the last workspace
