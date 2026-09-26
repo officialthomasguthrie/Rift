@@ -5,7 +5,7 @@
 use std::process::ExitCode;
 
 use librift::apps::{self, App};
-use librift::session::{self, Window};
+use librift::session::{self, Passed, Window};
 
 use crate::text;
 
@@ -13,7 +13,8 @@ const USAGE: &str = "Usage: rift session";
 
 const HELP: &str = "Shows the windows that were open, with the app that opened each one and where \
 it stood. The shell writes this down as windows open, move and close, and keeps it under home, so \
-it travels with the drive.";
+it travels with the drive. The apps come back at the next login unless the Owner page in Settings \
+says not to.";
 
 pub fn run(args: &[String]) -> ExitCode {
     match args {
@@ -32,8 +33,26 @@ pub fn run(args: &[String]) -> ExitCode {
         println!("No windows were open.");
         return ExitCode::SUCCESS;
     }
-    print!("{}", rows(&windows, &apps::load()));
+    let apps = apps::load();
+    print!("{}", rows(&windows, &apps));
+    let (_, passed) = session::to_open(&windows, &apps);
+    println!("\n{}", coming(&passed));
+    for over in &passed {
+        println!("{}.", over.line());
+    }
     ExitCode::SUCCESS
+}
+
+/// The sentence under the rows: whether these windows come back at the next login. It is the only
+/// place a person is told that the drive brings the session with it.
+fn coming(passed: &[Passed]) -> &'static str {
+    if !session::restores() {
+        return "These do not come back at the next login. The Owner page in Settings turns that on.";
+    }
+    if passed.is_empty() {
+        return "These come back at the next login.";
+    }
+    "These come back at the next login, apart from the ones below."
 }
 
 /// One row for each window: what it is, where it stood, and what it was showing.
