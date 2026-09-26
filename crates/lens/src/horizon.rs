@@ -273,6 +273,38 @@ pub fn activate(space: u8) -> Result<(), String> {
     })
 }
 
+/// Put this window on this workspace, counting from one, without taking the keyboard there.
+///
+/// # Errors
+///
+/// When the compositor is not there or refuses.
+pub fn to_workspace(window: u64, space: u8) -> Result<(), String> {
+    act(Action::MoveWindowToWorkspace {
+        window_id: Some(window),
+        reference: WorkspaceReferenceArg::Index(space),
+        focus: false,
+    })
+}
+
+/// Take this window out of the layout and let it float over it.
+///
+/// # Errors
+///
+/// When the compositor is not there or refuses.
+pub fn float(window: u64) -> Result<(), String> {
+    act(Action::MoveWindowToFloating { id: Some(window) })
+}
+
+/// Put this window into the column to its left, under the window that is there. A window alone in
+/// its column is taken into the one on its left, which is how a column of two comes back.
+///
+/// # Errors
+///
+/// When the compositor is not there or refuses.
+pub fn stack(window: u64) -> Result<(), String> {
+    act(Action::ConsumeOrExpelWindowLeft { id: Some(window) })
+}
+
 /// Switch to the next keyboard layout, what Mod+Shift+Space does.
 ///
 /// # Errors

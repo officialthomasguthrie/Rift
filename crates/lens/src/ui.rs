@@ -44,6 +44,7 @@ use crate::menu::{self, Menu, Results};
 use crate::notice::{self, Effect, Fitted, Notices, Notification, Outbox};
 use crate::nu;
 use crate::popup::{self, Popup};
+use crate::restore::{self, Restore};
 use crate::route::{self, Interpretation};
 use crate::status::{self, Status};
 use crate::system;
@@ -109,6 +110,12 @@ const REOPEN: Duration = Duration::from_millis(400);
 
 /// How long a network may take to come up after it was picked.
 const JOIN_WAIT: Duration = Duration::from_secs(45);
+
+/// How long after what is open changed the journal of it is written. A session being taken down
+/// closes its windows and stops the shell in the same breath, so a shell that is already gone writes
+/// no journal of an empty desktop over the one the next login brings back. It also holds the file
+/// still while a window is being dragged from one column to another.
+const JOURNAL_AFTER: Duration = Duration::from_secs(2);
 
 /// Where the dock's surface stands and how much of the screen it keeps, in the pixels the
 /// compositor places surfaces in.
@@ -184,6 +191,23 @@ struct Lens {
     /// most of what the compositor has to say while a window is being resized.
     seen: Vec<session::Seen>,
     spaces: Vec<session::Space>,
+    /// Counts the changes the journal is waiting to be written for, so only the last one writes it.
+    journal: u64,
+    /// Bringing the last session back, while it is going on.
+    restore: Option<Restore>,
+    /// What became of the session the last login left, which `lens --state` prints.
+    back: Back,
+}
+
+/// What became of the session the last login left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Back {
+    /// The owner has turned bringing it back off.
+    Off,
+    /// There was nothing to bring back, or this login has had its session back already.
+    Nothing,
+    /// It came back: this many windows, and this many the journal named that nothing here opens.
+    Windows(usize, usize),
 }
 
 /// Which of the bar's menus closed.
@@ -274,6 +298,10 @@ pub enum Message {
     Said(Result<String, String>),
     /// Horizon opened, closed or focused something.
     Windows(Open),
+    /// Write the session down, when nothing has changed since this write was asked for.
+    Journal(u64),
+    /// The patience for the window of this start of an app is over.
+    Restoring(u64),
     /// A click on a dock item: its app starts, or its window comes forward.
     Dock(String),
     /// A middle click on one: another window of that app.
@@ -706,6 +734,14 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
     let opening = Task::done(Message::OpenDock(dock.id, placed));
     let now = clock::now();
     let accent = appearance::Accent::read();
+    // the session the last login left, read before the first picture of what is open writes the
+    // journal over it
+    let restore = restore::begin(&apps);
+    let back = if restore.is_some() || session::restores() {
+        Back::Nothing
+    } else {
+        Back::Off
+    };
     let state = Lens {
         theme: chosen,
         accent,
@@ -740,6 +776,9 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
         brightness: Latest::new(|level| report(status::set_brightness(level))),
         seen: Vec::new(),
         spaces: Vec::new(),
+        journal: 0,
+        restore,
+        back,
     };
     remember(&state);
     (state, opening)
@@ -929,6 +968,8 @@ fn update(state: &mut Lens, message: Message) -> Task<Message> {
         Message::Heard(result) => spoken(state, result),
         Message::Said(result) => said(state, result),
         Message::Windows(_)
+        | Message::Journal(_)
+        | Message::Restoring(_)
         | Message::NextLayout
         | Message::Dock(_)
         | Message::DockNew(_)
@@ -1049,10 +1090,26 @@ fn measured(state: &mut Lens, id: window::Id, width: f32) {
 fn horizon_said(state: &mut Lens, message: Message) -> Task<Message> {
     match message {
         Message::Windows(open) => {
-            write_down(state, &open);
+            let writing = write_down(state, &open);
+            let coming = coming_back(state, &open);
             state.dock.changed(&state.apps, open);
             state.layout = layout_name(state);
+            Task::batch([writing, coming])
+        }
+        Message::Journal(number) => {
+            if number == state.journal {
+                let windows =
+                    session::of(&state.seen, &state.spaces, &state.apps, session::started_by);
+                report(session::keep(&windows).map(|_| ()));
+            }
             Task::none()
+        }
+        Message::Restoring(turn) => {
+            let Some(restore) = state.restore.as_mut() else {
+                return Task::none();
+            };
+            let next = restore::waited(restore, turn, &state.apps);
+            went_on(state, next)
         }
         Message::NextLayout => {
             report(horizon::next_layout());
@@ -1078,7 +1135,17 @@ fn horizon_said(state: &mut Lens, message: Message) -> Task<Message> {
 /// changes and nowhere else, since a drive is unplugged without warning and a journal written at
 /// the end of a session would be a journal of nothing. A window growing or being drawn again says
 /// nothing the journal keeps, so nothing is looked up and nothing is written for it.
-fn write_down(state: &mut Lens, open: &Open) {
+///
+/// A picture with no workspace in it at all is a compositor that is not there rather than a desktop
+/// with nothing open, so it writes nothing: a session ending would otherwise write down a journal of
+/// no windows over the one the next login has to bring back. The write itself comes a moment after
+/// the change for the same reason. A session being taken down closes its windows and stops the shell
+/// in the same breath, and a shell that is stopped writes nothing, so what the drive keeps is what
+/// was open while the session was alive.
+fn write_down(state: &mut Lens, open: &Open) -> Task<Message> {
+    if open.all.is_empty() {
+        return Task::none();
+    }
     let seen: Vec<session::Seen> = open
         .windows
         .iter()
@@ -1092,12 +1159,62 @@ fn write_down(state: &mut Lens, open: &Open) {
         })
         .collect();
     if seen == state.seen && open.all == state.spaces {
-        return;
+        return Task::none();
     }
     state.seen = seen;
     state.spaces.clone_from(&open.all);
-    let windows = session::of(&state.seen, &state.spaces, &state.apps, session::started_by);
-    report(session::keep(&windows).map(|_| ()));
+    state.journal += 1;
+    later(JOURNAL_AFTER, Message::Journal(state.journal))
+}
+
+/// Bringing the last session back, a window at a time: the window the last app opened is put where
+/// it stood and the next app is started. Nothing happens here at a login where the session does not
+/// come back, which is every login but the first after a boot.
+fn coming_back(state: &mut Lens, open: &Open) -> Task<Message> {
+    // a picture with no workspace in it is a compositor that has gone away, and there is nothing to
+    // open an app on
+    if open.all.is_empty() {
+        return Task::none();
+    }
+    let Some(restore) = state.restore.as_mut() else {
+        return Task::none();
+    };
+    let next = restore::saw(restore, open, &state.apps);
+    went_on(state, next)
+}
+
+/// What the shell does after a step of bringing the session back: wait for the window, wait for the
+/// patience of the app just started to run out, or put up what nothing here could open again.
+fn went_on(state: &mut Lens, next: restore::Next) -> Task<Message> {
+    match next {
+        restore::Next::Wait => Task::none(),
+        restore::Next::Started(turn) => later(restore::PATIENCE, Message::Restoring(turn)),
+        restore::Next::Done(passed) => {
+            let back = state.restore.as_ref().map_or(0, restore::Restore::back);
+            state.back = Back::Windows(back, passed.len());
+            state.restore = None;
+            eprintln!(
+                "lens: the session came back: {back} windows, {} passed over",
+                passed.len()
+            );
+            if passed.is_empty() {
+                return Task::none();
+            }
+            let body: Vec<String> = passed.iter().map(session::Passed::line).collect();
+            Task::done(Message::Notified(Notification {
+                id: u32::MAX - 1,
+                app: "Lens".to_string(),
+                icon: None,
+                entry: None,
+                summary: "Some windows did not come back".to_string(),
+                body: body.join("\n"),
+                actions: Vec::new(),
+                default: false,
+                urgency: notice::Urgency::Normal,
+                transient: false,
+            }))
+        }
+    }
 }
 
 /// What the clock and the status sources said: the bar and the menus draw from it.
@@ -2348,6 +2465,17 @@ fn remember(state: &Lens) {
             .as_deref()
             .map_or_else(|| "none".to_string(), |said| one_line(said, SAID_SHOWN)),
     );
+    // how the session came back: how many windows, and how many the journal named that nothing here
+    // could open again. `off` is the owner's answer on the Owner page, `none` a login that had
+    // nothing to bring back, and the numbers grow while it is going on
+    let (restored, passed) = match (state.restore.as_ref(), state.back) {
+        (Some(going), _) => (going.back().to_string(), going.passed().to_string()),
+        (None, Back::Windows(back, over)) => (back.to_string(), over.to_string()),
+        (None, Back::Nothing) => ("none".to_string(), "none".to_string()),
+        (None, Back::Off) => ("off".to_string(), "none".to_string()),
+    };
+    line("restored", &restored);
+    line("passed", &passed);
     if let Some(menu) = &state.dock.menu {
         line("item", &format!("{} {}", menu.key, menu.rows.len()));
     }

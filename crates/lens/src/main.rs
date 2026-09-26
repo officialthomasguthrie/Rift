@@ -49,6 +49,8 @@ mod notice;
 mod nu;
 #[cfg(target_os = "linux")]
 mod popup;
+#[cfg(target_os = "linux")]
+mod restore;
 mod route;
 #[cfg(target_os = "linux")]
 mod status;
