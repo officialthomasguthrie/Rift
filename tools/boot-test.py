@@ -499,7 +499,8 @@ STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "
               "dock", "workspaces", "item", "brightness", "wired", "wifi", "bluetooth", "system", "dialog",
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
               "recording", "screen-reader", "keyboard", "layout", "dock-position", "dock-extend",
-              "dock-icons", "dock-hide", "dock-hidden", "dock-places", "places", "listening", "said")
+              "dock-icons", "dock-hide", "dock-hidden", "dock-places", "places", "listening", "said",
+              "restored", "passed")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -521,6 +522,12 @@ SESSION_JOURNAL = "~/.local/state/rift/session"
 SESSION_KEYS = ("app", "window", "title", "workspace", "screen", "column", "tile", "floating")
 SESSION_APP = "Calculator"
 SESSION_APP_ID = "calculator"
+# P2.8 part 2, the session coming back: the note in the runtime directory that says this login has
+# had its session back, an entry no machine has, and the lines of the journal to compare before and
+# after, which are the ones restoring has to put back
+SESSION_NOTE = "$XDG_RUNTIME_DIR/lens-restored"
+SESSION_STRANGER = "com.example.NotHere"
+SESSION_PLACE = ("app", "workspace", "column", "tile")
 # the console, from nix/modules/horizon.nix: ghostty's background, the height the window rule gives
 # the window in logical pixels, and the app id the bind shows and hides
 CONSOLE = (4, 4, 6)
@@ -7462,6 +7469,139 @@ def main():
             if not wait_for(60, lambda: not [win for win in app_windows(MENU_APP_ID, "the terminals left")
                                              if win[0] == session_terminal]):
                 fail("the terminal the compositor started did not close")
+
+            # 5u. the session coming back, which is P2.8 part 2 and the other half of teleport. the
+            # journal of what is open is read at the first login after a boot and those apps are
+            # started again, each on the workspace it was on and in the column it stood in. the
+            # compositor has no action that opens an app in a column, and needs none: a new window
+            # opens as a column of its own beside the one with the keyboard, so starting the apps one
+            # at a time, workspace by workspace and left to right, puts the columns back. three
+            # windows over two workspaces say it: two terminals side by side on the first, and an app
+            # of its own on the second
+            session_ours = []
+            for number in (1, 2):
+                already = {win[0] for win in app_windows(MENU_APP_ID, "the terminals open now")}
+                run("horizon msg action spawn -- ghostty", f"terminal {number} of the session to come back")
+                found = wait_for(180, lambda: next(
+                    (win[0] for win in app_windows(MENU_APP_ID, f"terminal {number}")
+                     if win[0] not in already), None))
+                if not found:
+                    _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                    fail(f"the compositor started no terminal {number}: "
+                         f"{without_console(output).strip()[-800:]!r}")
+                session_ours.append(found)
+            open_from_menu(SESSION_APP, SESSION_APP_ID)
+            session_calc = app_windows(SESSION_APP_ID, f"{SESSION_APP}'s window")
+            if not session_calc:
+                fail(f"{SESSION_APP} opened no window of its own")
+            session_ours.append(session_calc[0][0])
+            # and onto the second workspace, which is the empty one the compositor keeps at the end
+            run(f"horizon msg action move-window-to-workspace --window-id {session_calc[0][0]} 2",
+                f"{SESSION_APP} onto the second workspace")
+
+            def session_ours_now(what):
+                """The windows of the two terminals and the app, however they were opened."""
+                return [win for win in open_windows(what)
+                        if MENU_APP_ID in win[1].lower() or SESSION_APP_ID in win[1].lower()]
+
+            def session_restored(said):
+                """How many windows the shell says came back, or None while it has said no number."""
+                number = said.get("restored") or ""
+                return int(number) if number.isdigit() else None
+
+            def session_places(windows):
+                """What the journal says about where each window stood, which is what coming back
+                has to put back: the entry, the workspace, the column and the place in it."""
+                return sorted(tuple(win.get(key, "") for key in SESSION_PLACE) for win in windows)
+
+            session_before = session_until(
+                120,
+                lambda windows: len(windows) == 3 and all(win.get("column") for win in windows)
+                and {win.get("workspace") for win in windows} == {"1", "2"},
+                "the journal with the three windows of the session in it")
+            if len(session_before) != 3:
+                fail(f"the journal names {[win.get('window') for win in session_before]}, expected the "
+                     "two terminals and the app")
+            session_wanted = session_places(session_before)
+            if len({place[1] for place in session_wanted}) != 2:
+                fail(f"the journal puts all three windows on one workspace: {session_wanted}")
+            ok(f"the journal of the session to come back: {session_wanted}")
+
+            # the shell is stopped before the windows are closed, so the journal keeps them: a shell
+            # that is not running writes nothing, which is what keeps the session through a shutdown
+            run("systemctl --user stop lens", "the shell, stopped before the windows are closed")
+            for window in session_ours:
+                run(f"horizon msg action close-window --id {window}", f"closing window {window}")
+            if not wait_for(120, lambda: not [win for win in open_windows("the windows left")
+                                             if win[0] in session_ours]):
+                fail("the three windows of the session did not close")
+            session_kept = session_windows("the journal after the windows closed with the shell stopped")
+            if session_places(session_kept) != session_wanted:
+                fail(f"the journal says {session_places(session_kept)} after the windows closed with the "
+                     f"shell stopped, expected the {session_wanted} it said before")
+            # and one window of an app no machine has, to be passed over and said so
+            run(f"printf '\\napp {SESSION_STRANGER}\\nworkspace 1\\ncolumn 4\\ntile 1\\n' >> {SESSION_JOURNAL}",
+                "a window of an app this machine does not have, added to the journal")
+            # the note a login leaves once its session is back, which a boot clears
+            run(f"rm -f {SESSION_NOTE}", "the note that says this login has had its session back")
+            run("systemctl --user start lens", "the shell again, which is the login coming back")
+
+            session_state = wait_for(420, lambda: next(
+                (said for said in [bar_state("what the shell says about the session coming back")]
+                 if (session_restored(said) or 0) >= 3), None))
+            if not session_state or session_restored(session_state) != 3:
+                said = bar_state("what the shell says about the session once more")
+                _, log = run("journalctl --user -u lens -b -o cat -n 40 | cat", "the shell's log")
+                fail(f"lens --state says restored {said.get('restored')!r} and passed "
+                     f"{said.get('passed')!r}, expected three windows back: "
+                     f"{without_console(log).strip()[-1200:]!r}")
+            if session_state.get("passed") != "1":
+                fail(f"lens --state says passed {session_state.get('passed')!r}, expected the one window "
+                     f"of {SESSION_STRANGER}, which nothing here opens")
+
+            # and the journal of the session that came back says what the one it came from said
+            session_after = session_until(
+                120,
+                lambda windows: len(windows) == 3 and all(win.get("column") for win in windows),
+                "the journal of the session that came back")
+            if session_places(session_after) != session_wanted:
+                _, log = run("journalctl --user -u lens -b -o cat -n 40 | cat", "the shell's log")
+                fail(f"the session came back as {session_places(session_after)}, where it left "
+                     f"{session_wanted}: {without_console(log).strip()[-1200:]!r}")
+            session_back = session_ours_now("the windows of the session that came back")
+            if len(session_back) != 3:
+                fail(f"the compositor has {len(session_back)} windows after the session came back: "
+                     f"{session_back}")
+            ok(f"the session came back: {session_places(session_after)}, with the window of "
+               f"{SESSION_STRANGER} passed over")
+            shot(f"{stem}-session-back{extension}", "session-back")
+
+            # what a person reads about it, under the rows of `rift session`
+            status, output = run("rift session", "what rift session says about the next login")
+            session_said = without_console(output)
+            if status != 0 or "These come back at the next login." not in session_said:
+                fail(f"rift session exited with {status} and does not say the windows come back: "
+                     f"{session_said.strip()[-400:]!r}")
+            ok("rift session says these windows come back at the next login")
+
+            # a shell that starts again inside the same login brings nothing back a second time: the
+            # note is what says the session has already come back, and a crash is not a login
+            run("systemctl --user restart lens", "the shell started again inside the same login")
+            session_again = wait_for(120, lambda: next(
+                (said for said in [bar_state("what the shell says after starting again")]
+                 if said.get("restored")), None)) or {}
+            if session_again.get("restored") != "none":
+                fail(f"lens --state says restored {session_again.get('restored')!r} after the shell "
+                     "started again inside the same login, expected none")
+            session_twice = session_ours_now("the windows after the shell started again")
+            if len(session_twice) != 3:
+                fail(f"the shell brought the session back a second time: {len(session_twice)} windows "
+                     f"where three were open")
+            ok("a shell that starts again inside the same login brings nothing back")
+            for window, _, _ in session_twice:
+                run(f"horizon msg action close-window --id {window}", f"closing window {window} at the end")
+            if not wait_for(120, lambda: not session_ours_now("the windows left")):
+                fail("the windows of the session that came back did not close")
 
             # 5l. the photograph again, by its name, which the next boots of this drive keep. horizon
             # reads it while the gray stays up, then draws it without the shell starting again
