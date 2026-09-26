@@ -26,8 +26,9 @@ use crate::horizon::{Open, Win};
 
 /// How long one window is waited for before the next app is started. An app that draws nothing in
 /// that time is given up on: it may be one that keeps its own windows, like a browser, and the rest
-/// of the session should not wait on it.
-pub const PATIENCE: Duration = Duration::from_secs(60);
+/// of the session should not wait on it. Long enough for the slowest app in the image to draw on the
+/// slowest machine it runs on, since giving up early puts the windows after it in the wrong columns.
+pub const PATIENCE: Duration = Duration::from_secs(90);
 
 /// The note in the session's runtime directory that says this login has already had its session
 /// back. The runtime directory is made at login and gone at the end of it, so a boot clears it and
@@ -93,26 +94,28 @@ impl Restore {
     }
 }
 
-/// The session to bring back, or `None` when there is nothing to bring back: the owner turned it
-/// off, this login has had its session back already, the journal names no window, or nothing in it
-/// can be opened here. The note is left before the first app is started, so a shell that crashes
-/// halfway through does not start everything again.
+/// The session to bring back, or `None` when there is nothing to bring back: this login has had its
+/// session back already, the owner turned it off, the journal names no window, or nothing in it can
+/// be opened here. The note that says this login has had its session is left before any of that is
+/// decided, so it is the shell that starts first that brings a session back and no other.
 #[must_use]
 pub fn begin(apps: &[App]) -> Option<Restore> {
-    if !session::restores() {
-        return None;
-    }
     let note = note()?;
     if note.exists() {
+        return None;
+    }
+    // a shell that started again beside the windows of the session it is in would open every one of
+    // them a second time, so the note comes before the switch and before the journal is read at all
+    if let Err(why) = std::fs::write(&note, "") {
+        eprintln!("lens: the note that this login has had its session back: {why}");
+        return None;
+    }
+    if !session::restores() {
         return None;
     }
     let windows = session::kept()?;
     let (mut steps, passed) = session::to_open(&windows, apps);
     if steps.is_empty() && passed.is_empty() {
-        return None;
-    }
-    if let Err(why) = std::fs::write(&note, "") {
-        eprintln!("lens: the session came back once already, and: {why}");
         return None;
     }
     let first = steps.first().map_or(0, |step| step.workspace);
@@ -179,7 +182,9 @@ fn gave_up(restore: &mut Restore, waiting: &Waiting) {
         "lens: {} opened no window, so the rest of the session comes back without it",
         waiting.app.name
     );
-    restore.passed.push(Passed::Entry(waiting.step.app.clone()));
+    restore
+        .passed
+        .push(Passed::Silent(waiting.app.name.clone()));
 }
 
 /// Start the next app that can be started, and say how long to wait for its window. The screen goes
@@ -199,7 +204,7 @@ fn start(restore: &mut Restore, apps: &[App]) -> Next {
         }
         if let Err(why) = apps::launch(app, &[]) {
             eprintln!("lens: {} did not start: {why}", app.name);
-            restore.passed.push(Passed::Entry(step.app.clone()));
+            restore.passed.push(Passed::Silent(app.name.clone()));
             continue;
         }
         restore.turn += 1;

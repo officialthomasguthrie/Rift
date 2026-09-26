@@ -319,6 +319,8 @@ pub enum Passed {
     /// Nothing names it: it carried this app id and no entry here claims it. The drop-down terminal
     /// is one, since the compositor draws it and no entry starts it.
     Window(String),
+    /// The app by its name: it was started again and drew no window in the time it was given.
+    Silent(String),
 }
 
 impl Passed {
@@ -328,6 +330,7 @@ impl Passed {
         match self {
             Self::Entry(id) => format!("{id} is not installed here"),
             Self::Window(app_id) => format!("nothing here opens {app_id}"),
+            Self::Silent(name) => format!("{name} opened no window"),
         }
     }
 }
@@ -749,6 +752,10 @@ mod tests {
         );
         assert_eq!(passed[0].line(), "org.gnome.Loupe is not installed here");
         assert_eq!(passed[1].line(), "nothing here opens dev.rift.Console");
+        assert_eq!(
+            Passed::Silent("Firefox".to_string()).line(),
+            "Firefox opened no window"
+        );
         // and a journal of nothing asks for nothing
         assert_eq!(to_open(&[], &apps), (Vec::new(), Vec::new()));
     }
