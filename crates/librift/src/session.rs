@@ -7,6 +7,12 @@
 //! session` prints it, and the file lives under the owner's state directory, on persist, because
 //! it follows the drive and not the machine.
 //!
+//! At the first login after a boot the shell reads the journal back and opens those apps again,
+//! each on the workspace it was on and in the column it stood in, unless the owner has turned that
+//! off. That is the second half of teleport, and [`to_open`] is the whole of what it has to work
+//! out: which windows can be opened again here, in what order, and which ones this machine has
+//! nothing to open.
+//!
 //! An app id is not a desktop entry, so the one thing the compositor cannot say is what to start
 //! again. Every app on Rift starts in a scope of its own: [`crate::apps::start`] names it
 //! `app-rift-<entry>-<number>`, and Horizon names what a key starts `app-niri-<program>-<pid>`, so
@@ -26,6 +32,10 @@ use crate::apps::{App, owner};
 
 /// Where the journal of what was open lives, under home.
 pub const JOURNAL: &str = ".local/state/rift/session";
+
+/// Where the owner says whether the apps come back at the next login, under home. A drive that has
+/// never been asked brings them back: teleport is the reason the drive is the shape it is.
+pub const RESTORE: &str = ".config/rift/session-restore";
 
 /// What the name of a systemd scope ends in.
 const SCOPE: &str = ".scope";
@@ -284,6 +294,119 @@ pub fn keep(windows: &[Window]) -> Result<bool, String> {
     write_beside(&path, &write(windows))
 }
 
+/// One window to open again. The order these come in is the order the apps have to be started in,
+/// because a new window opens as a column of its own beside the one that has the keyboard, which is
+/// how the columns come back in the order they were in without a word about columns being said to
+/// the compositor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    /// The desktop entry to start, by its id.
+    pub app: String,
+    /// The workspace to start it on, counting from one. 0 when the journal named none.
+    pub workspace: u8,
+    /// Whether it stood in the column the window before it is in, rather than a column of its own.
+    pub stack: bool,
+    /// Whether it floated over the layout instead of standing in it.
+    pub floating: bool,
+}
+
+/// A window the journal names that this machine has nothing to open again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Passed {
+    /// The entry it came from is not installed here. A drive that has met another machine, or an
+    /// app the owner has since removed.
+    Entry(String),
+    /// Nothing names it: it carried this app id and no entry here claims it. The drop-down terminal
+    /// is one, since the compositor draws it and no entry starts it.
+    Window(String),
+}
+
+impl Passed {
+    /// One line for the owner, which is what the notification after a restore is made of.
+    #[must_use]
+    pub fn line(&self) -> String {
+        match self {
+            Self::Entry(id) => format!("{id} is not installed here"),
+            Self::Window(app_id) => format!("nothing here opens {app_id}"),
+        }
+    }
+}
+
+/// The apps to open again, in the order to open them, and the windows this machine has nothing to
+/// open. Workspaces come back in their own order, lowest first, and inside a workspace the columns
+/// come back from left to right, with a window that shared a column marked so it can be put back
+/// into it; a window that floated comes last on its workspace, since it takes no column and would
+/// push the ones after it along.
+#[must_use]
+pub fn to_open(windows: &[Window], apps: &[App]) -> (Vec<Step>, Vec<Passed>) {
+    let mut order: Vec<&Window> = windows.iter().collect();
+    // a workspace the journal said nothing about goes last, on whichever one the session starts on
+    order.sort_by_key(|win| {
+        (
+            if win.workspace == 0 {
+                u8::MAX
+            } else {
+                win.workspace
+            },
+            win.floating,
+            win.column.unwrap_or(usize::MAX),
+            win.tile.unwrap_or(usize::MAX),
+        )
+    });
+    let mut steps: Vec<Step> = Vec::new();
+    let mut passed = Vec::new();
+    let mut last: Option<&Window> = None;
+    for win in order {
+        let entry = if win.app.is_empty() {
+            owner(apps, &win.window).map(|app| app.id.clone())
+        } else {
+            apps.iter()
+                .find(|app| app.id == win.app)
+                .map(|app| app.id.clone())
+        };
+        let Some(app) = entry else {
+            if !win.app.is_empty() {
+                passed.push(Passed::Entry(win.app.clone()));
+            } else if !win.window.is_empty() {
+                passed.push(Passed::Window(win.window.clone()));
+            }
+            continue;
+        };
+        let stack = !win.floating
+            && win.column.is_some()
+            && last.is_some_and(|before| {
+                before.workspace == win.workspace && !before.floating && before.column == win.column
+            });
+        steps.push(Step {
+            app,
+            workspace: win.workspace,
+            stack,
+            floating: win.floating,
+        });
+        last = Some(win);
+    }
+    (steps, passed)
+}
+
+/// Whether the apps that were open come back at the next login. A drive nobody has asked brings
+/// them back.
+#[must_use]
+pub fn restores() -> bool {
+    home()
+        .and_then(|home| fs::read_to_string(home.join(RESTORE)).ok())
+        .is_none_or(|text| text.trim() != "off")
+}
+
+/// Keep the owner's answer about opening the apps again.
+///
+/// # Errors
+///
+/// A sentence when there is no home to keep it in, or the file cannot be written.
+pub fn keep_restores(on: bool) -> Result<(), String> {
+    let home = home().ok_or("There is no home folder to keep the session setting in.")?;
+    write_beside(&home.join(RESTORE), if on { "on\n" } else { "off\n" }).map(|_| ())
+}
+
 /// Lock the session the owner is using. Asked from a process outside any session, like a user unit,
 /// logind takes the owner's graphical session.
 ///
@@ -531,6 +654,103 @@ mod tests {
         assert_eq!(windows[1].app, "com.mitchellh.ghostty");
         assert!(windows[1].floating);
         assert_eq!(windows[1].column, None);
+    }
+
+    #[test]
+    fn the_apps_come_back_workspace_by_workspace_and_column_by_column() {
+        let apps = [
+            app("com.mitchellh.ghostty", "ghostty"),
+            app("org.gnome.Nautilus", "nautilus"),
+            app("org.gnome.Calculator", "gnome-calculator"),
+        ];
+        let win = |entry: &str, workspace, column, tile| Window {
+            app: entry.to_string(),
+            workspace,
+            column: Some(column),
+            tile: Some(tile),
+            ..Window::default()
+        };
+        // out of order on purpose: the second workspace before the first, and the third column
+        // before the first two, one of which held two windows
+        let windows = [
+            win("org.gnome.Calculator", 2, 1, 1),
+            win("com.mitchellh.ghostty", 1, 2, 1),
+            win("org.gnome.Nautilus", 1, 1, 1),
+            win("com.mitchellh.ghostty", 1, 1, 2),
+            Window {
+                app: "org.gnome.Nautilus".to_string(),
+                workspace: 1,
+                floating: true,
+                ..Window::default()
+            },
+        ];
+        let (steps, passed) = to_open(&windows, &apps);
+        assert!(passed.is_empty());
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.app.as_str(), step.workspace, step.stack, step.floating))
+                .collect::<Vec<_>>(),
+            [
+                // the first workspace, left to right, the second window of the first column put
+                // back into it, and the one that floated last of all
+                ("org.gnome.Nautilus", 1, false, false),
+                ("com.mitchellh.ghostty", 1, true, false),
+                ("com.mitchellh.ghostty", 1, false, false),
+                ("org.gnome.Nautilus", 1, false, true),
+                ("org.gnome.Calculator", 2, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_this_machine_cannot_open_is_passed_over_and_said_so() {
+        let apps = [app("com.mitchellh.ghostty", "ghostty")];
+        let windows = [
+            Window {
+                app: "org.gnome.Loupe".to_string(),
+                window: "org.gnome.Loupe".to_string(),
+                workspace: 1,
+                column: Some(1),
+                tile: Some(1),
+                ..Window::default()
+            },
+            // nothing named it when it was written down, and nothing here names it either
+            Window {
+                window: "dev.rift.Console".to_string(),
+                workspace: 1,
+                column: Some(2),
+                tile: Some(1),
+                ..Window::default()
+            },
+            // and one whose entry was not known there but is an app here
+            Window {
+                window: "ghostty".to_string(),
+                workspace: 1,
+                column: Some(3),
+                tile: Some(1),
+                ..Window::default()
+            },
+        ];
+        let (steps, passed) = to_open(&windows, &apps);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.app.as_str())
+                .collect::<Vec<_>>(),
+            ["com.mitchellh.ghostty"]
+        );
+        assert_eq!(
+            passed,
+            [
+                Passed::Entry("org.gnome.Loupe".to_string()),
+                Passed::Window("dev.rift.Console".to_string())
+            ]
+        );
+        assert_eq!(passed[0].line(), "org.gnome.Loupe is not installed here");
+        assert_eq!(passed[1].line(), "nothing here opens dev.rift.Console");
+        // and a journal of nothing asks for nothing
+        assert_eq!(to_open(&[], &apps), (Vec::new(), Vec::new()));
     }
 
     #[test]
